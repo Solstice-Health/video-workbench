@@ -1,0 +1,118 @@
+# Model slots, named by function (spec D27). Vendor models appear only in this file.
+# Swap a model by editing a slot. When the gateway serves a fallback it raises SLOT-FALLBACK.
+#
+# hosts:     codex       = Codex CLI in a Docker container (policy row host.codex); the job lead and the
+#                          GPT workers (planner_b, composer, critic) run here
+#            claude_sdk  = Claude Agent SDK session (tool-restricted, in-process MCP toolkit)
+#            tool_loop   = the harness's own function-calling loop (OpenAI Responses or Gemini)
+
+main:
+  purpose: Job lead. Plans, steers the swarm, sole writer of committed canvases.
+  host: codex
+  model: gpt-6-astra
+  effort: max
+  context_window: 1050000
+  max_turns: 400
+  fallbacks:
+    - {host: tool_loop, provider: openai, model: gpt-6-astra, effort: max}
+    - {host: claude_sdk, model: claude-fable-5-1, effort: max}
+
+worker.video:
+  purpose: Video-native worker (scene-miner). Reads the source natively and proposes moments.
+  host: tool_loop
+  provider: google
+  model: gemini-3.8-flash
+  thinking_level: high
+  media_resolution: high
+  fallbacks:
+    - {host: tool_loop, provider: google, model: gemini-3.1-pro-preview}
+
+worker.reason:
+  purpose: Deep-reasoning hand-offs (planner B, code-shaped tasks).
+  host: tool_loop
+  provider: openai
+  model: gpt-6.1-sol
+  effort: max
+  fallbacks:
+    - {host: tool_loop, provider: openai, model: gpt-6-sol, effort: high}
+
+critic:
+  purpose: Inner critic. Another family than the author (spec D09). Steers and ranks, never certifies.
+  host: tool_loop
+  provider: openai
+  model: gpt-6.1-sol
+  effort: max
+
+web.research:
+  purpose: Read-only web scout called explicitly through the toolkit; no editor tools or request history.
+  provider: openrouter
+  model: openai/gpt-5.4-mini
+  max_output_tokens: 4000
+  timeout_s: 180
+  search_engine: exa
+  fetch_engine: exa
+
+watch:
+  purpose: Typed video questions about an interval, crop or frame rate.
+  provider: google
+  model: gemini-3.8-flash
+  media_resolution: high
+
+reading.video:
+  purpose: Whole-video reading, family 1 (sections, shots, moments, hazards).
+  provider: google
+  model: gemini-3.8-flash
+  media_resolution: high
+
+reading.text:
+  purpose: Whole-video reading, family 2 (transcript + contact sheets + OCR).
+  provider: openai
+  model: gpt-6.1-sol
+  effort: high
+
+img.sunburst:
+  purpose: Image model. Elements with real alpha, extraction of an element, masked inpaint, outpaint, reference-guided.
+  provider: openai
+  model: gpt-image-2.5-sunburst
+  quality: high
+  fallbacks:
+    - {provider: openai, model: gpt-image-2.5-flare, quality: high}
+
+vid.omni:
+  purpose: Video model. Text, first/last frame, reference, edit and extend clips (3-10 s, 24 fps, no alpha; keyed by the harness).
+  provider: google
+  model: gemini-omni-1.1-flash
+  resolution: 1080p
+  timeout_s: 300            # per attempt; clips normally return in 25-60 s
+
+asr.reader1:
+  engine: mlx-whisper
+  model: mlx-community/whisper-large-v3-turbo
+
+asr.reader2:
+  purpose: Second transcript reader. Audio only, so it cannot copy on-screen text.
+  provider: google
+  model: gemini-3.8-flash
+
+ocr.reader1:
+  engine: apple-vision
+  level: accurate
+  language_correction: false   # a corrector reads a misspelling as the intended word
+
+ocr.reader2:
+  engine: rapidocr
+
+ocr.reader3:
+  purpose: Third text reader for lines the two OCR engines disagree on. A vision model reads native-resolution crops.
+  provider: google
+  model: gemini-3.8-flash
+  media_resolution: high
+  thinking_level: low
+  fallbacks:
+    - {provider: google, model: gemini-3.1-pro-preview}
+
+vision:
+  engine: apple-vision           # faces, humans, attention saliency
+
+shots:
+  engine: pyscenedetect

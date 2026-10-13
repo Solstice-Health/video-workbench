@@ -1,0 +1,66 @@
+# The policy dial (spec D04): one mode per capability.
+#   allow  - run it
+#   flag   - run it and record a flag
+#   ask    - raise a human.ask card; park that call, never the request
+#   block  - refuse
+#
+# The spec starts general because agents run inside a microVM. This build runs on a local
+# machine with no microVM, so capabilities that need one start at "block". Each row tightens
+# or loosens with a one-line edit.
+
+mode: local   # local | microvm
+
+capabilities:
+  # agents act only through typed toolkit calls in local mode
+  shell.exec: block                 # raw bash for agents (needs the microVM)
+  code.run: block                   # agent-written scripts: qc.script, generator.register
+  fs.write_outside_workspace: block
+  host.codex: allow                 # Codex workers, each in its own Docker container (the agent plane); the
+                                    # container mounts only work/ and reaches keys and tools through the gateways
+
+  # model and media work through the gateway
+  model.call: allow
+  watch: allow
+  index.build: allow
+  render: allow
+  canvas.commit: allow              # role check still applies: job lead only
+  human.ask: allow
+
+  # asset lab
+  asset.recover.pixels: allow       # rungs 0-1 (original and fused pixels)
+  asset.recover.generative: allow   # rungs 3-5 (image-model split, tracing, keyed motion)
+  gen.image: allow                  # sunburst: create, extract, inpaint, outpaint (flags follow the asset)
+  gen.video: allow                  # Omni clips and keyed motion (flags follow the asset)
+  sam3.on_marks: ask
+
+  # read-only web scouts; remote search/fetch run through the host gateway
+  web.search: allow
+  web.fetch: allow
+  web.research: allow               # combined search/fetch also requires both rows above to allow
+  asset.fetch: allow                # into quarantine/ only
+
+roles:
+  # Which tools each role may call. "*" means every tool not listed under deny.
+  job_lead:
+    allow: ["*"]
+    deny: []
+  scene_miner:      # Gemini, watches the source natively
+    allow: [index_overview, index_query, index_search, index_transcript, index_shots,
+            media_frame, media_contact_sheet, watch_ask, focus_find, memory_note,
+            file_list, file_read, file_grep, file_write]
+  planner_b:        # GPT-6.1-Sol, an independent plan from another family
+    allow: [index_overview, index_query, index_search, index_transcript, index_shots,
+            web_search, web_fetch, web_research,
+            media_frame, media_contact_sheet, clip_candidates, clip_refine, clip_validate, focus_find, memory_note,
+            file_list, file_read, file_grep, file_write]
+  composer:         # GPT-6.1-Sol (Codex in Docker): drafts a composition; the job lead commits
+    allow: [index_overview, index_query, index_search, index_transcript, index_shots,
+            web_search, web_fetch, web_research,
+            media_frame, media_contact_sheet, watch_ask, focus_find, reframe_solve, asset_marks, asset_view, asset_trace, chart_read, video_matte,
+            sunburst_create, sunburst_extract, sunburst_inpaint, sunburst_outpaint, omni_video,
+            layout_facts, canvas_schema, canvas_new, canvas_check, canvas_preview, canvas_snapshot, canvas_query, shape_kit, copy_add, copy_list,
+            file_list, file_read, file_grep, file_write, file_edit, memory_note]
+  critic:           # GPT-6.1-Sol, another family; checks renders, never certifies
+    allow: [index_overview, index_transcript, index_shots, media_frame, media_contact_sheet,
+            canvas_get, canvas_check, canvas_list, canvas_query, qc_run, qc_peek, render_info, flags_list, memory_note,
+            asset_view, chart_read, output_compare, file_list, file_read, file_grep]

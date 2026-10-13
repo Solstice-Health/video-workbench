@@ -1,0 +1,42 @@
+{
+  "name": "vwb-remotion-generator",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Video Workbench generator kind 'remotion': renders alpha overlay plates (titles, captions, end cards).",
+  "type": "module",
+  "scripts": {
+    "setup-fonts": "node scripts/copy-fonts.mjs",
+    "studio": "remotion studio src/index.ts",
+    "render-jobs": "node render.mjs"
+  },
+  "dependencies": {
+    "@fontsource/arimo": "5.3.0",
+    "@fontsource/barlow": "5.3.0",
+    "@fontsource/dm-sans": "5.3.0",
+    "@fontsource/ibm-plex-sans": "5.3.0",
+    "@fontsource/inter": "5.3.0",
+    "@fontsource/lato": "5.3.0",
+    "@fontsource/merriweather": "5.3.0",
+    "@fontsource/montserrat": "5.3.0",
+    "@fontsource/noto-sans": "5.3.0",
+    "@fontsource/open-sans": "5.3.0",
+    "@fontsource/playfair-display": "5.3.0",
+    "@fontsource/poppins": "5.3.0",
+    "@fontsource/roboto": "5.3.0",
+    "@fontsource/roboto-condensed": "5.3.0",
+    "@fontsource/source-sans-3": "5.3.0",
+    "@fontsource/source-serif-4": "5.3.0",
+    "@remotion/bundler": "4.0.534",
+    "@remotion/cli": "4.0.534",
+    "@remotion/fonts": "4.0.534",
+    "@remotion/layout-utils": "^4.0.534",
+    "@remotion/renderer": "4.0.534",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "remotion": "4.0.534"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,306 @@
+{
+ "v": 3,
+ "layout": "files",
+ "createdOnFiles": {
+  "v": 1,
+  "at": "2026-10-07T16:52:41Z"
+ },
+ "title": "Eeva",
+ "namespace": "Eeva",
+ "libraries": [
+  {
+   "name": "react",
+   "version": "18"
+  },
+  {
+   "name": "react-dom",
+   "version": "18"
+  }
+ ],
+ "sections": {},
+ "groups": [
+  "Logos",
+  "Icons"
+ ],
+ "assetGroups": {
+  "Logos": {
+   "name": "Logos",
+   "tile": "l",
+   "order": [
+    "solstice-mark.svg",
+    "solstice-mark-ember.svg"
+   ],
+   "files": {
+    "solstice-mark.svg": {
+     "name": "solstice-mark.svg",
+     "blob": "56d2fb9d833723ff2a36ff6c3d723f80",
+     "size": 3397,
+     "type": "image/svg+xml"
+    },
+    "solstice-mark-ember.svg": {
+     "name": "solstice-mark-ember.svg",
+     "blob": "90055d381b4de75c9ac6fd9cbe9b29d9",
+     "size": 3397,
+     "type": "image/svg+xml"
+    }
+   }
+  },
+  "Icons": {
+   "name": "Icons",
+   "tile": "xs",
+   "order": [
+    "arrow-left.svg",
+    "x.svg",
+    "check.svg",
+    "chevron-down.svg",
+    "chevron-right.svg",
+    "chevron-left.svg",
+    "panel-right-close.svg",
+    "plus.svg",
+    "minus.svg",
+    "arrow-up.svg",
+    "upload.svg",
+    "file.svg",
+    "file-text.svg",
+    "link.svg",
+    "search.svg",
+    "pen.svg",
+    "info.svg",
+    "circle-alert.svg",
+    "triangle-alert.svg",
+    "square.svg",
+    "refresh.svg",
+    "folder.svg",
+    "calendar.svg",
+    "library.svg",
+    "sparkles.svg",
+    "mail.svg",
+    "mic.svg",
+    "loader.svg",
+    "trash.svg",
+    "bold.svg",
+    "italic.svg",
+    "list.svg",
+    "list-ordered.svg",
+    "table.svg"
+   ],
+   "files": {
+    "arrow-left.svg": {
+     "name": "arrow-left.svg",
+     "blob": "16fd630e06473988a1cb919c598922e3",
+     "size": 240,
+     "type": "image/svg+xml"
+    },
+    "x.svg": {
+     "name": "x.svg",
+     "blob": "7ac7bfcc76474ad7981998edca549720",
+     "size": 238,
+     "type": "image/svg+xml"
+    },
+    "check.svg": {
+     "name": "check.svg",
+     "blob": "700189d663fe7987968d13bc12a1bd02",
+     "size": 215,
+     "type": "image/svg+xml"
+    },
+    "chevron-down.svg": {
+     "name": "chevron-down.svg",
+     "blob": "67040f1e8c8512f89b78c60179d31ca7",
+     "size": 212,
+     "type": "image/svg+xml"
+    },
+    "chevron-right.svg": {
+     "name": "chevron-right.svg",
+     "blob": "0984d196481e3b629c61b50e7bb16c4b",
+     "size": 213,
+     "type": "image/svg+xml"
+    },
+    "chevron-left.svg": {
+     "name": "chevron-left.svg",
+     "blob": "bf01120d159263d0f3eddf850cc0dda1",
+     "size": 214,
+     "type": "image/svg+xml"
+    },
+    "panel-right-close.svg": {
+     "name": "panel-right-close.svg",
+     "blob": "5de81831b22f244807285c007f493e0c",
+     "size": 293,
+     "type": "image/svg+xml"
+    },
+    "plus.svg": {
+     "name": "plus.svg",
+     "blob": "1818563a2df8d665f74d23771a927305",
+     "size": 234,
+     "type": "image/svg+xml"
+    },
+    "minus.svg": {
+     "name": "minus.svg",
+     "blob": "c57c7c9ad1abdf088efb717f425a793c",
+     "size": 208,
+     "type": "image/svg+xml"
+    },
+    "arrow-up.svg": {
+     "name": "arrow-up.svg",
+     "blob": "dd1b127b388173da3a7db1b8231206f6",
+     "size": 239,
+     "type": "image/svg+xml"
+    },
+    "upload.svg": {
+     "name": "upload.svg",
+     "blob": "a6f438639280874f87d115728b814b89",
+     "size": 329,
+     "type": "image/svg+xml"
+    },
+    "file.svg": {
+     "name": "file.svg",
+     "blob": "801778f38608278bc5a6b1717b7a7f6f",
+     "size": 351,
+     "type": "image/svg+xml"
+    },
+    "file-text.svg": {
+     "name": "file-text.svg",
+     "blob": "993790e6c605591f93042999de6cf130",
+     "size": 376,
+     "type": "image/svg+xml"
+    },
+    "link.svg": {
+     "name": "link.svg",
+     "blob": "386d10ac9dc4952fe66c8efb4a119dde",
+     "size": 337,
+     "type": "image/svg+xml"
+    },
+    "search.svg": {
+     "name": "search.svg",
+     "blob": "eeb6ad577f6caa0370af2e95bc63ad97",
+     "size": 253,
+     "type": "image/svg+xml"
+    },
+    "pen.svg": {
+     "name": "pen.svg",
+     "blob": "a5b074da9a514d5da1fb323ddfc8bc8f",
+     "size": 355,
+     "type": "image/svg+xml"
+    },
+    "info.svg": {
+     "name": "info.svg",
+     "blob": "41465a68e079e239181408ef259bfcdf",
+     "size": 276,
+     "type": "image/svg+xml"
+    },
+    "circle-alert.svg": {
+     "name": "circle-alert.svg",
+     "blob": "3d04afd40567f7f8cf03576cc321fe64",
+     "size": 314,
+     "type": "image/svg+xml"
+    },
+    "triangle-alert.svg": {
+     "name": "triangle-alert.svg",
+     "blob": "0fb2e819063c5b9a5890c3899a9ae4fb",
+     "size": 325,
+     "type": "image/svg+xml"
+    },
+    "square.svg": {
+     "name": "square.svg",
+     "blob": "3b10d56f15886594ab479c6712796977",
+     "size": 237,
+     "type": "image/svg+xml"
+    },
+    "refresh.svg": {
+     "name": "refresh.svg",
+     "blob": "11eeccfcf597ab7148def068ff38f5f2",
+     "size": 374,
+     "type": "image/svg+xml"
+    },
+    "folder.svg": {
+     "name": "folder.svg",
+     "blob": "9edec4e99bf9d70c71442a7f53fcc3a2",
+     "size": 318,
+     "type": "image/svg+xml"
+    },
+    "calendar.svg": {
+     "name": "calendar.svg",
+     "blob": "32d8d41cad1b21b72796eb74f921866e",
+     "size": 312,
+     "type": "image/svg+xml"
+    },
+    "library.svg": {
+     "name": "library.svg",
+     "blob": "7fbdd04eed361e79c903df350b6644a9",
+     "size": 286,
+     "type": "image/svg+xml"
+    },
+    "sparkles.svg": {
+     "name": "sparkles.svg",
+     "blob": "614fda2a4d533a3c7eaf9f9288a6c13f",
+     "size": 552,
+     "type": "image/svg+xml"
+    },
+    "mail.svg": {
+     "name": "mail.svg",
+     "blob": "5779fb2feecc0ce27cab417f786c8d75",
+     "size": 296,
+     "type": "image/svg+xml"
+    },
+    "mic.svg": {
+     "name": "mic.svg",
+     "blob": "d7017c2513daefbe29fa146a43427922",
+     "size": 341,
+     "type": "image/svg+xml"
+    },
+    "loader.svg": {
+     "name": "loader.svg",
+     "blob": "8576aa6d6cd52597acf64fce95570c52",
+     "size": 227,
+     "type": "image/svg+xml"
+    },
+    "trash.svg": {
+     "name": "trash.svg",
+     "blob": "288e908148db7826a5e2e365534652f2",
+     "size": 404,
+     "type": "image/svg+xml"
+    },
+    "bold.svg": {
+     "name": "bold.svg",
+     "blob": "66b8cd6933af4ee01b090f4aebd54d26",
+     "size": 269,
+     "type": "image/svg+xml"
+    },
+    "italic.svg": {
+     "name": "italic.svg",
+     "blob": "6b43812d1a99cf6a8014cfda857f84e0",
+     "size": 312,
+     "type": "image/svg+xml"
+    },
+    "list.svg": {
+     "name": "list.svg",
+     "blob": "f6d4a822acfbd50ed1ffefc93d4abe6d",
+     "size": 448,
+     "type": "image/svg+xml"
+    },
+    "list-ordered.svg": {
+     "name": "list-ordered.svg",
+     "blob": "83f116928752705259cd3eab8e3b4905",
+     "size": 414,
+     "type": "image/svg+xml"
+    },
+    "table.svg": {
+     "name": "table.svg",
+     "blob": "b6b45d902d7b22766e1543d58958c447",
+     "size": 314,
+     "type": "image/svg+xml"
+    }
+   }
+  }
+ },
+ "blobs": {},
+ "docs": {
+  "readme": "project/README.md",
+  "sections": []
+ },
+ "lastChange": {
+  "by": "Ercan Gursoy",
+  "at": "2026-10-07T16:59:31Z",
+  "via": "GitHub \u00b7 Solstice-Health/Solstice-Frontend@25c18f2d7",
+  "note": "Components: 27 live cards built from design-system/, previews from the Storybook stories."
+ }
+}

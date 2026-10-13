@@ -1,0 +1,24 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# secrets: keys live in a .env outside the repo (see .env.example)
+.env
+.env.*
+!.env.example
+
+# request workspaces and caches (large, regenerable)
+runs/
+.cache/
+
+# node
+generators/remotion/node_modules/
+generators/remotion/out/
+generators/remotion/.remotion/
+
+# os
+.DS_Store

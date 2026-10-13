@@ -1,0 +1,15 @@
+# Levers (spec D04, D31): expensive options set to off, shadow or serve.
+# Default is serve. Shadow scores a result and never delivers it.
+
+levers:
+  index.second_reading:      {mode: serve}   # gpt-6.1-sol reading next to the Gemini reading
+  index.ocr_reader2:         {mode: serve}   # RapidOCR as the second OCR reader
+  index.asr_reader2:         {mode: serve}   # Gemini transcript as the second ASR reader
+  clip.planner_families:     {mode: serve, k: 3}      # job lead + scene-miner + planner B
+  clip.candidate_pool:       {mode: serve, k: 48}     # candidates scored before the funnel
+  reframe.sweeps:            {mode: serve, k: 12}     # framing sweeps per output
+  reframe.finalists:         {mode: serve, k: 4}      # alternatives kept for the critic
+  render.attest_resample:    {mode: serve, frames: 24} # verifier re-renders sampled frames
+  qc.output_asr_readback:    {mode: serve}   # transcribe each render and compare to the plan
+  qc.critic_every_render:    {mode: serve}
+  speculative_prerender:     {mode: off}     # lands with the bulk engine

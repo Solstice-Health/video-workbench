@@ -1,0 +1,7 @@
+@font-face {
+  font-family: 'Spectral';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url(fonts/spectral-300-0.ttf) format('truetype');
+}

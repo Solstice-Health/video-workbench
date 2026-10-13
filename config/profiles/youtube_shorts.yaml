@@ -1,0 +1,22 @@
+# Platform profile: YouTube Shorts. Third-party figures carry their source and date (spec qc.spec).
+id: youtube_shorts
+label: YouTube Shorts (9:16)
+width: 1080
+height: 1920
+fps: 30
+max_duration_s: 180            # YouTube allows Shorts up to 3 minutes
+recommended_duration_s: [15, 60]
+video: {codec: h264, profile: high, pix_fmt: yuv420p, crf: 17, preset: slow, gop_s: 2}
+audio: {codec: aac, bitrate: 256k, sample_rate: 48000, channels: 2}
+loudness: {integrated_lufs: -14.0, true_peak_dbtp: -1.0, tolerance_lu: 1.0}
+safe_zone:
+  # Third-party figures (judge spec S29, read 2026-10-08). Text, marks and CTAs stay inside.
+  top: 380
+  bottom: 380
+  left: 60
+  right: 120
+  source: third-party (judge spec S29), 2026-10
+legibility:
+  min_cap_height_px: 26        # start value (UNCALIBRATED): smallest cap height we call legible on 1920 px
+  min_fineprint_cap_px: 14     # footnotes and references: readable on a paused phone (UNCALIBRATED)
+  min_caption_px: 52

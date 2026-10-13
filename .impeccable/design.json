@@ -1,0 +1,175 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-12T17:54:39.646088+00:00",
+  "title": "Design System: Video Workbench",
+  "extensions": {
+    "shadows": [
+      {
+        "name": "elevation-edge",
+        "value": "0 0 0 1px rgba(29,28,26,0.06)",
+        "purpose": "Ink 6% ring. A white surface on the canvas."
+      },
+      {
+        "name": "elevation-composer",
+        "value": "0 0 0 1px rgba(29,28,26,0.06), 0 1px 2px rgba(29,28,26,0.04), 0 4px 12px rgba(29,28,26,0.05)",
+        "purpose": "Edge plus 0 4px 12px."
+      },
+      {
+        "name": "elevation-composer-focus",
+        "value": "0 1px 2px rgba(29,28,26,0.05), 0 8px 24px rgba(29,28,26,0.10)",
+        "purpose": "0 8px 24px, no ring. The composer lifts on focus."
+      },
+      {
+        "name": "elevation-panel",
+        "value": "0 0 0 1px rgba(29,28,26,0.06), 0 12px 32px rgba(29,28,26,0.08)",
+        "purpose": "Edge plus 0 12px 32px. Panels and drawers."
+      },
+      {
+        "name": "focus-ring",
+        "value": "0 0 0 2px #FFFFFF, 0 0 0 4px rgba(29,28,26,0.32)",
+        "purpose": "2px white gap and a 2px ink ring at 32%. :focus-visible only."
+      },
+      {
+        "name": "field-rest",
+        "value": "inset 0 0 0 1px rgba(29,28,26,0.12)",
+        "purpose": "Inset 1px border.default."
+      },
+      {
+        "name": "field-editing",
+        "value": "inset 0 0 0 1px rgba(29,28,26,0.48), 0 0 0 3px rgba(29,28,26,0.06)",
+        "purpose": "Inset 1px border.focus plus a 3px ink halo at 6%."
+      },
+      {
+        "name": "elevation-menu",
+        "value": "0 0 0 1px rgba(29,28,26,0.08), 0 8px 24px rgba(29,28,26,0.14)",
+        "purpose": "Edge at ink 8% plus 0 8px 24px ink 14%. The AttachMenu dropdown (M1, M2)."
+      }
+    ],
+    "motion": [
+      {
+        "name": "dur-instant",
+        "value": "100ms",
+        "purpose": "Hover and press."
+      },
+      {
+        "name": "dur-fast",
+        "value": "150ms",
+        "purpose": "Popovers and crossfades."
+      },
+      {
+        "name": "dur-base",
+        "value": "220ms",
+        "purpose": "Disclosures and row arrival."
+      },
+      {
+        "name": "dur-slow",
+        "value": "320ms",
+        "purpose": "Drawers."
+      },
+      {
+        "name": "dur-spin",
+        "value": "6000ms",
+        "purpose": "Working Solstice mark, linear repeat."
+      },
+      {
+        "name": "ease-standard",
+        "value": "cubic-bezier(0.22,1,0.36,1)",
+        "purpose": "Default state transition."
+      },
+      {
+        "name": "ease-enter",
+        "value": "cubic-bezier(0.16,1,0.3,1)",
+        "purpose": "Larger arrivals."
+      },
+      {
+        "name": "ease-exit",
+        "value": "cubic-bezier(0.4,0,1,1)",
+        "purpose": "Leaving UI."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "breakpoint-sm",
+        "value": "640px"
+      },
+      {
+        "name": "breakpoint-md",
+        "value": "1024px"
+      },
+      {
+        "name": "breakpoint-lg",
+        "value": "1280px"
+      },
+      {
+        "name": "breakpoint-xl",
+        "value": "1536px"
+      },
+      {
+        "name": "breakpoint-2xl",
+        "value": "1920px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary action",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "One main action per view. Send owns it in the workbench.",
+      "html": "<button class=\"ds-primary\">Send</button>",
+      "css": ".ds-primary{border:0;border-radius:var(--ds-radius-pill);font:500 13px/20px var(--ds-font-ui);height:32px;padding:0 12px;cursor:pointer;transition:background var(--ds-dur-instant) var(--ds-ease-standard);background:var(--ds-action-primary);color:var(--ds-text-inverse)}.ds-primary:hover{background:var(--ds-action-primary-hover)}.ds-primary:active{background:var(--ds-action-primary-pressed)}.ds-primary:focus-visible{outline:none;box-shadow:var(--ds-focus-ring);}"
+    },
+    {
+      "name": "Secondary action",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Quiet supporting actions with an ink inset edge.",
+      "html": "<button class=\"ds-secondary\">Compact conversation</button>",
+      "css": ".ds-secondary{border:0;border-radius:var(--ds-radius-pill);font:500 13px/20px var(--ds-font-ui);height:32px;padding:0 12px;cursor:pointer;transition:background var(--ds-dur-instant) var(--ds-ease-standard);background:transparent;color:var(--ds-text-primary);box-shadow:inset 0 0 0 1px var(--ds-action-secondary-border)}.ds-secondary:hover{background:var(--ds-action-hover-tint)}.ds-secondary:active{background:var(--ds-action-pressed-tint)}.ds-secondary:focus-visible{outline:none;box-shadow:var(--ds-focus-ring);}"
+    },
+    {
+      "name": "Message input",
+      "kind": "input",
+      "refersTo": "composer",
+      "description": "White surface with a quiet lift, no grey border.",
+      "html": "<div class=\"ds-message\"><label for=\"ds-text\">Message the agent</label><textarea id=\"ds-text\" placeholder=\"What would you like to change?\"></textarea></div>",
+      "css": ".ds-message{padding:16px;background:var(--ds-surface-default);border-radius:var(--ds-radius-2xl);box-shadow:var(--ds-elevation-composer);font:13px/20px var(--ds-font-ui);color:var(--ds-text-secondary)}.ds-message:focus-within{box-shadow:var(--ds-elevation-composer-focus)}.ds-message label{display:block;margin-bottom:8px}.ds-message textarea{width:100%;min-height:68px;background:transparent;border:0;resize:vertical;color:var(--ds-text-primary);font:15px/24px var(--ds-font-ui)}.ds-message textarea:focus-visible{outline:none;box-shadow:var(--ds-focus-ring);}"
+    },
+    {
+      "name": "Conversation navigation",
+      "kind": "nav",
+      "description": "A selected conversation uses a neutral surface, without an accent rail.",
+      "html": "<nav aria-label=\"Conversations\" class=\"ds-nav\"><button class=\"ds-nav-item\" aria-current=\"page\">Video conversation</button><button class=\"ds-nav-item\">Another conversation</button></nav>",
+      "css": ".ds-nav{padding:16px;background:var(--ds-bg-canvas);display:grid;gap:4px}.ds-nav-item{border:0;background:none;text-align:left;padding:12px;border-radius:8px;font:13px/20px var(--ds-font-ui);color:var(--ds-text-primary);cursor:pointer}.ds-nav-item:hover{background:rgba(255,255,255,.45)}.ds-nav-item[aria-current]{background:rgba(255,255,255,.75);box-shadow:var(--ds-elevation-edge)}.ds-nav-item:focus-visible{outline:none;box-shadow:var(--ds-focus-ring);}"
+    },
+    {
+      "name": "Review status",
+      "kind": "chip",
+      "description": "A status label always carries a word as well as color.",
+      "html": "<span class=\"ds-status\">Needs review</span>",
+      "css": ".ds-status{display:inline-flex;align-items:center;padding:4px 8px;border-radius:var(--ds-radius-pill);font:400 11px/16px var(--ds-font-ui);color:var(--ds-status-required);background:var(--ds-status-required-bg)}"
+    },
+    {
+      "name": "Tool call disclosure",
+      "kind": "custom",
+      "description": "Compact tool history expands in place. Tool details use the existing UI typeface.",
+      "html": "<details class=\"ds-tool\"><summary>Tool call <span>Done</span></summary><pre>Output appears here.</pre></details>",
+      "css": ".ds-tool{background:rgba(255,255,255,.55);border-radius:var(--ds-radius-md);box-shadow:var(--ds-elevation-edge);font:400 12px/20px var(--ds-font-ui);color:var(--ds-text-secondary)}.ds-tool summary{display:flex;justify-content:space-between;cursor:pointer;padding:8px 12px;border-radius:var(--ds-radius-md);color:var(--ds-text-primary)}.ds-tool summary:hover{background:rgba(29,28,26,.025)}.ds-tool summary:focus-visible{outline:none;box-shadow:var(--ds-focus-ring);}.ds-tool pre{padding:12px 16px;margin:0;border-top:1px solid var(--ds-border-divider);font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}"
+    }
+  ],
+  "narrative": {
+    "overview": "The visual authority is the organization's Eeva system. The user requested its warm, quiet character in a sleek professional workbench, with no decorative accent bars.",
+    "dos": [
+      "Do keep one primary action and one composer in the view.",
+      "Do keep agent replies as plain text and human replies in sand bubbles.",
+      "Do use sentence case, specific actions, accessible names, and source tokens.",
+      "Do preserve unknown usage values and real asynchronous state."
+    ],
+    "donts": [
+      "Don't add decorative accent rails, gradients beyond source backings, or emoji.",
+      "Don't add a dark theme or new icon vocabulary without an explicit design change.",
+      "Don't imply that model reasoning summaries expose hidden reasoning.",
+      "Don't introduce placeholder projects, video results, or token counts into real data."
+    ]
+  }
+}

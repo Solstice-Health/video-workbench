@@ -1,0 +1,119 @@
+/* Model controls extend Eeva. The effort gradient is the requested Solstice exception. */
+.mc-control {display: flex; min-width: 0;}
+.mc-trigger {display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 240px; height: 28px; padding: 4px 8px; border: 0; border-radius: 999px; color: var(--ds-text-secondary); background: transparent; font-size: 12px; line-height: 20px; transition: background var(--ds-dur-instant) var(--ds-ease-standard);}
+.mc-trigger > span {overflow: hidden; text-overflow: ellipsis; white-space: nowrap;}
+.mc-trigger:hover, .mc-trigger[aria-expanded=true] {color: var(--ds-text-primary); background: var(--ds-surface-band);}
+.mc-picker, .mc-submenu {position: fixed; z-index: 25; width: min(300px, calc(100vw - 32px)); padding: 8px; background: var(--ds-surface-default); border-radius: 10px; box-shadow: var(--ds-elevation-menu); color: var(--ds-text-primary); font-size: 13px; line-height: 20px; overflow-y: auto; overscroll-behavior: contain; animation: mc-pop-in 150ms var(--ds-ease-standard);}
+.mc-submenu {z-index: 26;}
+.mc-picker button, .mc-submenu button, .mc-manager button {font-family: inherit;}
+.mc-picker button:focus-visible, .mc-submenu button:focus-visible, .mc-manager button:focus-visible, .mc-manager input:focus-visible, .mc-submenu input:focus-visible {outline: none; box-shadow: var(--ds-focus-ring);}
+.mc-picker-heading, .mc-submenu-heading {display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 4px 8px 8px; color: var(--ds-text-secondary); font-size: 12px;}
+.mc-expand {display: grid; place-items: center; width: 28px; height: 28px; padding: 4px; border: 0; border-radius: 999px; background: transparent; color: var(--ds-text-secondary);}
+.mc-expand:hover {background: var(--ds-surface-band);}
+.mc-model-list {display: flex; flex-direction: column; gap: 4px;}
+.mc-model-row {width: 100%; min-height: 40px; display: flex; align-items: center; gap: 8px; padding: 8px; background: transparent; color: var(--ds-text-primary); border: 0; border-radius: 8px; text-align: left; transition: background var(--ds-dur-instant) var(--ds-ease-standard);}
+.mc-model-row:hover:not(:disabled), .mc-model-row[aria-pressed=true] {background: var(--ds-surface-sunken);}
+.mc-model-row:disabled {opacity: 1; cursor: not-allowed;}
+.mc-model-row:disabled .mc-model-info > span:first-child {color: var(--ds-text-secondary);}
+.mc-model-check {display: grid; place-items: center; width: 16px; flex-shrink: 0; color: var(--ds-text-primary);}
+.mc-model-info {display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1;}
+.mc-model-info > span {overflow-wrap: anywhere;}
+.mc-model-provider {color: var(--ds-text-secondary); flex-shrink: 0; font-size: 11px; line-height: 16px;}
+.mc-model-unavailable {font-size: 12px; line-height: 16px; color: var(--ds-text-secondary);}
+.mc-custom-row {margin-top: 4px;}
+.mc-configuration {display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--ds-border-divider); margin-top: 8px; padding-top: 8px;}
+.mc-setting-row {display: flex; align-items: center; gap: 8px; min-height: 32px; width: 100%; border: 0; border-radius: 8px; background: transparent; color: var(--ds-text-primary); text-align: left; padding: 8px; font-size: 12px; line-height: 16px;}
+.mc-setting-row:hover:not(:disabled), .mc-setting-row[aria-expanded=true] {background: var(--ds-surface-sunken);}
+.mc-setting-value {margin-left: auto; color: var(--ds-text-secondary);}
+.mc-picker-footer {margin-top: 8px; border-top: 1px solid var(--ds-border-divider); padding: 8px 8px 4px;}
+.mc-manage-link {border: 0; border-radius: 4px; background: transparent; color: var(--ds-text-secondary); display: flex; width: 100%; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 12px; line-height: 20px;}
+.mc-manage-link:hover {color: var(--ds-text-primary);}
+.mc-caption {margin: 0; color: var(--ds-text-secondary); font-size: 12px; line-height: 16px;}
+.mc-picker-footer > p {margin-top: 4px;}
+.mc-loading {margin: 8px; font-size: 13px; line-height: 20px; color: var(--ds-text-secondary);}
+.mc-loading > p {margin: 0 0 12px;}
+.mc-submenu-heading {padding-left: 0; margin-bottom: 4px;}
+.mc-back {display: flex; align-items: center; gap: 4px; min-height: 32px; border: 0; border-radius: 8px; padding: 4px; background: transparent; color: var(--ds-text-secondary); font-size: 12px; line-height: 20px; text-align: left;}
+.mc-back:hover {background: var(--ds-surface-sunken);}
+.mc-context-panel {padding: 0 4px 8px;}
+.mc-context-panel > p:first-child {margin: 0 4px 12px;}
+.mc-context-panel > p:last-child {margin: 12px 4px 0;}
+.mc-context-choice {display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 8px; border: 0; border-radius: 8px; background: transparent; color: var(--ds-text-primary); width: 100%; text-align: left;}
+.mc-context-choice > :last-child {margin-left: auto;}
+.mc-context-choice:hover:not(:disabled), .mc-context-choice[aria-pressed=true] {background: var(--ds-surface-sunken);}
+.mc-context-choice:disabled {opacity: 1; color: var(--ds-text-secondary);}
+.mc-effort-panel {padding: 4px 12px 8px;}
+.mc-setting-heading {display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; line-height: 20px;}
+.mc-setting-heading strong {font-weight: 600;}
+.mc-effort-slider {appearance: none; -webkit-appearance: none; width: 100%; height: 6px; border: 0; border-radius: 999px; background: linear-gradient(90deg, var(--ds-ember-100), var(--ds-ember-300) 26%, var(--ds-ember-500) 52%, var(--ds-ember-600) 76%, var(--ds-ember-800)); cursor: pointer; margin: 24px 0 12px; outline: none;}
+.mc-effort-slider::-webkit-slider-thumb {appearance: none; -webkit-appearance: none; height: 16px; width: 16px; border: 3px solid var(--ds-surface-default); border-radius: 999px; background: var(--ds-text-primary); box-shadow: 0 0 0 1px var(--ds-border-strong), 0 1px 2px rgba(29,28,26,.1);}
+.mc-effort-slider::-moz-range-thumb {height: 10px; width: 10px; border: 3px solid var(--ds-surface-default); border-radius: 999px; background: var(--ds-text-primary); box-shadow: 0 0 0 1px var(--ds-border-strong), 0 1px 2px rgba(29,28,26,.1);}
+.mc-effort-slider:disabled {cursor: progress; opacity: .65;}
+.mc-effort-labels {display: flex; align-items: flex-start; justify-content: space-between; gap: 4px; color: var(--ds-text-secondary); font-size: 11px; line-height: 16px;}
+.mc-effort-labels span {text-align: center;}
+.mc-effort-labels span:first-child {text-align: left;}
+.mc-effort-labels span:last-child {text-align: right;}
+.mc-effort-labels .selected {color: var(--ds-text-primary); font-weight: 600;}
+.mc-effort-note {margin-top: 16px;}
+.mc-speed-settings {border-top: 1px solid var(--ds-border-divider); margin-top: 20px; padding-top: 8px;}
+.mc-toggle-row {display: flex; align-items: center; gap: 16px; padding: 12px 0;}
+.mc-toggle-row > div {flex: 1;}
+.mc-toggle-row .mc-caption {margin-top: 4px;}
+.mc-switch {flex-shrink: 0; border: 0; padding: 2px; border-radius: 999px; height: 20px; width: 36px; background: var(--ds-sand-200); box-shadow: inset 0 0 0 1px var(--ds-border-default); transition: background var(--ds-dur-instant) var(--ds-ease-standard);}
+.mc-switch > span {display: block; width: 16px; height: 16px; border-radius: 999px; background: var(--ds-surface-default); box-shadow: 0 1px 2px rgba(29,28,26,.12); transition: transform var(--ds-dur-instant) var(--ds-ease-standard);}
+.mc-switch[aria-checked=true] {background: var(--ds-text-primary);}
+.mc-switch[aria-checked=true] > span {transform: translateX(16px);}
+.mc-custom-form {display: flex; flex-direction: column; gap: 12px; padding: 4px 12px 12px;}
+.mc-custom-form > label, .mc-key-form > label {font-size: 12px; line-height: 16px; font-weight: 600;}
+.mc-custom-form > button {align-self: flex-end;}
+.mc-field-error {margin: 0; color: var(--ds-status-danger); font-size: 13px; line-height: 20px;}
+.mc-modal-overlay {position: fixed; inset: 0; z-index: var(--ds-z-modal, 40); display: grid; place-items: center; padding: 24px; background: var(--ds-scrim, rgba(29,28,26,.26)); animation: mc-fade-in 150ms var(--ds-ease-standard);}
+.mc-manager {display: flex; flex-direction: column; width: min(560px, 100%); max-height: min(720px, calc(100dvh - 48px)); border-radius: 14px; background: var(--ds-surface-default); box-shadow: var(--ds-elevation-modal); color: var(--ds-text-primary); overflow: hidden; animation: mc-pop-in 220ms var(--ds-ease-standard); font-family: var(--ds-font-ui, Aileron, sans-serif);}
+.mc-manager-heading {display: flex; justify-content: space-between; gap: 16px; padding: 24px 24px 20px;}
+.mc-manager-heading > :last-child {margin: -4px -8px 0 0; flex-shrink: 0;}
+.mc-manager h2 {margin: 0; font-size: 17px; line-height: 24px; font-weight: 600;}
+.mc-manager-heading p {margin: 8px 0 0; font-size: 13px; line-height: 20px; color: var(--ds-text-secondary);}
+.mc-manager-tabs {display: flex; gap: 24px; margin: 0 24px; min-height: 40px; box-shadow: inset 0 -1px var(--ds-border-divider);}
+.mc-manager-tabs > button {border: 0; padding: 8px 0 12px; background: transparent; color: var(--ds-text-secondary); font-size: 14px; line-height: 20px; border-radius: 4px 4px 0 0;}
+.mc-manager-tabs > button[aria-selected=true] {color: var(--ds-text-primary); font-weight: 600; box-shadow: inset 0 -2px var(--ds-text-primary);}
+.mc-manager-body {overflow-y: auto; overscroll-behavior: contain; min-height: 0; padding: 20px 24px 24px;}
+.mc-body-note {margin: 0 0 20px; color: var(--ds-text-secondary); font-size: 14px; line-height: 20px;}
+.mc-manager-list {display: flex; flex-direction: column; gap: 4px;}
+.mc-manager-model {display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 8px; min-height: 64px; cursor: pointer;}
+.mc-manager-model:hover {background: var(--ds-surface-sunken);}
+.mc-manager-model > button {flex-shrink: 0;}
+.mc-manager-model .mc-model-info {font-size: 14px; line-height: 20px;}
+.mc-provider-name {font-size: 12px; line-height: 16px; color: var(--ds-text-secondary); flex-shrink: 0;}
+.mc-manager-footnote {display: flex; align-items: flex-start; gap: 8px; padding: 16px 12px 0; color: var(--ds-text-secondary); font-size: 12px; line-height: 16px;}
+.mc-manager-footnote > svg {margin-top: 1px;}
+.mc-manager-footer {display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 24px; background: var(--ds-surface-sunken); box-shadow: inset 0 1px var(--ds-border-divider);}
+.mc-provider-list {display: flex; flex-direction: column; gap: 12px;}
+.mc-provider-card {background: var(--ds-surface-sunken); border-radius: 8px; padding: 16px; box-shadow: var(--ds-elevation-edge);}
+.mc-provider-heading {display: flex; align-items: center; justify-content: space-between; gap: 12px;}
+.mc-provider-heading h3 {margin: 0 0 8px; font-size: 14px; line-height: 20px; font-weight: 600;}
+.mc-provider-heading > button {flex-shrink: 0;}
+.mc-provider-status {display: flex; align-items: center; gap: 4px; color: var(--ds-text-secondary); font-size: 12px; line-height: 16px;}
+.mc-provider-status.connected {color: var(--ds-status-success);}
+.mc-key-form {display: flex; flex-direction: column; gap: 8px; margin-top: 16px;}
+.mc-key-actions {display: flex; justify-content: flex-end; margin-top: 4px;}
+.mc-provider-source {display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px;}
+.mc-provider-actions {display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; flex-shrink: 0;}
+@keyframes mc-pop-in {from {opacity: 0; transform: translateY(8px);} to {opacity: 1; transform: translateY(0);}}
+@keyframes mc-fade-in {from {opacity: 0;} to {opacity: 1;}}
+@media (max-width: 639px) {
+  .mc-trigger {max-width: 160px;}
+  .mc-modal-overlay {padding: 16px;}
+  .mc-manager {max-height: calc(100dvh - 32px);}
+  .mc-manager-heading {padding: 20px 20px 16px;}
+  .mc-manager-tabs {margin: 0 20px;}
+  .mc-manager-body {padding: 20px;}
+  .mc-manager-footer {padding: 16px 20px;}
+  .mc-manager-model {padding: 12px 4px; align-items: flex-start;}
+  .mc-manager-model > button {margin-top: 4px;}
+  .mc-provider-name {display: none;}
+  .mc-provider-source {align-items: flex-start; flex-direction: column;}
+}
+@media (prefers-reduced-motion: reduce) {
+  .mc-picker, .mc-submenu, .mc-modal-overlay, .mc-manager {animation: mc-fade-in 150ms linear;}
+  .mc-switch, .mc-switch > span, .mc-trigger, .mc-model-row {transition: none;}
+}

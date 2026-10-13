@@ -1,0 +1,123 @@
+# The flag catalog (spec D13). Code picks severity:
+#   severity = min(max, base + bump)
+# One +1 bump applies when any bump condition holds (spec "Flags and severity"):
+#   mark (a logo or brand mark), regulated (ISI, claim, reference, job code), time_share >= 0.20,
+#   peak_area >= 0.10, generative content in tier T2.
+# Agents may add flags. Only a re-check or a signed human event clears one.
+
+levels: [INFO, WARN, HOLD, BLOCK]
+
+never_waivable: [LICENCE, AUDIT-GAP, UNDECLARED-CHANGE, EVIDENCE-MISSING]
+
+kinds:
+  # ---- provenance and generation ----
+  NEEDS-SOURCE:           {family: provenance, base: HOLD, max: HOLD, text: "A mark or font was re-placed, rebuilt or retyped without a master file."}
+  GEN-RECOVERED:          {family: provenance, base: WARN, max: HOLD, text: "Pixels come from a generative model."}
+  GEN-CREATED:            {family: provenance, base: WARN, max: HOLD, text: "A new element made by an image or video model, not taken from the source."}
+  GEN-TEXT:               {family: text, base: HOLD, max: BLOCK, text: "Text drawn by a generative model (not typeset from the copy deck)."}
+  SAM3-RASTER:            {family: provenance, base: WARN, max: WARN, text: "SAM 3 matte on a raster subject."}
+  SAM3-VECTOR-USED:       {family: provenance, base: HOLD, max: BLOCK, text: "SAM 3 used on a vector-like mark."}
+  MATTE-RISK:             {family: provenance, base: WARN, max: HOLD, text: "Matte edges may be visible."}
+  UPSCALED:               {family: provenance, base: WARN, max: HOLD, text: "Source pixels shown above 1.25x their native size."}
+  FONT-SUBSTITUTED:       {family: provenance, base: WARN, max: HOLD, text: "Text set in a font that is not the brand master."}
+  PROVENANCE-UNKNOWN:     {family: provenance, base: WARN, max: HOLD, text: "An asset with no lineage edge."}
+  PROVENANCE-MISMATCH:    {family: provenance, base: BLOCK, max: BLOCK, text: "Declared provenance disagrees with lineage."}
+  RIGHTS-UNKNOWN:         {family: provenance, base: WARN, max: HOLD, text: "Rights for an asset are not recorded."}
+  MINING-RESIDUE:         {family: provenance, base: WARN, max: HOLD, text: "A region has no registry slot and no unmined declaration."}
+  ATTRIBUTION-DUE:        {family: provenance, base: WARN, max: WARN, text: "A CC BY asset needs credit in the delivery note."}
+  EXEC-ASSET:             {family: provenance, base: WARN, max: HOLD, text: "A downloaded file can carry code."}
+  SKILL-UNSIGNED:         {family: provenance, base: WARN, max: WARN, text: "An unsigned skill was loaded."}
+  WEB-ORIGIN:             {family: provenance, base: INFO, max: INFO, text: "An asset came from the web."}
+  LICENCE:                {family: provenance, base: BLOCK, max: BLOCK, text: "A licence forbids this use."}
+  SYNTH-VOICE:            {family: provenance, base: HOLD, max: BLOCK, text: "Synthetic voice."}
+  SYNTH-PERSON:           {family: provenance, base: HOLD, max: BLOCK, text: "Synthetic person."}
+  GENERATOR-UNPINNED:     {family: provenance, base: HOLD, max: HOLD, text: "Output from a generator outside the pinned image."}
+
+  # ---- egress, policy, spend ----
+  EGRESS:                 {family: egress, base: INFO, max: WARN, text: "Data left the machine to a vendor."}
+  POLICY-USED:            {family: egress, base: INFO, max: INFO, text: "A policy-dial decision applied."}
+  SPEND-ALARM:            {family: egress, base: WARN, max: WARN, text: "Spend passed 2x the estimate. Never stops a request."}
+  CROSS-WRITE:            {family: egress, base: WARN, max: HOLD, text: "A write outside the agent's scope."}
+  SLOT-FALLBACK:          {family: egress, base: WARN, max: WARN, text: "A fallback model served a slot."}
+  MODEL-DRIFT:            {family: egress, base: WARN, max: WARN, text: "A model fingerprint changed."}
+  MODEL-EOL-NEAR:         {family: egress, base: WARN, max: WARN, text: "A slot's model nears end of life."}
+  POLICY-OVERRIDE:        {family: egress, base: BLOCK, max: BLOCK, text: "Policy overridden after a canary failure."}
+
+  # ---- fidelity ----
+  UNDECLARED-CHANGE:      {family: fidelity, base: BLOCK, max: BLOCK, text: "A changed region no declared operation explains."}
+  CUE-MISMATCH:           {family: fidelity, base: BLOCK, max: BLOCK, text: "The cue sheet disagrees with the delivered bytes."}
+  UNATTESTED:             {family: fidelity, base: BLOCK, max: BLOCK, text: "No attestation of how the file was made."}
+  ATTEST-MISMATCH:        {family: fidelity, base: BLOCK, max: BLOCK, text: "A re-render from the canvas file does not match the delivered file."}
+  UNVERIFIABLE-REGION:    {family: fidelity, base: HOLD, max: BLOCK, text: "A change sits below the file's detection floor."}
+  OPERATOR-UNSUPPORTED:   {family: fidelity, base: HOLD, max: HOLD, text: "A custom operation no tool wraps."}
+  UNCHECKED-RENDER:       {family: fidelity, base: HOLD, max: HOLD, text: "A render no check has read."}
+  PLAYER-FAIL:            {family: fidelity, base: HOLD, max: BLOCK, text: "A player fails on the file."}
+  MOTION-FROZEN:          {family: fidelity, base: HOLD, max: HOLD, text: "Motion energy dropped under 0.8 of the source."}
+  DECLARED-OBSERVED-MISMATCH: {family: fidelity, base: HOLD, max: BLOCK, text: "The render does not show what the canvas file declares."}
+  MOTION-APPROX:          {family: fidelity, base: WARN, max: HOLD, text: "Motion is approximated."}
+  MOTION-LOST:            {family: fidelity, base: WARN, max: HOLD, text: "A static master replaced animated art."}
+  STALE-DEPENDENT:        {family: fidelity, base: WARN, max: HOLD, text: "An output cites an asset revision that was superseded."}
+  SWAP-MISMATCH:          {family: fidelity, base: WARN, max: HOLD, text: "A swapped master differs from the recovered region."}
+  MASTER-DELTA:           {family: fidelity, base: WARN, max: HOLD, text: "Master geometry differs from the source instance."}
+  TOLERANCE:              {family: fidelity, base: INFO, max: BLOCK, text: "Fidelity reported against a tolerance band."}
+
+  # ---- text and regulated content ----
+  TEXT-MISMATCH:          {family: text, base: BLOCK, max: BLOCK, text: "Typeset text read back differently from its copy."}
+  ISI-FIT:                {family: text, base: BLOCK, max: BLOCK, text: "The ISI does not fit its window at the ruled pace."}
+  TEXT-CLIPPED:           {family: text, base: WARN, max: BLOCK, text: "Source text is cut by the frame edge."}
+  TEXT-DROPPED:           {family: text, base: WARN, max: BLOCK, text: "Source text in the kept span is not shown at all."}
+  OLD-CLAIM-PRESENT:      {family: text, base: BLOCK, max: BLOCK, text: "An old claim survives a content update."}
+  VO-DIVERGE:             {family: text, base: BLOCK, max: BLOCK, text: "The output audio does not say what the plan says."}
+  ABSENCE-UNPROVEN:       {family: text, base: HOLD, max: HOLD, text: "Removal of old text is not proven."}
+  ISI-REFLOWED:           {family: text, base: HOLD, max: HOLD, text: "ISI text was reflowed."}
+  ISI-MISSING:            {family: text, base: HOLD, max: BLOCK, text: "Required ISI is missing."}
+  AUDIO-CHANGED:          {family: text, base: HOLD, max: HOLD, text: "Audio differs from the source outside declared windows."}
+  AUDIO-BRAND:            {family: text, base: HOLD, max: HOLD, text: "Brand audio changed."}
+  REG-RULE:               {family: text, base: HOLD, max: BLOCK, text: "A regulatory rule applies (job code, audience, approval)."}
+  SCIENCE-DEPICTION:      {family: text, base: HOLD, max: HOLD, text: "A layer depicts science that a named human must confirm."}
+  TYPO-LINT:              {family: text, base: WARN, max: WARN, text: "A likely typo in typeset text."}
+  TEXT-UNVERIFIED:        {family: text, base: WARN, max: BLOCK, text: "Typeset text with no approved copy. Severity from the reader table."}
+
+  # ---- evidence and trust ----
+  EVIDENCE-MISSING:       {family: evidence, base: BLOCK, max: BLOCK, text: "A pass with no artifact behind it."}
+  AUDIT-GAP:              {family: evidence, base: BLOCK, max: BLOCK, text: "The ledger hash chain is broken."}
+  BEST-SO-FAR:            {family: evidence, base: HOLD, max: HOLD, text: "Repairs failed three times; the best attempt goes to review."}
+  CHECK-UNQUALIFIED:      {family: evidence, base: WARN, max: WARN, text: "A relied-on check has no seeded qualification yet. No GREEN."}
+  PANEL-SPLIT:            {family: evidence, base: WARN, max: WARN, text: "Panel readers split after two evidence rounds."}
+  PANEL-WEAK:             {family: evidence, base: WARN, max: WARN, text: "Panel readers are too correlated."}
+  RUN-DEGRADED:           {family: evidence, base: WARN, max: WARN, text: "A worker restarted or a tool failed during the run."}
+  REPAIR-DOWNGRADE:       {family: evidence, base: WARN, max: WARN, text: "A repair made a check worse."}
+  INDEX-STALE:            {family: evidence, base: WARN, max: WARN, text: "An observation of another media revision was cited."}
+
+  # ---- review and the human loop ----
+  UNREQUESTED-CHANGE:     {family: review, base: WARN, max: HOLD, text: "A change the request did not ask for."}
+  REGRESSION:             {family: review, base: WARN, max: HOLD, text: "A standing check from an earlier comment fails again."}
+  ANCHOR-AMBIGUOUS:       {family: review, base: WARN, max: WARN, text: "A comment matches more than one place."}
+  COMMENT-CONFLICT:       {family: review, base: WARN, max: WARN, text: "Two comments disagree."}
+  SOURCE-UNBOUND:         {family: review, base: WARN, max: WARN, text: "An uploaded source file is not bound yet."}
+  PLAY-UNVERIFIED:        {family: review, base: WARN, max: WARN, text: "Regulated spans were not played at 1x."}
+  BRIEF-GAP:              {family: review, base: WARN, max: WARN, text: "The QC brief asks for something the brief does not."}
+  JUDGE-FINDING:          {family: review, base: WARN, max: HOLD, text: "The judge found a requirement not met."}
+  JUDGE-CANNOT-TELL:      {family: review, base: INFO, max: WARN, text: "Nothing could decide a requirement."}
+  ASSUMED-DEFAULT:        {family: review, base: INFO, max: INFO, text: "The editor used a default the brief did not set."}
+  ASK-PENDING:            {family: review, base: INFO, max: INFO, text: "A question to a person is open; the default is in use."}
+  UNCALIBRATED:           {family: review, base: INFO, max: INFO, text: "A threshold is a start value, not fitted."}
+
+  # ---- recipe rows: Clip ----
+  ATOM-BROKEN:            {family: clip, base: HOLD, max: HOLD, text: "A cut separates a claim from its qualifier or reference."}
+  RISK-AFTER-BREAK:       {family: clip, base: HOLD, max: HOLD, text: "A risk statement falls outside the kept span."}
+  NO-RISK-IN-VIDEO:       {family: clip, base: HOLD, max: HOLD, text: "A benefit claim is kept with no risk statement in the output."}
+  BOUNDARY-WORD:          {family: clip, base: BLOCK, max: BLOCK, text: "A cut lands inside a spoken word."}
+  REBIND-MISMATCH:        {family: clip, base: BLOCK, max: BLOCK, text: "A kept span re-binds to the wrong source time."}
+  SEAM-ROUGH:             {family: clip, base: WARN, max: WARN, text: "A cut seam is visible or audible (flash frame, click)."}
+  CAPTION-LAG:            {family: clip, base: WARN, max: WARN, text: "Captions drift from the speech by more than 150 ms."}
+  SOURCE-TERMS:           {family: clip, base: BLOCK, max: BLOCK, text: "The source states usage terms (audience, view in entirety) that this output may break."}
+
+  # ---- recipe rows: Resize ----
+  LEGIBILITY-BELOW-FLOOR: {family: resize, base: HOLD, max: HOLD, text: "Text is smaller than the legibility floor."}
+  SAFE-AREA:              {family: resize, base: HOLD, max: HOLD, text: "Text or a mark sits outside the platform safe zone."}
+  FACE-CUT:               {family: resize, base: HOLD, max: HOLD, text: "More than 30% of a face falls outside the frame."}
+  ANIM-TEXT-RETIMED:      {family: resize, base: WARN, max: HOLD, text: "Animated text timing changed."}
+  V3-SYNC:                {family: resize, base: WARN, max: HOLD, text: "Audio and video drift apart."}
+  V4-CAMERA:              {family: resize, base: WARN, max: WARN, text: "Virtual camera motion is busy or abrupt."}
+  V8-PROMINENCE:          {family: resize, base: WARN, max: HOLD, text: "A kept element lost prominence."}
