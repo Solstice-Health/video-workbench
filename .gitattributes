@@ -1,0 +1,2 @@
+# Unified patches intentionally prefix unchanged blank context lines with a space.
+integrations/solstice-figma/upstream.patch whitespace=-blank-at-eol

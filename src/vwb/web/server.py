@@ -9,12 +9,14 @@ from __future__ import annotations
 import hmac
 import json
 import mimetypes
+import os
 import re
 import secrets
 import shutil
 import threading
 import uuid
 import webbrowser
+from contextlib import nullcontext
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,7 +27,9 @@ from vwb import models
 from vwb.agents.events import context_usage, read_events
 from vwb.browser.service import BrowserConflict, BrowserSession
 from vwb.config import RUNS_DIR
+from vwb.integrations import IntegrationError, IntegrationService
 from vwb.util.jsonio import read_json, write_json
+from vwb.web import pdf_preview, workspace_files
 from vwb.web.history import request_ids, resolve_request
 from vwb.web.queue import QueueConflict, TurnQueue
 from vwb.workspace import Workspace, references
@@ -78,6 +82,20 @@ class Workbench:
 
     def workspace(self, request_id: str) -> Workspace:
         return Workspace(resolve_request(self.runs_dir, request_id))
+
+    @property
+    def integrations(self) -> IntegrationService:
+        return IntegrationService(runs_dir=self.runs_dir)
+
+    def preview_key(self, request_id: str) -> str:
+        # Opaque HTML previews have Origin:null. A request-scoped capability
+        # permits their local assets without admitting arbitrary cross-site reads.
+        return hmac.new(self.csrf_token.encode(), f"preview:{request_id}".encode(), "sha256").hexdigest()
+
+    def preview_entry(self, request_id: str, entry: dict) -> dict:
+        if entry.get("kind") != "file":
+            return entry
+        return {**entry, "url": f"/preview/{quote(request_id)}/{self.preview_key(request_id)}/{quote(entry['path'], safe='/')}"}
 
     def close_browsers(self) -> None:
         """Stop UI-managed daemons after workers stop; preserve private profiles.
@@ -333,12 +351,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(payload)
 
-    def _check_origin(self, mutate: bool = False) -> None:
+    def _check_host(self) -> str:
         port = self.server.server_address[1]
         hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
         host = self.headers.get("Host", "")
         if host not in hosts:
             raise PermissionError("Open the workbench at its localhost address.")
+        return host
+
+    def _check_origin(self, mutate: bool = False) -> None:
+        host = self._check_host()
         origin = self.headers.get("Origin")
         if origin and origin != f"http://{host}":
             raise PermissionError("Cross-origin requests are not allowed.")
@@ -360,9 +382,26 @@ class Handler(BaseHTTPRequestHandler):
         return body
 
     def _route(self) -> None:
-        self._check_origin(self.command not in {"GET", "HEAD"})
         url = urlsplit(self.path)
         parts = unquote(url.path).strip("/").split("/")
+        query = parse_qs(url.query)
+        if self.command == "GET" and parts == ["api", "integrations", "solstice", "callback"]:
+            self._check_host()
+            return self._integration_callback(query)
+        if self.command in {"GET", "HEAD"} and len(parts) >= 4 and parts[0] == "preview":
+            self._check_host()
+            if not hmac.compare_digest(parts[2], self.app.preview_key(parts[1])):
+                raise PermissionError("Reopen this file from the workspace to refresh its preview link.")
+            # Opaque previews send Origin:null for CORS loads, but no Origin at
+            # all for classic scripts, images and styles. The capability is the
+            # authority for both; explicit foreign origins remain disallowed.
+            if self.headers.get("Origin") not in {None, "null"}:
+                self._check_origin()
+            ws = self.app.workspace(parts[1])
+            relative = "/".join(parts[3:])
+            with workspace_files.open_file(ws, relative) as handle:
+                return self._file(Path(relative), preview=True, handle=handle)
+        self._check_origin(self.command not in {"GET", "HEAD"})
         if self.command in {"GET", "HEAD"}:
             if parts == ["api", "bootstrap"]:
                 return self._json({"csrf_token": self.app.csrf_token, "capabilities": {
@@ -374,6 +413,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(references.catalog())
             if parts == ["api", "models"]:
                 return self._json(models.catalog(self.app.runs_dir))
+            if parts == ["api", "integrations"]:
+                return self._json(self.app.integrations.status())
+            if len(parts) in {4, 5} and parts[:2] == ["api", "requests"] and parts[3] == "workspace":
+                ws = self.app.workspace(parts[2])
+                relative = query.get("path", [""])[0]
+                if len(parts) == 4:
+                    listing = workspace_files.listing(ws, relative, cursor=query.get("cursor", [None])[0])
+                    listing["entries"] = [self.app.preview_entry(ws.id, item) for item in listing["entries"]]
+                    return self._json(listing)
+                if parts[4] == "file":
+                    return self._json(self.app.preview_entry(ws.id, workspace_files.metadata(ws, relative)))
+                if parts[4] == "pdf":
+                    return self._json(pdf_preview.render(ws, relative, int(query.get("page", ["1"])[0])))
             if len(parts) in {4, 5} and parts[:2] == ["api", "requests"] and parts[3] == "browser":
                 session = BrowserSession(self.app.workspace(parts[2]))
                 if len(parts) == 4:
@@ -402,6 +454,18 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["api", "uploads"]:
                 return self._upload()
             body = self._body()
+            if parts == ["api", "integrations", "figma", "connect"]:
+                return self._json(self.app.integrations.begin_figma_auth())
+            if len(parts) == 3 and parts[:2] == ["api", "integrations"]:
+                service = self.app.integrations
+                if parts[2] == "configure":
+                    return self._json(service.configure(body))
+                if parts[2] == "connect":
+                    return self._json(service.begin_auth(self._callback_uri()))
+                if parts[2] == "refresh":
+                    return self._json(service.refresh_catalog())
+                if parts[2] == "disconnect":
+                    return self._json(service.disconnect())
             if parts == ["api", "models", "preferences"]:
                 return self._json(models.preferences(body, self.app.runs_dir))
             if parts == ["api", "models", "resolve"]:
@@ -439,6 +503,33 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 5 and parts[:2] == ["api", "requests"] and parts[3] == "queue":
                 return self._json({"job": self.app.queue.cancel(self.app.workspace(parts[2]), parts[4])})
         raise FileNotFoundError("That endpoint was not found.")
+
+    def _callback_uri(self) -> str:
+        return f"http://{self._check_host()}/api/integrations/solstice/callback"
+
+    def _integration_callback(self, query: dict) -> None:
+        ok = False
+        try:
+            self.app.integrations.complete_auth(query.get("code", [""])[0], query.get("state", [""])[0], self._callback_uri())
+            ok = True
+        except IntegrationError:
+            pass  # Provider details, codes and credentials never enter this page.
+        nonce = secrets.token_urlsafe(24)
+        message = "Connected. You can return to the Workbench." if ok else "Sign-in was not completed. Return to the Workbench and try again."
+        data = json.dumps({"type": "vwb-integration-auth", "ok": ok})
+        payload = (f'<!doctype html><html><head><meta charset="utf-8"><title>Solstice connection</title></head>'
+                   f'<body><p>{message}</p><a href="/">Return to Workbench</a><script nonce="{nonce}">'
+                   f'if(window.opener){{window.opener.postMessage({data},location.origin);window.close();}}'
+                   '</script></body></html>').encode()
+        self.send_response(200 if ok else 400)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", f"default-src 'none'; script-src 'nonce-{nonce}'; base-uri 'none'; frame-ancestors 'none'")
+        self.end_headers()
+        self.wfile.write(payload)
 
     def _browser_stream(self, session: BrowserSession) -> None:
         self.send_response(200)
@@ -498,10 +589,10 @@ class Handler(BaseHTTPRequestHandler):
             raise
         self._json({"upload": {"id": upload_id, "name": filename, "size": length}}, 201)
 
-    def _file(self, path: Path, *, artifact: bool = False) -> None:
-        if not path.is_file():
+    def _file(self, path: Path, *, artifact: bool = False, preview: bool = False, handle=None) -> None:
+        if handle is None and not path.is_file():
             raise FileNotFoundError("The file was not found.")
-        size = path.stat().st_size
+        size = os.fstat(handle.fileno()).st_size if handle is not None else path.stat().st_size
         start, end, status = 0, size - 1, 200
         range_header = self.headers.get("Range")
         if range_header:
@@ -525,7 +616,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
         self.send_response(status)
-        self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        if preview and path.suffix.lower() == ".mjs":
+            content_type = "text/javascript"
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(max(0, end - start + 1)))
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "no-cache")
@@ -533,14 +627,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         if status == 206:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-        if artifact:
+        if preview:
+            self.send_header("Access-Control-Allow-Origin", "*")
+            # Browser PDF readers cannot load inside a CSP sandbox. The exact
+            # PDF MIME type plus nosniff selects that reader, never HTML.
+            policy = "default-src 'none'; frame-ancestors 'self'" if content_type == "application/pdf" else "sandbox allow-scripts; default-src 'none'; script-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'self'; frame-ancestors 'self'"
+            self.send_header("Content-Security-Policy", policy)
+        elif artifact:
             self.send_header("Content-Security-Policy", "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'")
         else:
-            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
+            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; media-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
         self.end_headers()
         if self.command == "HEAD":
             return
-        with path.open("rb") as fh:
+        with nullcontext(handle) if handle is not None else path.open("rb") as fh:
             fh.seek(start)
             remaining = end - start + 1
             while remaining > 0:
@@ -561,6 +661,9 @@ class Handler(BaseHTTPRequestHandler):
         except (QueueConflict, BrowserConflict) as exc:
             self.close_connection = True
             self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
+        except IntegrationError as exc:
+            self.close_connection = True
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except FileNotFoundError as exc:
             self.close_connection = True
             self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)

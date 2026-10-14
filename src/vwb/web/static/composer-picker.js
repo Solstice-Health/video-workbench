@@ -18,5 +18,6 @@ export function matchingOptions(catalog, trigger, selected = []) {
 
 export function toContext(selected) {
   return {skills: selected.filter(r => r.kind === 'skill').map(r => r.id),
-    folders: selected.filter(r => r.kind === 'folder').map(r => r.id)};
+    folders: selected.filter(r => r.kind === 'folder').map(r => r.id),
+    plugins: selected.filter(r => r.kind === 'plugin').map(r => r.id)};
 }

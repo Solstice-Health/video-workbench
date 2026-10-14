@@ -54,7 +54,7 @@ function IconAction({name, label, ...props}) {
     <${Icon} name=${name} size=${16}/><//><//>`;
 }
 
-export function BrowserPanel({api, requestId, onClose, notice}) {
+export function BrowserPanel({api, requestId, onClose, notice, embedded = false}) {
   const [status, setStatus] = useState(null), [error, setError] = useState('');
   const [connection, setConnection] = useState('loading'), [busy, setBusy] = useState('');
   const [mode, setMode] = useState('headed'), [address, setAddress] = useState('');
@@ -348,7 +348,7 @@ export function BrowserPanel({api, requestId, onClose, notice}) {
   const cursorStyle = cursorVisible ? {left: `${fit.left + clamp(cursor.x / viewport.width, 0, 1) * fit.width}px`,
     top: `${fit.top + clamp(cursor.y / viewport.height, 0, 1) * fit.height}px`} : null;
 
-  return html`<div className="browser-panel-shell" ref=${panel} style=${{'--wb-browser-width': `${width}%`}}>
+  return html`<div className=${`browser-panel-shell ${embedded ? 'embedded-browser' : ''}`} ref=${panel} style=${{'--wb-browser-width': `${width}%`}}>
     <div className="browser-resize-handle" role="separator" aria-label="Resize browser panel" aria-orientation="vertical"
       aria-controls=${panelId} aria-valuemin=${Math.round(bounds().min)} aria-valuemax=${Math.round(bounds().max)} aria-valuenow=${Math.round(width)} aria-valuetext=${`${Math.round(width)} percent of workspace`} tabIndex="0"
       onKeyDown=${resizeKey} onDoubleClick=${() => setPanelWidth(58)}

@@ -1,0 +1,1745 @@
+diff --git a/docs/FIGMA_REST.md b/docs/FIGMA_REST.md
+new file mode 100644
+index 0000000..ca65d44
+--- /dev/null
++++ b/docs/FIGMA_REST.md
+@@ -0,0 +1,170 @@
++# Optional Figma REST tools through Solstice
++
++Prepared 2026-10-14 against Solstice MCP base `092b7b2`. This extension is disabled
++by default and has not been deployed or exercised against a real Figma account.
++It is a custom, read-only Figma REST integration. It does not proxy or impersonate
++`mcp.figma.com`, and does not provide the official Figma MCP design-context tools.
++
++## Contract
++
++The existing Auth0 verifier supplies the subject. No tool takes a subject, user,
++role, Figma token or arbitrary upstream URL. Solstice access tokens stay at the
++Solstice gateway; a separate, subject-bound Figma OAuth grant authorizes REST calls.
++
++| Tool | Result |
++| --- | --- |
++| `solstice_figma_status()` | Live account verification; `connected:true` only after a successful `/v1/me` response matching the stored Figma account. Failure states distinguish missing grants from provider unavailability. |
++| `solstice_figma_connect()` | One-use gateway `authorization_url`, valid for 10 minutes; verifies the same Solstice identity in the browser before Figma consent. This changes OAuth state and is explicitly **not** annotated read-only. Invoke only from a human Connect action. |
++| `solstice_figma_get_file(file_key, node_ids?, depth=2)` | Figma file or node JSON under `data`, provenance and selectors; depth 1–10, at most 50 node IDs, 2 MiB provider JSON limit. Narrow selectors after a size error. |
++| `solstice_figma_get_images(file_key, node_ids, format='png', scale=1)` | Embedded MCP PNG images or SVG resources. `structuredContent.images` links each successful node to `content_index`, MIME, bytes, SHA-256 and canonical Figma provenance. Missing renders are explicit. |
++
++Images accept 1–8 nodes, scale 0.01–4, 4 MiB per image and 8 MiB aggregate before
++base64 encoding. Only HTTPS downloads from the exact built-in Figma CDN host set
++are accepted, with no redirects and no provider authorization header. Signed CDN
++URLs are not returned as durable provenance. Unknown CDN hosts fail closed; an
++operator must inspect provider changes before updating the allowlist. The server
++must permit at least 12 MiB MCP responses for maximum-size exports.
++
++## Before deployment
++
++1. Register a **Figma REST OAuth app** for the organization. A private published
++   app can serve members of that organization/team; draft apps are restricted to
++   the app owner and plan admins. Confirm the intended users are eligible. Public
++   distribution needs Figma's public-app approval process.
++2. Configure only `file_content:read` and `current_user:read`. The latter verifies
++   the linked account without trusting a cached flag. Figma's own file access
++   permissions remain authoritative; scopes do not grant access to new files.
++3. Register this exact redirect URI for the deployed gateway origin:
++   `https://api.solsticehealth.co/mcp/figma/callback`. For staging, register its
++   corresponding HTTPS origin with the same path and configure that exact URI.
++   No localhost or caller-supplied redirect is accepted by this gateway module.
++4. Keep the existing Solstice Auth0 issuer, audience and `mcp:connect` authorization
++   in place. Register a separate **regular web application** in that same Auth0
++   tenant for the gateway browser-identity step, using RS256 ID tokens and only
++   `openid`. Register the exact allowed callback:
++   `https://api.solsticehealth.co/mcp/figma/identity/callback` (or the configured
++   staging gateway origin with that same path). Its client ID/secret stay on the
++   gateway; configure `FIGMA_AUTH0_CLIENT_ID` and `FIGMA_AUTH0_CLIENT_SECRET`.
++   Enable the same identity connections as the MCP sign-in so both flows yield
++   the same immutable `sub`. Matching email addresses are never sufficient.
++
++   A Workbench OAuth client must be registered separately with Auth0,
++   including its exact allowed loopback callback and public-client/PKCE settings.
++   That registration does not register a Figma app and does not create a Figma grant.
++5. Provision a PostgreSQL database (the central auth DB can be reused) with a
++   least-privilege runtime role. Apply `migrations/20261014_figma.sql` explicitly
++   using the deployment migration role. The application validates schema version 1
++   and never creates production tables. SQLite is rejected outside explicit tests.
++6. Put the following settings in the gateway's secret/configuration manager:
++
++   ```text
++   FIGMA_ENABLED=true
++   FIGMA_AUTH0_CLIENT_ID=<registered gateway Auth0 regular-web-app client ID>
++   FIGMA_AUTH0_CLIENT_SECRET=<host-only Auth0 web-app secret>
++   FIGMA_CLIENT_ID=<registered Figma REST app client ID>
++   FIGMA_CLIENT_SECRET=<host-only client secret>
++   FIGMA_REDIRECT_URI=https://api.solsticehealth.co/mcp/figma/callback
++   FIGMA_DATABASE_URL=<PostgreSQL URL, or omit to reuse CENTRAL_AUTH_DB>
++   FIGMA_VAULT_KEYS=<Fernet key, or comma-separated keyring newest first>
++   ```
++
++   Generate a vault key with `python -c 'from cryptography.fernet import Fernet;
++   print(Fernet.generate_key().decode())'` in the secret-provisioning environment.
++   Do not commit it, copy it to client configuration, or place it in tool logs.
++   Keys encrypt both grants and PKCE verifiers, with client/subject/purpose bound
++   inside the authenticated ciphertext. Back up the keys separately from the DB.
++7. Route `/mcp/figma/connect`, `/mcp/figma/identity/callback` and
++   `/mcp/figma/callback` to this gateway service over HTTPS. These browser routes
++   are public, but state alone cannot link an account: the Auth0 callback verifies
++   signed identity against the MCP subject, and both callbacks require the bound
++   browser cookie. No caller-supplied identity is accepted. Suppress/redact query
++   strings at the reverse proxy, load balancer and access-log layer, because OAuth
++   codes and states arrive in the callback URL. Responses are no-store,
++   no-referrer, fixed HTML with a nonce-protected `window.close()`, without echoing
++   code/state/provider errors or redirecting to caller-controlled destinations.
++8. Deploy, confirm readiness, then inspect tools/list through an authenticated
++   Solstice session. Until `FIGMA_ENABLED` is true and configuration/schema are
++   valid, the four Figma tools remain absent. Enable the Workbench connection UI
++   only after this gateway rollout. Do not treat local mocks as a live connection.
++
++## Grant lifecycle and limits
++
++Connect returns a one-use gateway ticket, not a transferable Figma grant URL.
++Opening it creates an independent Auth0 authorization-code + S256 PKCE flow with
++random state and nonce. The gateway verifies the ID token's RS256 signature,
++issuer, audience, expiry, nonce and exact subject match to the authenticated MCP
++caller. Only then does it create a separate Figma OAuth state and PKCE verifier.
++This prevents someone from sending their connect link to another person and
++linking that person's Figma grant to the sender's Solstice account.
++
++A pre-auth `__Host-solstice-figma-link` cookie binds the Auth0 callback, then rotates
++after successful identity verification to bind the Figma callback. It is Secure,
++HttpOnly, SameSite=Lax, Path=/, with a 10-minute expiry. A forwarded post-identity
++Figma URL cannot finish without that browser's cookie. One linking flow per browser
++is supported; a new flow supersedes its cookie. Both OAuth states and the initial
++ticket are single-use, encrypted and bounded by the original 10-minute deadline.
++Starting another connection invalidates earlier pending flows. Each callback
++consumes its state before token exchange, including failures or a bad cookie.
++Interrupted exchanges require a new Connect action; codes are never replayed.
++Callback success returns no token in the page or MCP response.
++
++PostgreSQL `SELECT ... FOR UPDATE` serializes refreshes for a grant across server
++workers. Inserts use conflict-safe creation before locking. The stored access
++and optional rotated refresh tokens are replaced together after successful
++validation. If Figma omits a refresh token, the existing reusable token is kept.
++A request rejected after another worker refreshed reuses that newer access token.
++Lock waits are limited to 10 seconds; HTTP reads have connection/read timeouts,
++byte caps and a 30-second checked response budget. Failures are surfaced; there
++is no unbounded retry. A 401/403 permits one refresh/retry, since Figma may use 403
++for invalid tokens as well as file permission failures.
++
++Figma currently keeps one access token per app/account. The database therefore
++permits one linked Solstice identity per Figma account/app. Connecting that account
++under another Solstice identity fails rather than creating competing refresh
++owners. Do not share authorization URLs. To unlink administratively, delete that
++subject/app's grant and pending rows, then revoke the app in Figma if required;
++local deletion alone does not revoke a provider grant. There is no unlink tool in
++this initial scope. Key rotation: add a new key first, retain old decrypting keys,
++then explicitly re-encrypt existing rows before removing old keys. Losing a key
++requires reconnecting affected users.
++
++The integration has no Figma write APIs, official MCP session, organization-wide
++file discovery, arbitrary-URL fetch or automatic third-party billing. It reads
++only file keys selected by the caller within that caller's Figma permissions.
++HTML/SVG imported into a workspace remain untrusted artifacts and must use the
++Workbench's isolated preview route.
++
++## Verification and rollout checks
++
++Offline tests use a temporary SQLite database and mocked HTTP. They cover durable
++PKCE/state, replay/expiry, forwarded-link account-linking attacks, real signed
++OIDC claim/nonce checks, secure cookie rotation, subject isolation, encrypted
++grant binding, concurrent
++refresh from multiple service instances, refresh-token preservation/rotation,
++live-status failure, type/byte/URL/redirect guards, embedded PNG/SVG mapping,
++Auth0-protected tool calls and callback output secrecy. They do not demonstrate
++real PostgreSQL locking, registered Auth0/Figma apps, real account consent, external callback
++routing, Figma's current CDN response headers or production rate limits.
++
++Before enabling production, operators must apply the SQL migration in staging,
++run simultaneous refreshes from two gateway processes against PostgreSQL, exercise
++one real consenting account in a normal browser, verify callback query-log
++redaction, and confirm import of one PNG and one SVG through the Workbench. Check
++a different account cannot access the first account's grant and that file-level
++permission denial remains a denial. Do not forward Auth0 bearers to Figma.
++
++```sh
++uv venv .venv
++uv pip install --python .venv/bin/python -r requirements-dev.txt
++.venv/bin/pytest -q tests/test_figma.py
++.venv/bin/pytest -q
++.venv/bin/ruff check src/solstice_mcp/figma.py src/solstice_mcp/tools/figma.py \
++  src/solstice_mcp/figma_identity.py src/solstice_mcp/settings.py src/solstice_mcp/app.py tests/test_figma.py
++```
++
++Primary references, checked 2026-10-14: [Figma OAuth apps](https://developers.figma.com/docs/rest-api/oauth-apps/),
++[scopes](https://developers.figma.com/docs/rest-api/scopes/),
++[file/node/render endpoints](https://developers.figma.com/docs/rest-api/file-endpoints/),
++[PKCE](https://www.rfc-editor.org/rfc/rfc7636),
++[Auth0 regular web authorization](https://auth0.com/docs/get-started/authentication-and-authorization-flow/authorization-code-flow/add-login-auth-code-flow),
++[Auth0 PKCE token exchange](https://auth0.com/docs/api/authentication/authorization-code-flow-with-pkce/get-token-pkce).
+diff --git a/migrations/20261014_figma.sql b/migrations/20261014_figma.sql
+new file mode 100644
+index 0000000..862c5fe
+--- /dev/null
++++ b/migrations/20261014_figma.sql
+@@ -0,0 +1,25 @@
++-- Explicit operator-applied PostgreSQL migration. No application create_all.
++BEGIN;
++CREATE TABLE solstice_figma_schema (version INTEGER PRIMARY KEY CHECK (version = 1));
++INSERT INTO solstice_figma_schema (version) VALUES (1);
++CREATE TABLE solstice_figma_grants (
++    subject VARCHAR(255) NOT NULL,
++    client_id VARCHAR(255) NOT NULL,
++    figma_user_id VARCHAR(255),
++    payload TEXT,
++    expires_at BIGINT NOT NULL DEFAULT 0,
++    generation INTEGER NOT NULL DEFAULT 0,
++    PRIMARY KEY (subject, client_id),
++    CONSTRAINT uq_solstice_figma_account UNIQUE (client_id, figma_user_id)
++);
++CREATE TABLE solstice_figma_oauth_states (
++    state_hash VARCHAR(64) PRIMARY KEY,
++    subject VARCHAR(255) NOT NULL,
++    client_id VARCHAR(255) NOT NULL,
++    verifier TEXT NOT NULL,
++    expires_at BIGINT NOT NULL,
++    generation INTEGER NOT NULL
++);
++CREATE INDEX ix_solstice_figma_oauth_states_subject ON solstice_figma_oauth_states(subject);
++CREATE INDEX ix_solstice_figma_oauth_states_expires_at ON solstice_figma_oauth_states(expires_at);
++COMMIT;
+diff --git a/requirements.lock.txt b/requirements.lock.txt
+index e94af07..f0257aa 100644
+--- a/requirements.lock.txt
++++ b/requirements.lock.txt
+@@ -30,7 +30,9 @@ click==8.4.2
+ colorama==0.4.6 ; sys_platform == 'win32'
+     # via click
+ cryptography==49.0.0
+-    # via pyjwt
++    # via
++    #   -r requirements.txt
++    #   pyjwt
+ greenlet==3.5.4 ; platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64'
+     # via sqlalchemy
+ gunicorn==23.0.0
+diff --git a/requirements.txt b/requirements.txt
+index 7dd3869..7be2a2b 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -2,6 +2,7 @@ anyio>=4,<5
+ httpx>=0.28,<1
+ mcp>=1.23.0,<2
+ PyJWT[crypto]>=2.10.1,<3
++cryptography>=46,<50
+ redis>=5.2.1,<8
+ SQLAlchemy>=2.0.35,<3
+ psycopg2-binary>=2.9.10,<3
+diff --git a/src/solstice_mcp/app.py b/src/solstice_mcp/app.py
+index cd10e42..d557ba3 100644
+--- a/src/solstice_mcp/app.py
++++ b/src/solstice_mcp/app.py
+@@ -24,6 +24,8 @@ from starlette.routing import Mount, Route
+ 
+ from solstice_mcp.agent_app import AgentMCP, build_agent_mcp_app
+ from solstice_mcp.auth import JWKSCache, MCPAccessTokenVerifier
++from solstice_mcp.figma import FigmaConfig, FigmaService, FigmaVault
++from solstice_mcp.figma_identity import Auth0BrowserIdentity
+ from solstice_mcp.gate import SolsticeAccessGate
+ from solstice_mcp.memory_client import Auth0ClientCredentials, BackendMemoryClient
+ from solstice_mcp.settings import Settings, settings
+@@ -33,6 +35,7 @@ from solstice_mcp.tenants import TenantDatabaseFactory, TenantMembershipCache, T
+ from solstice_mcp.tools.brand_context import register_brand_context_tools
+ from solstice_mcp.tools.content import register_content_tools
+ from solstice_mcp.tools.discovery import register_discovery_tools
++from solstice_mcp.tools.figma import register_figma_tools
+ from solstice_mcp.tools.memory import register_memory_tools
+ from solstice_mcp.tools.requests import register_request_tools
+ from solstice_mcp.tools.user_admin import register_user_admin_tools
+@@ -208,6 +211,7 @@ def build_mcp_app(
+     backend_memory: BackendMemoryClient | None = None,
+     user_admin_auth0: Auth0UserAdmin | None = None,
+     central_session_factory: CentralSessionFactory | None = None,
++    figma_service: FigmaService | None = None,
+ ) -> FastMCP:
+     resource = runtime_settings.MCP_RESOURCE_URL
+     issuer = runtime_settings.issuer_url
+@@ -369,6 +373,27 @@ def build_mcp_app(
+             central_session_factory=central_session_factory,
+         )
+ 
++    # Disabled by default; no tables are created by application startup.
++    if figma_service is None and runtime_settings.FIGMA_ENABLED:
++        config = FigmaConfig(runtime_settings.FIGMA_CLIENT_ID, runtime_settings.FIGMA_CLIENT_SECRET,
++                             runtime_settings.FIGMA_REDIRECT_URI, runtime_settings.FIGMA_VAULT_KEYS)
++        callback_url, gateway_url = urlsplit(config.redirect_uri), urlsplit(resource)
++        if (callback_url.scheme, callback_url.netloc) != (gateway_url.scheme, gateway_url.netloc):
++            raise ValueError("Figma callback must use the configured MCP gateway origin")
++        database_url = runtime_settings.FIGMA_DATABASE_URL or runtime_settings.CENTRAL_AUTH_DB
++        if not database_url:
++            raise ValueError("FIGMA_DATABASE_URL or CENTRAL_AUTH_DB is required when Figma is enabled")
++        vault = FigmaVault(central_session_factory_from_url(database_url), config)
++        vault.validate_schema()
++        identity = Auth0BrowserIdentity(domain=runtime_settings.AUTH0_DOMAIN.strip(),
++                                        client_id=runtime_settings.FIGMA_AUTH0_CLIENT_ID,
++                                        client_secret=runtime_settings.FIGMA_AUTH0_CLIENT_SECRET,
++                                        gateway_origin=f"{gateway_url.scheme}://{gateway_url.netloc}")
++        figma_service = FigmaService(vault, identity=identity)
++    if figma_service is not None:
++        register_figma_tools(mcp, service=figma_service, require_subject=require_subject,
++                             require_access_token=require_access_token)
++
+     def _health_payload() -> dict[str, Any]:
+         # Public liveness only — no tool inventory (that discloses whether
+         # env-gated user-admin / memory tools are live). Authenticated
+diff --git a/src/solstice_mcp/figma.py b/src/solstice_mcp/figma.py
+new file mode 100644
+index 0000000..864d757
+--- /dev/null
++++ b/src/solstice_mcp/figma.py
+@@ -0,0 +1,553 @@
++"""Optional per-user Figma REST access. Not the official Figma MCP server.
++
++No Auth0 token crosses the Figma boundary. Token/code bodies never enter logs or
++MCP results. PostgreSQL serializes each subject's refresh across gateway workers.
++The explicit migration must be applied by an operator before enabling this module.
++"""
++
++from __future__ import annotations
++
++import base64
++import hashlib
++import hmac
++import json
++import math
++import re
++import secrets
++import time
++from collections.abc import Callable, Iterator
++from contextlib import contextmanager
++from dataclasses import dataclass, field
++from typing import TYPE_CHECKING, Any
++from urllib.parse import urlencode, urlsplit
++
++import httpx
++from cryptography.fernet import Fernet, InvalidToken, MultiFernet
++from sqlalchemy import BigInteger, Integer, String, Text, UniqueConstraint, delete, select, text
++from sqlalchemy.dialects.postgresql import insert as pg_insert
++from sqlalchemy.dialects.sqlite import insert as sqlite_insert
++from sqlalchemy.exc import IntegrityError
++from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
++
++if TYPE_CHECKING:
++    from solstice_mcp.figma_identity import Auth0BrowserIdentity
++
++API = "https://api.figma.com"
++AUTHORIZE = "https://www.figma.com/oauth"
++SCOPES = "file_content:read current_user:read"
++STATE_SECONDS = 600
++MAX_JSON_BYTES = 2 * 1024 * 1024
++MAX_IMAGE_BYTES = 4 * 1024 * 1024
++MAX_TOTAL_IMAGE_BYTES = 8 * 1024 * 1024
++CDN_HOSTS = frozenset({"s3-alpha.figma.com", "s3-alpha-sig.figma.com", "figma-alpha-api.s3.us-west-2.amazonaws.com"})
++
++
++class FigmaError(RuntimeError):
++    """Only fixed, credential-free messages may be raised across the tool boundary."""
++
++
++class FigmaHTTPError(FigmaError):
++    def __init__(self, status: int):
++        self.status = status
++        super().__init__(f"figma_http_{status}: Figma could not complete this request.")
++
++
++class FigmaBase(DeclarativeBase):
++    pass
++
++
++class FigmaGrant(FigmaBase):
++    __tablename__ = "solstice_figma_grants"
++    __table_args__ = (UniqueConstraint("client_id", "figma_user_id", name="uq_solstice_figma_account"),)
++    subject: Mapped[str] = mapped_column(String(255), primary_key=True)
++    client_id: Mapped[str] = mapped_column(String(255), primary_key=True)
++    figma_user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
++    payload: Mapped[str | None] = mapped_column(Text, nullable=True)
++    expires_at: Mapped[int] = mapped_column(BigInteger, default=0)
++    generation: Mapped[int] = mapped_column(Integer, default=0)
++
++
++class FigmaPending(FigmaBase):
++    __tablename__ = "solstice_figma_oauth_states"
++    state_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
++    subject: Mapped[str] = mapped_column(String(255), index=True)
++    client_id: Mapped[str] = mapped_column(String(255))
++    verifier: Mapped[str] = mapped_column(Text)
++    expires_at: Mapped[int] = mapped_column(BigInteger, index=True)
++    generation: Mapped[int] = mapped_column(Integer)
++
++
++@dataclass(frozen=True)
++class FigmaConfig:
++    client_id: str
++    client_secret: str = field(repr=False)
++    redirect_uri: str
++    vault_keys: str = field(repr=False)
++
++    def __post_init__(self):
++        url = urlsplit(self.redirect_uri)
++        if not self.client_id or len(self.client_id) > 255 or not self.client_secret or not self.vault_keys:
++            raise ValueError("Complete Figma OAuth and vault settings are required.")
++        if (
++            url.scheme != "https"
++            or not url.hostname
++            or url.username
++            or url.password
++            or url.query
++            or url.fragment
++            or url.path != "/mcp/figma/callback"
++        ):
++            raise ValueError("FIGMA_REDIRECT_URI must be an HTTPS /mcp/figma/callback URL without a query.")
++
++
++class FigmaVault:
++    def __init__(self, sessions: Callable[[], Session], config: FigmaConfig, *, allow_sqlite: bool = False):
++        self.sessions, self.config, self.allow_sqlite = sessions, config, allow_sqlite
++        try:
++            self.cipher = MultiFernet([Fernet(key.strip().encode()) for key in config.vault_keys.split(",")])
++        except (ValueError, TypeError) as exc:
++            raise ValueError("FIGMA_VAULT_KEYS must contain valid Fernet keys, newest first.") from exc
++
++    def validate_schema(self) -> None:
++        with self.sessions() as session:
++            self._dialect(session)
++            if session.execute(text("SELECT version FROM solstice_figma_schema")).scalar_one() != 1:
++                raise ValueError("Apply the explicit Solstice Figma schema version 1 migration before enabling it.")
++            # Confirm columns exist without reading any grant data.
++            session.execute(select(FigmaGrant).limit(0))
++            session.execute(select(FigmaPending).limit(0))
++
++    def _dialect(self, session: Session) -> str:
++        dialect = session.get_bind().dialect.name
++        if dialect != "postgresql" and not (dialect == "sqlite" and self.allow_sqlite):
++            raise ValueError("Figma grants require PostgreSQL; SQLite is supported only by explicit tests.")
++        return dialect
++
++    @contextmanager
++    def transaction(self) -> Iterator[Session]:
++        with self.sessions() as session:
++            try:
++                if self._dialect(session) == "sqlite":
++                    session.execute(text("BEGIN IMMEDIATE"))
++                else:
++                    session.execute(text("SET LOCAL lock_timeout = '10s'"))
++                yield session
++                session.commit()
++            except Exception:
++                session.rollback()
++                raise
++
++    def locked_grant(self, session: Session, subject: str, *, create: bool = False) -> FigmaGrant | None:
++        if not isinstance(subject, str) or not 1 <= len(subject) <= 255:
++            raise FigmaError("figma_identity_invalid: An authenticated subject is required.")
++        if create:
++            insert = pg_insert if self._dialect(session) == "postgresql" else sqlite_insert
++            session.execute(
++                insert(FigmaGrant)
++                .values(subject=subject, client_id=self.config.client_id, expires_at=0, generation=0)
++                .on_conflict_do_nothing()
++            )
++        return session.execute(
++            select(FigmaGrant)
++            .where(FigmaGrant.subject == subject, FigmaGrant.client_id == self.config.client_id)
++            .with_for_update()
++        ).scalar_one_or_none()
++
++    def seal(self, binding: str, value: dict) -> str:
++        return self.cipher.encrypt(json.dumps({"binding": binding, "value": value}).encode()).decode()
++
++    def unseal(self, binding: str, value: str) -> dict:
++        try:
++            envelope = json.loads(self.cipher.decrypt(value.encode()))
++            if envelope["binding"] != binding or not isinstance(envelope["value"], dict):
++                raise ValueError
++            return envelope["value"]
++        except (InvalidToken, ValueError, TypeError, KeyError) as exc:
++            raise FigmaError("figma_vault_invalid: The saved grant could not be verified. Reconnect Figma.") from exc
++
++    def binding(self, subject: str, purpose: str) -> str:
++        return json.dumps([self.config.client_id, subject, purpose])
++
++
++class FigmaService:
++    def __init__(
++        self,
++        vault: FigmaVault,
++        *,
++        identity: Auth0BrowserIdentity,
++        client: httpx.Client | None = None,
++        now: Callable[[], float] = time.time,
++    ):
++        self.vault, self.config, self.now, self.identity = vault, vault.config, now, identity
++        self.client = client or httpx.Client(timeout=httpx.Timeout(15, connect=5), follow_redirects=False)
++
++    def _bytes(self, method: str, url: str, *, cap: int, **kwargs) -> tuple[bytes, str]:
++        started = time.monotonic()
++        try:
++            with self.client.stream(method, url, follow_redirects=False, **kwargs) as response:
++                if response.status_code != 200:
++                    raise FigmaHTTPError(response.status_code)
++                length = response.headers.get("content-length")
++                if length and (not length.isdigit() or int(length) > cap):
++                    raise FigmaError("figma_response_too_large: Select fewer nodes or a smaller render scale.")
++                body = bytearray()
++                for chunk in response.iter_bytes():
++                    if time.monotonic() - started > 30:
++                        raise FigmaError("figma_unavailable: Figma exceeded the response time budget.")
++                    body.extend(chunk)
++                    if len(body) > cap:
++                        raise FigmaError("figma_response_too_large: Select fewer nodes or a smaller render scale.")
++                return bytes(body), response.headers.get("content-type", "").split(";", 1)[0].lower()
++        except httpx.HTTPError as exc:
++            raise FigmaError("figma_unavailable: Figma did not respond. Try again later.") from exc
++
++    def _json(self, method: str, path: str, **kwargs) -> dict:
++        body, _ = self._bytes(method, API + path, cap=MAX_JSON_BYTES, **kwargs)
++        try:
++            result = json.loads(body)
++            if not isinstance(result, dict):
++                raise ValueError
++            return result
++        except (ValueError, UnicodeError) as exc:
++            raise FigmaError("figma_response_invalid: Figma returned an invalid response.") from exc
++
++    def _token(self, path: str, data: dict) -> dict:
++        result = self._json("POST", path, data=data, auth=(self.config.client_id, self.config.client_secret))
++        if (
++            not isinstance(result.get("access_token"), str)
++            or not result["access_token"]
++            or len(result["access_token"]) > 16_384
++            or type(result.get("expires_in")) is not int
++            or not 60 <= result["expires_in"] <= 366 * 86400
++        ):
++            raise FigmaError("figma_token_invalid: Reconnect Figma to obtain a valid grant.")
++        return result
++
++    def connect(self, subject: str) -> dict:
++        ticket = secrets.token_urlsafe(32)
++        state_hash = hashlib.sha256(ticket.encode()).hexdigest()
++        with self.vault.transaction() as session:
++            grant = self.vault.locked_grant(session, subject, create=True)
++            assert grant is not None
++            grant.generation += 1
++            session.execute(delete(FigmaPending).where(FigmaPending.expires_at < int(self.now())))
++            session.execute(
++                delete(FigmaPending).where(
++                    FigmaPending.subject == subject, FigmaPending.client_id == self.config.client_id
++                )
++            )
++            session.add(
++                FigmaPending(
++                    state_hash=state_hash,
++                    subject=subject,
++                    client_id=self.config.client_id,
++                    verifier=self.vault.seal(self.vault.binding(subject, state_hash), {"stage": "ticket"}),
++                    expires_at=int(self.now()) + STATE_SECONDS,
++                    generation=grant.generation,
++                )
++            )
++        origin = self.config.redirect_uri.removesuffix("/mcp/figma/callback")
++        return {
++            "configured": True,
++            "authorization_url": origin + "/mcp/figma/connect?" + urlencode({"ticket": ticket}),
++            "expires_in": STATE_SECONDS,
++        }
++
++    def _new_pending(self, subject: str, generation: int, expires: int, payload: dict) -> str:
++        state = secrets.token_urlsafe(32)
++        state_hash = hashlib.sha256(state.encode()).hexdigest()
++        with self.vault.transaction() as session:
++            grant = self.vault.locked_grant(session, subject)
++            if grant is None or grant.generation != generation or expires < self.now():
++                raise FigmaError("figma_state_invalid: Start a new Figma connection.")
++            session.add(
++                FigmaPending(
++                    state_hash=state_hash,
++                    subject=subject,
++                    client_id=self.config.client_id,
++                    verifier=self.vault.seal(self.vault.binding(subject, state_hash), payload),
++                    expires_at=expires,
++                    generation=generation,
++                )
++            )
++        return state
++
++    def _consume_pending(self, state: str, stage: str, browser_secret: str | None = None) -> tuple[str, int, int, dict]:
++        if not isinstance(state, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", state):
++            raise FigmaError("figma_state_invalid: Start a new Figma connection.")
++        state_hash = hashlib.sha256(state.encode()).hexdigest()
++        valid = False
++        with self.vault.transaction() as session:
++            pending = session.get(FigmaPending, state_hash)
++            if pending is None or pending.client_id != self.config.client_id:
++                raise FigmaError("figma_state_invalid: Start a new Figma connection.")
++            subject, generation = pending.subject, pending.generation
++            grant = self.vault.locked_grant(session, subject)
++            session.expire(pending)
++            pending = session.execute(
++                select(FigmaPending).where(FigmaPending.state_hash == state_hash).with_for_update()
++            ).scalar_one_or_none()
++            if pending is None:
++                raise FigmaError("figma_state_invalid: Start a new Figma connection.")
++            expires = pending.expires_at
++            payload = self.vault.unseal(self.vault.binding(subject, state_hash), pending.verifier)
++            valid = (
++                grant is not None
++                and grant.generation == generation
++                and expires >= self.now()
++                and payload.get("stage") == stage
++            )
++            if stage != "ticket":
++                cookie_hash = hashlib.sha256((browser_secret or "").encode()).hexdigest()
++                valid = (
++                    valid
++                    and isinstance(browser_secret, str)
++                    and re.fullmatch(r"[A-Za-z0-9_-]{43}", browser_secret) is not None
++                    and hmac.compare_digest(payload.get("browser_hash", ""), cookie_hash)
++                )
++            session.delete(pending)
++        # Even a bad-cookie or denied callback consumes the state, outside rollback.
++        if not valid:
++            raise FigmaError("figma_state_invalid: Start a new Figma connection in the same browser.")
++        return subject, generation, expires, payload
++
++    def start_browser(self, ticket: str) -> dict:
++        subject, generation, expires, _ = self._consume_pending(ticket, "ticket")
++        browser_secret, nonce, verifier = (
++            secrets.token_urlsafe(32),
++            secrets.token_urlsafe(32),
++            secrets.token_urlsafe(48),
++        )
++        state = self._new_pending(
++            subject,
++            generation,
++            expires,
++            {
++                "stage": "identity",
++                "nonce": nonce,
++                "verifier": verifier,
++                "browser_hash": hashlib.sha256(browser_secret.encode()).hexdigest(),
++            },
++        )
++        return {
++            "url": self.identity.authorization_url(state=state, nonce=nonce, verifier=verifier),
++            "cookie": browser_secret,
++        }
++
++    def identity_callback(
++        self, *, state: str, code: str | None, browser_secret: str | None, error: str | None = None
++    ) -> dict:
++        subject, generation, expires, payload = self._consume_pending(state, "identity", browser_secret)
++        if error or not isinstance(code, str) or not 1 <= len(code) <= 2048:
++            raise FigmaError("figma_identity_failed: Start a new Figma connection.")
++        verified = self.identity.exchange(code=code, verifier=payload["verifier"], nonce=payload["nonce"])
++        if not hmac.compare_digest(verified.encode(), subject.encode()):
++            raise FigmaError("figma_identity_mismatch: Sign in using the same Solstice account as the Workbench.")
++        browser_secret, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(48)
++        state = self._new_pending(
++            subject,
++            generation,
++            expires,
++            {
++                "stage": "figma",
++                "verifier": verifier,
++                "browser_hash": hashlib.sha256(browser_secret.encode()).hexdigest(),
++            },
++        )
++        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
++        return {
++            "url": AUTHORIZE
++            + "?"
++            + urlencode(
++                {
++                    "client_id": self.config.client_id,
++                    "redirect_uri": self.config.redirect_uri,
++                    "scope": SCOPES,
++                    "state": state,
++                    "response_type": "code",
++                    "code_challenge": challenge,
++                    "code_challenge_method": "S256",
++                }
++            ),
++            "cookie": browser_secret,
++        }
++
++    def callback(
++        self, *, state: str, code: str | None, browser_secret: str | None = None, error: str | None = None
++    ) -> None:
++        subject, generation, _, payload = self._consume_pending(state, "figma", browser_secret)
++        verifier = payload["verifier"]
++        # State is durably consumed before network I/O, including denied/failed exchanges.
++        if error or not isinstance(code, str) or not 1 <= len(code) <= 2048:
++            raise FigmaError("figma_authorization_denied: Start a new Figma connection if you want to try again.")
++        token = self._token(
++            "/v1/oauth/token",
++            {
++                "redirect_uri": self.config.redirect_uri,
++                "code": code,
++                "grant_type": "authorization_code",
++                "code_verifier": verifier,
++            },
++        )
++        refresh = token.get("refresh_token")
++        user_id = token.get("user_id_string")
++        if (
++            not isinstance(refresh, str)
++            or not 1 <= len(refresh) <= 16_384
++            or not isinstance(user_id, str)
++            or not user_id
++        ):
++            raise FigmaError("figma_token_invalid: Reconnect Figma to obtain a valid grant.")
++        try:
++            with self.vault.transaction() as session:
++                grant = self.vault.locked_grant(session, subject)
++                if grant is None or grant.generation != generation:
++                    raise FigmaError(
++                        "figma_connection_superseded: A newer connection was started. Finish that connection."
++                    )
++                grant.figma_user_id, grant.expires_at = user_id, int(self.now()) + token["expires_in"]
++                grant.payload = self.vault.seal(
++                    self.vault.binding(subject, "grant"),
++                    {"access_token": token["access_token"], "refresh_token": refresh, "figma_user_id": user_id},
++                )
++        except IntegrityError as exc:
++            raise FigmaError(
++                "figma_account_linked: This Figma account is already linked to another Solstice identity."
++            ) from exc
++
++    def _access(self, subject: str, *, rejected: str | None = None) -> str:
++        with self.vault.transaction() as session:
++            grant = self.vault.locked_grant(session, subject)
++            if grant is None or not grant.payload:
++                raise FigmaError("figma_not_connected: Connect Figma from the integrations panel first.")
++            payload = self.vault.unseal(self.vault.binding(subject, "grant"), grant.payload)
++            token = payload["access_token"]
++            # A waiter whose rejected token was already replaced reuses the winner's token.
++            if grant.expires_at <= self.now() + 60 or rejected == token:
++                result = self._token("/v1/oauth/refresh", {"refresh_token": payload["refresh_token"]})
++                if result.get("user_id_string", grant.figma_user_id) != grant.figma_user_id:
++                    raise FigmaError("figma_token_invalid: Reconnect Figma to obtain a valid grant.")
++                refresh = result.get("refresh_token", payload["refresh_token"])
++                if not isinstance(refresh, str) or not 1 <= len(refresh) <= 16_384:
++                    raise FigmaError("figma_token_invalid: Reconnect Figma to obtain a valid grant.")
++                payload.update(access_token=result["access_token"], refresh_token=refresh)
++                grant.payload = self.vault.seal(self.vault.binding(subject, "grant"), payload)
++                grant.expires_at = int(self.now()) + result["expires_in"]
++                token = result["access_token"]
++            return token
++
++    def _get(self, subject: str, path: str, **kwargs) -> dict:
++        token = self._access(subject)
++        try:
++            return self._json("GET", path, headers={"Authorization": "Bearer " + token}, **kwargs)
++        except FigmaHTTPError as exc:
++            if exc.status not in (401, 403):
++                raise
++        # A 403 can mean permissions or an invalid token. Retry once after a
++        # serialized refresh, never silently broaden scopes or destroy the grant.
++        token = self._access(subject, rejected=token)
++        return self._json("GET", path, headers={"Authorization": "Bearer " + token}, **kwargs)
++
++    def status(self, subject: str) -> dict:
++        try:
++            user = self._get(subject, "/v1/me")
++            if not isinstance(user.get("id"), str) or not user["id"]:
++                raise FigmaError("figma_response_invalid: Figma returned an invalid account response.")
++            with self.vault.transaction() as session:
++                grant = self.vault.locked_grant(session, subject)
++                if grant is None or user["id"] != grant.figma_user_id:
++                    raise FigmaError("figma_identity_mismatch: Reconnect Figma.")
++            return {"configured": True, "connected": True, "state": "connected", "figma_user_id": user["id"]}
++        except FigmaError as exc:
++            return {"configured": True, "connected": False, "state": str(exc).partition(":")[0], "message": str(exc)}
++
++    @staticmethod
++    def _selectors(file_key: str, node_ids: list[str] | None, *, maximum: int = 50) -> list[str]:
++        if not isinstance(file_key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", file_key):
++            raise ValueError("Use a Figma file key, not a URL or filesystem path.")
++        if node_ids is None:
++            return []
++        if (
++            not isinstance(node_ids, list)
++            or not 1 <= len(node_ids) <= maximum
++            or any(not isinstance(node, str) or not re.fullmatch(r"[A-Za-z0-9_:;-]{1,128}", node) for node in node_ids)
++        ):
++            raise ValueError(f"Provide between 1 and {maximum} Figma node IDs.")
++        return list(dict.fromkeys(node_ids))
++
++    def get_file(self, subject: str, file_key: str, node_ids: list[str] | None = None, depth: int = 2) -> dict:
++        ids = self._selectors(file_key, node_ids)
++        if type(depth) is not int or not 1 <= depth <= 10:
++            raise ValueError("Depth must be between 1 and 10; narrow node IDs for large files.")
++        params: dict[str, Any] = {"depth": depth}
++        if ids:
++            params["ids"] = ",".join(ids)
++        return {
++            "file_key": file_key,
++            "node_ids": ids,
++            "depth": depth,
++            "source_url": f"https://www.figma.com/design/{file_key}",
++            "data": self._get(subject, f"/v1/files/{file_key}" + ("/nodes" if ids else ""), params=params),
++        }
++
++    def get_images(
++        self, subject: str, file_key: str, node_ids: list[str], format: str = "png", scale: float = 1
++    ) -> dict:
++        ids = self._selectors(file_key, node_ids, maximum=8)
++        if (
++            not ids
++            or format not in {"png", "svg"}
++            or isinstance(scale, bool)
++            or not math.isfinite(scale)
++            or not 0.01 <= scale <= 4
++        ):
++            raise ValueError("Choose png or svg, 1-8 node IDs, and a finite scale between 0.01 and 4.")
++        payload = self._get(
++            subject, f"/v1/images/{file_key}", params={"ids": ",".join(ids), "format": format, "scale": scale}
++        )
++        images = payload.get("images")
++        if not isinstance(images, dict):
++            raise FigmaError("figma_response_invalid: Figma did not return an image map.")
++        outputs: list[dict[str, Any]] = []
++        total = 0
++        for node in ids:
++            url = images.get(node)
++            source = f"https://www.figma.com/design/{file_key}?" + urlencode({"node-id": node})
++            if url is None:
++                outputs.append({"node_id": node, "source_url": source, "error": "render_unavailable"})
++                continue
++            if not isinstance(url, str) or len(url) > 8192:
++                raise FigmaError("figma_image_url_invalid: Figma returned an unsupported image URL.")
++            parsed = urlsplit(url)
++            if (
++                parsed.scheme != "https"
++                or parsed.hostname not in CDN_HOSTS
++                or parsed.port not in (None, 443)
++                or parsed.username
++                or parsed.password
++                or parsed.fragment
++            ):
++                raise FigmaError("figma_image_url_invalid: The returned image host is not approved by this gateway.")
++            # A new request with NO Figma/Auth0 Authorization header, no redirects.
++            body, mime = self._bytes("GET", url, cap=min(MAX_IMAGE_BYTES, MAX_TOTAL_IMAGE_BYTES - total))
++            expected = "image/png" if format == "png" else "image/svg+xml"
++            if mime != expected or (format == "png" and not body.startswith(b"\x89PNG\r\n\x1a\n")):
++                raise FigmaError("figma_image_invalid: The returned artifact does not match the requested image type.")
++            if format == "svg":
++                try:
++                    if "<svg" not in body.decode("utf-8").lower():
++                        raise ValueError
++                except (UnicodeError, ValueError) as exc:
++                    raise FigmaError("figma_image_invalid: The returned artifact is not UTF-8 SVG.") from exc
++            total += len(body)
++            outputs.append(
++                {
++                    "node_id": node,
++                    "source_url": source,
++                    "mime_type": mime,
++                    "bytes": len(body),
++                    "sha256": hashlib.sha256(body).hexdigest(),
++                    "body": body,
++                }
++            )
++        return {"file_key": file_key, "format": format, "images": outputs}
+diff --git a/src/solstice_mcp/figma_identity.py b/src/solstice_mcp/figma_identity.py
+new file mode 100644
+index 0000000..8316475
+--- /dev/null
++++ b/src/solstice_mcp/figma_identity.py
+@@ -0,0 +1,123 @@
++"""Browser OIDC proof prevents Figma account-linking CSRF across MCP users."""
++
++from __future__ import annotations
++
++import base64
++import hashlib
++import hmac
++import json
++import re
++import time
++from urllib.parse import urlencode, urlsplit
++
++import httpx
++import jwt
++
++from solstice_mcp.auth import JWKSCache
++from solstice_mcp.figma import FigmaError
++
++
++class Auth0BrowserIdentity:
++    def __init__(
++        self,
++        *,
++        domain: str,
++        client_id: str,
++        client_secret: str,
++        gateway_origin: str,
++        client: httpx.Client | None = None,
++        jwks: JWKSCache | None = None,
++    ):
++        if not re.fullmatch(r"[A-Za-z0-9.-]+", domain) or not client_id or not client_secret:
++            raise ValueError("A separate registered Auth0 gateway web client is required for Figma linking")
++        origin = urlsplit(gateway_origin)
++        if origin.scheme != "https" or not origin.hostname or origin.path or origin.query or origin.fragment:
++            raise ValueError("The Figma identity callback requires the HTTPS gateway origin")
++        self.issuer = f"https://{domain}/"
++        self.client_id, self.client_secret = client_id, client_secret
++        self.redirect_uri = gateway_origin + "/mcp/figma/identity/callback"
++        self.client = client or httpx.Client(timeout=httpx.Timeout(10, connect=5), follow_redirects=False)
++        self.jwks = jwks or JWKSCache(self.issuer + ".well-known/jwks.json")
++
++    def authorization_url(self, *, state: str, nonce: str, verifier: str) -> str:
++        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
++        return (
++            self.issuer
++            + "authorize?"
++            + urlencode(
++                {
++                    "client_id": self.client_id,
++                    "redirect_uri": self.redirect_uri,
++                    "response_type": "code",
++                    "scope": "openid",
++                    "state": state,
++                    "nonce": nonce,
++                    "code_challenge": challenge,
++                    "code_challenge_method": "S256",
++                    "prompt": "login",
++                }
++            )
++        )
++
++    def exchange(self, *, code: str, verifier: str, nonce: str) -> str:
++        started = time.monotonic()
++        try:
++            with self.client.stream(
++                "POST",
++                self.issuer + "oauth/token",
++                follow_redirects=False,
++                json={
++                    "grant_type": "authorization_code",
++                    "client_id": self.client_id,
++                    "client_secret": self.client_secret,
++                    "redirect_uri": self.redirect_uri,
++                    "code": code,
++                    "code_verifier": verifier,
++                },
++            ) as response:
++                if response.status_code != 200:
++                    raise FigmaError("figma_identity_failed: Sign in to Solstice again to connect Figma.")
++                data = bytearray()
++                for chunk in response.iter_bytes():
++                    if time.monotonic() - started > 30:
++                        raise FigmaError("figma_identity_failed: The identity response exceeded its time budget.")
++                    data.extend(chunk)
++                    if len(data) > 64 * 1024:
++                        raise FigmaError("figma_identity_failed: The identity response exceeded its limit.")
++            parsed = json.loads(data)
++            if not isinstance(parsed, dict):
++                raise ValueError
++            token = parsed.get("id_token")
++            if not isinstance(token, str) or len(token) > 32 * 1024:
++                raise ValueError
++            header = jwt.get_unverified_header(token)
++            if header.get("alg") != "RS256" or not isinstance(header.get("kid"), str):
++                raise ValueError
++            keys = self.jwks.get().get("keys", [])
++            match = next((key for key in keys if key.get("kid") == header["kid"]), None)
++            if match is None:
++                keys = self.jwks.get(refresh=True).get("keys", [])
++                match = next((key for key in keys if key.get("kid") == header["kid"]), None)
++            if match is None:
++                raise ValueError
++            claims = jwt.decode(
++                token,
++                jwt.PyJWK.from_dict(match).key,
++                algorithms=["RS256"],
++                issuer=self.issuer,
++                audience=self.client_id,
++                options={"require": ["iss", "aud", "sub", "exp", "iat", "nonce"]},
++            )
++            if not isinstance(claims["sub"], str) or not 1 <= len(claims["sub"]) <= 255:
++                raise ValueError
++            if not isinstance(claims["nonce"], str) or not hmac.compare_digest(claims["nonce"], nonce):
++                raise ValueError
++            if claims.get("azp", self.client_id) != self.client_id:
++                raise ValueError
++            if isinstance(claims["aud"], list) and len(claims["aud"]) > 1 and claims.get("azp") != self.client_id:
++                raise ValueError
++            return claims["sub"]
++        except FigmaError:
++            raise
++        except (httpx.HTTPError, OSError, RuntimeError, ValueError, KeyError, TypeError, jwt.PyJWTError) as exc:
++            raise FigmaError("figma_identity_failed: Sign in to Solstice again to connect Figma.") from exc
+diff --git a/src/solstice_mcp/settings.py b/src/solstice_mcp/settings.py
+index fe9a78d..fe36945 100644
+--- a/src/solstice_mcp/settings.py
++++ b/src/solstice_mcp/settings.py
+@@ -20,6 +20,15 @@ def _env_configured(value: str) -> bool:
+ @dataclass(frozen=True)
+ class Settings:
+     ENV: str = "development"
++    # Optional Figma REST integration; deployment must apply its explicit migration.
++    FIGMA_ENABLED: bool = False
++    FIGMA_AUTH0_CLIENT_ID: str = ""
++    FIGMA_AUTH0_CLIENT_SECRET: str = field(default="", repr=False)
++    FIGMA_CLIENT_ID: str = ""
++    FIGMA_CLIENT_SECRET: str = field(default="", repr=False)
++    FIGMA_REDIRECT_URI: str = ""
++    FIGMA_VAULT_KEYS: str = field(default="", repr=False)
++    FIGMA_DATABASE_URL: str = field(default="", repr=False)
+     AUTH0_DOMAIN: str = ""
+     # Management-capable Auth0 application (create:users/read:users/update:users
+     # on the /api/v2/ audience). Mirrors the Backend-Server env names. Empty
+@@ -74,6 +83,7 @@ class Settings:
+     @classmethod
+     def from_env(cls) -> Settings:
+         values = {name: os.getenv(name, field.default) for name, field in cls.__dataclass_fields__.items()}
++        values["FIGMA_ENABLED"] = str(values["FIGMA_ENABLED"]).strip().lower() in {"1", "true"}
+         values["S3_PRESIGN_EXPIRY_SECONDS"] = int(str(values["S3_PRESIGN_EXPIRY_SECONDS"]))
+         values["S3_MAX_INLINE_BYTES"] = int(str(values["S3_MAX_INLINE_BYTES"]))
+         values["SOLSTICE_BACKEND_TIMEOUT_SECONDS"] = int(str(values["SOLSTICE_BACKEND_TIMEOUT_SECONDS"]))
+diff --git a/src/solstice_mcp/tools/figma.py b/src/solstice_mcp/tools/figma.py
+new file mode 100644
+index 0000000..6206bfa
+--- /dev/null
++++ b/src/solstice_mcp/tools/figma.py
+@@ -0,0 +1,180 @@
++"""Figma REST tools with token-derived subjects and embedded export artifacts."""
++
++from __future__ import annotations
++
++import base64
++from collections.abc import Callable
++from typing import Any
++from urllib.parse import quote
++
++import anyio
++from mcp.server.fastmcp import FastMCP
++from mcp.types import (
++    CallToolResult,
++    ContentBlock,
++    EmbeddedResource,
++    ImageContent,
++    TextContent,
++    TextResourceContents,
++    ToolAnnotations,
++)
++from pydantic import AnyUrl
++from starlette.requests import Request
++from starlette.responses import HTMLResponse, RedirectResponse
++
++from solstice_mcp.audit import audited_tool
++from solstice_mcp.figma import FigmaError, FigmaService
++
++
++def register_figma_tools(
++    mcp: FastMCP, *, service: FigmaService, require_subject: Callable[[], str], require_access_token: Callable[[], Any]
++) -> None:
++    read = audited_tool(
++        mcp,
++        require_access_token,
++        annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True),
++    )
++    connect = audited_tool(
++        mcp,
++        require_access_token,
++        annotations=ToolAnnotations(
++            readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
++        ),
++    )
++
++    @read
++    def solstice_figma_status() -> dict[str, Any]:
++        """Verify this authenticated user's linked Figma account; never returns tokens."""
++        return service.status(require_subject())
++
++    @connect
++    def solstice_figma_connect() -> dict[str, Any]:
++        """Start linking YOUR Figma account, only after the user chooses Connect Figma.
++
++        Open authorization_url in the user's regular browser and sign in with the
++        same Solstice identity as this MCP client. Never use an embedded
++        WebView. Do not share that one-use URL with another person. The callback
++        binds the Figma account to this authenticated Solstice identity.
++        """
++        return service.connect(require_subject())
++
++    @read
++    def solstice_figma_get_file(file_key: str, node_ids: list[str] | None = None, depth: int = 2) -> dict[str, Any]:
++        """Read Figma file/node JSON at bounded depth using this user's Figma grant.
++
++        The Figma REST permission check is authoritative. Narrow node_ids or depth
++        after a response-size error. This is not official Figma MCP design context.
++        """
++        return service.get_file(require_subject(), file_key, node_ids, depth)
++
++    @read
++    def solstice_figma_get_images(
++        file_key: str, node_ids: list[str], format: str = "png", scale: float = 1
++    ) -> CallToolResult:
++        """Read PNG/SVG exports of 1-8 nodes as embedded artifacts, never provider tokens.
++
++        Exports are bounded to 4 MiB each and 8 MiB total. Null Figma renders are
++        disclosed individually. All image downloads happen on this gateway.
++        """
++        result = service.get_images(require_subject(), file_key, node_ids, format, scale)
++        content: list[ContentBlock] = []
++        for item in result["images"]:
++            body = item.pop("body", None)
++            if body is None:
++                continue
++            item["content_index"] = len(content)
++            if format == "png":
++                content.append(ImageContent(type="image", data=base64.b64encode(body).decode(), mimeType="image/png"))
++            else:
++                uri = f"figma://file/{file_key}/nodes/{quote(item['node_id'], safe='')}.svg"
++                content.append(
++                    EmbeddedResource(
++                        type="resource",
++                        resource=TextResourceContents(
++                            uri=AnyUrl(uri), mimeType="image/svg+xml", text=body.decode("utf-8")
++                        ),
++                    )
++                )
++        content.append(
++            TextContent(type="text", text="Figma exports are attached; per-node provenance is in structuredContent.")
++        )
++        return CallToolResult(content=content, structuredContent=result)
++
++    cookie_name = "__Host-solstice-figma-link"
++
++    def page(message: str, status: int) -> HTMLResponse:
++        import secrets
++
++        nonce = secrets.token_urlsafe(18)
++        response = HTMLResponse(
++            f'<!doctype html><meta charset="utf-8"><title>Figma connection</title>'
++            f'<p>{message}</p><script nonce="{nonce}">window.close()</script>',
++            status_code=status,
++            headers={
++                "Cache-Control": "no-store",
++                "Referrer-Policy": "no-referrer",
++                "X-Content-Type-Options": "nosniff",
++                "Content-Security-Policy": (
++                    f"default-src 'none'; script-src 'nonce-{nonce}'; frame-ancestors 'none'; base-uri 'none'"
++                ),
++            },
++        )
++        response.delete_cookie(cookie_name, path="/", secure=True, httponly=True, samesite="lax")
++        return response
++
++    def query_valid(request: Request, required: str) -> None:
++        if len(request.url.query) > 4096 or len(request.query_params.getlist(required)) != 1:
++            raise FigmaError("figma_state_invalid")
++        if any(len(request.query_params.getlist(key)) > 1 for key in ("code", "error")):
++            raise FigmaError("figma_state_invalid")
++
++    def redirect(result: dict) -> RedirectResponse:
++        response = RedirectResponse(
++            result["url"], status_code=302, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
++        )
++        response.set_cookie(
++            cookie_name, result["cookie"], max_age=600, path="/", secure=True, httponly=True, samesite="lax"
++        )
++        return response
++
++    async def start(request: Request):
++        try:
++            query_valid(request, "ticket")
++            result = await anyio.to_thread.run_sync(lambda: service.start_browser(request.query_params["ticket"]))
++            return redirect(result)
++        except FigmaError:
++            return page("Figma could not be connected. Return to Video Workbench and start a new connection.", 400)
++
++    async def identity_callback(request: Request):
++        try:
++            query_valid(request, "state")
++            result = await anyio.to_thread.run_sync(
++                lambda: service.identity_callback(
++                    state=request.query_params["state"],
++                    code=request.query_params.get("code"),
++                    error=request.query_params.get("error"),
++                    browser_secret=request.cookies.get(cookie_name),
++                )
++            )
++            return redirect(result)
++        except FigmaError:
++            return page("Figma could not be connected. Sign in with the same Solstice account as Video Workbench.", 400)
++
++    async def callback(request: Request):
++        try:
++            query_valid(request, "state")
++            await anyio.to_thread.run_sync(
++                lambda: service.callback(
++                    state=request.query_params["state"],
++                    code=request.query_params.get("code"),
++                    error=request.query_params.get("error"),
++                    browser_secret=request.cookies.get(cookie_name),
++                )
++            )
++            return page("Figma connected. You can return to Video Workbench.", 200)
++        except FigmaError:
++            return page("Figma could not be connected. Return to Video Workbench and start a new connection.", 400)
++
++    mcp.custom_route("/mcp/figma/connect", methods=["GET"])(start)
++    mcp.custom_route("/mcp/figma/identity/callback", methods=["GET"])(identity_callback)
++    mcp.custom_route("/mcp/figma/callback", methods=["GET"])(callback)
+diff --git a/tests/test_figma.py b/tests/test_figma.py
+new file mode 100644
+index 0000000..d5fbe54
+--- /dev/null
++++ b/tests/test_figma.py
+@@ -0,0 +1,546 @@
++"""No live Figma requests: exercise durable grants, authority and bounded output."""
++
++from __future__ import annotations
++
++import base64
++import hashlib
++import json
++import threading
++from concurrent.futures import ThreadPoolExecutor
++from urllib.parse import parse_qs, urlsplit
++
++import httpx
++import pytest
++from conftest import SHARED_SUB, TEST_ISSUER, TEST_RESOURCE
++from cryptography.fernet import Fernet
++from sqlalchemy import create_engine, inspect, select, text
++from sqlalchemy.exc import OperationalError
++from sqlalchemy.orm import sessionmaker
++from starlette.testclient import TestClient
++
++from solstice_mcp.app import build_mcp_app
++from solstice_mcp.auth import JWKSCache
++from solstice_mcp.figma import (
++    API,
++    FigmaBase,
++    FigmaConfig,
++    FigmaError,
++    FigmaGrant,
++    FigmaHTTPError,
++    FigmaPending,
++    FigmaService,
++    FigmaVault,
++)
++from solstice_mcp.settings import Settings
++
++
++@pytest.fixture
++def setup(tmp_path):
++    engine = create_engine("sqlite:///" + str(tmp_path / "grants.sqlite"), connect_args={"check_same_thread": False})
++    FigmaBase.metadata.create_all(engine)  # Tests only; production has an explicit migration.
++    with engine.begin() as connection:
++        connection.execute(text("CREATE TABLE solstice_figma_schema(version INTEGER PRIMARY KEY)"))
++        connection.execute(text("INSERT INTO solstice_figma_schema VALUES (1)"))
++    sessions = sessionmaker(engine, expire_on_commit=False)
++    config = FigmaConfig(
++        "figma-app", "figma-secret", "https://mcp.test.local/mcp/figma/callback", Fernet.generate_key().decode()
++    )
++    vault = FigmaVault(sessions, config, allow_sqlite=True)
++    now = [1000.0]
++    calls = []
++    response = {
++        "access_token": "figma-access",
++        "refresh_token": "figma-refresh",
++        "expires_in": 3600,
++        "user_id_string": "12345678901234567890",
++    }
++
++    def handler(request):
++        calls.append(request)
++        if request.url.path.startswith("/v1/oauth/"):
++            return httpx.Response(200, json=response)
++        if request.url.path == "/v1/me":
++            return httpx.Response(200, json={"id": response["user_id_string"]})
++        return httpx.Response(200, json={"document": {"id": "0:0", "name": "Example"}})
++
++    client = httpx.Client(transport=httpx.MockTransport(handler))
++
++    class Identity:
++        subject = SHARED_SUB
++
++        def authorization_url(self, *, state, nonce, verifier):
++            from urllib.parse import urlencode
++
++            return "https://test.auth0.local/authorize?" + urlencode({"state": state, "nonce": nonce})
++
++        def exchange(self, *, code, verifier, nonce):
++            assert code and verifier and nonce
++            return self.subject
++
++    service = FigmaService(vault, identity=Identity(), client=client, now=lambda: now[0])
++    yield service, vault, now, calls, response
++    client.close()
++    engine.dispose()
++
++
++def figma_flow(service, subject=SHARED_SUB):
++    service.identity.subject = subject
++    result = service.connect(subject)
++    ticket = parse_qs(urlsplit(result["authorization_url"]).query)["ticket"][0]
++    started = service.start_browser(ticket)
++    identity_state = parse_qs(urlsplit(started["url"]).query)["state"][0]
++    verified = service.identity_callback(state=identity_state, code="identity-code", browser_secret=started["cookie"])
++    state = parse_qs(urlsplit(verified["url"]).query)["state"][0]
++    return result, state, verified["cookie"]
++
++
++def authorize(service, subject=SHARED_SUB):
++    result, state, cookie = figma_flow(service, subject)
++    service.callback(state=state, code="authorization-code", browser_secret=cookie)
++    return result, state
++
++
++def test_oauth_subject_binding_pkce_encryption_and_auth_separation(setup):
++    service, vault, _, calls, _ = setup
++    result = service.connect(SHARED_SUB)
++    ticket = parse_qs(urlsplit(result["authorization_url"]).query)["ticket"][0]
++    started = service.start_browser(ticket)
++    identity_state = parse_qs(urlsplit(started["url"]).query)["state"][0]
++    verified = service.identity_callback(state=identity_state, code="identity-code", browser_secret=started["cookie"])
++    query = parse_qs(urlsplit(verified["url"]).query)
++    state = query["state"][0]
++    assert query["scope"] == ["file_content:read current_user:read"]
++    assert query["code_challenge_method"] == ["S256"]
++    with vault.sessions() as session:
++        pending = session.execute(select(FigmaPending)).scalar_one()
++        assert pending.subject == SHARED_SUB and pending.state_hash == hashlib.sha256(state.encode()).hexdigest()
++        verifier = vault.unseal(vault.binding(SHARED_SUB, pending.state_hash), pending.verifier)["verifier"]
++        assert state not in pending.verifier and verifier not in pending.verifier
++    assert query["code_challenge"] == [
++        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
++    ]
++    service.callback(state=state, code="code-secret", browser_secret=verified["cookie"])
++    token_call = calls[0]
++    assert str(token_call.url) == API + "/v1/oauth/token"
++    assert token_call.headers["authorization"] == "Basic " + base64.b64encode(b"figma-app:figma-secret").decode()
++    assert parse_qs(token_call.content.decode())["code_verifier"] == [verifier]
++    assert "code-secret" not in str(token_call.url)
++    with vault.sessions() as session:
++        assert session.execute(select(FigmaPending)).scalar_one_or_none() is None
++        grant = session.execute(select(FigmaGrant)).scalar_one()
++        assert grant.subject == SHARED_SUB
++        assert "figma-access" not in grant.payload and "figma-refresh" not in grant.payload
++    status = service.status(SHARED_SUB)
++    assert status["connected"] and status["figma_user_id"] == "12345678901234567890"
++    assert calls[-1].headers["authorization"] == "Bearer figma-access"
++    assert not service.status("auth0|other")["connected"]
++    assert "figma-access" not in json.dumps(status)
++
++
++def test_callback_state_is_expiring_single_use_and_denial_consumes_it(setup):
++    service, _, now, calls, _ = setup
++    _, state = authorize(service)
++    before = len(calls)
++    with pytest.raises(FigmaError, match="state_invalid"):
++        service.callback(state=state, code="second-code")
++    assert len(calls) == before
++    _, expired, cookie = figma_flow(service)
++    now[0] += 601
++    with pytest.raises(FigmaError, match="state_invalid"):
++        service.callback(state=expired, code="third-code", browser_secret=cookie)
++    _, denied, cookie = figma_flow(service)
++    with pytest.raises(FigmaError, match="authorization_denied"):
++        service.callback(state=denied, code=None, error="user-denied", browser_secret=cookie)
++    with pytest.raises(FigmaError, match="state_invalid"):
++        service.callback(state=denied, code="fourth-code")
++
++
++def test_new_connection_supersedes_prior_pending_flow(setup):
++    service, _, _, calls, _ = setup
++    first = service.connect(SHARED_SUB)
++    second = service.connect(SHARED_SUB)
++    first_state = parse_qs(urlsplit(first["authorization_url"]).query)["ticket"][0]
++    second_state = parse_qs(urlsplit(second["authorization_url"]).query)["ticket"][0]
++    with pytest.raises(FigmaError, match="state_invalid"):
++        service.start_browser(first_state)
++    assert not calls
++    assert service.start_browser(second_state)["url"].startswith("https://test.auth0.local/")
++
++
++def test_failed_exchange_cannot_replay_state(setup):
++    service, _, _, _, _ = setup
++    service.client = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(500, text="SECRET")))
++    _, state, cookie = figma_flow(service)
++    with pytest.raises(FigmaHTTPError) as error:
++        service.callback(state=state, code="secret-code", browser_secret=cookie)
++    assert "SECRET" not in str(error.value) and "secret-code" not in str(error.value)
++    with pytest.raises(FigmaError, match="state_invalid"):
++        service.callback(state=state, code="secret-code", browser_secret=cookie)
++
++
++def test_grant_ciphertext_cannot_be_swapped_between_subjects(setup):
++    service, vault, _, _, response = setup
++    authorize(service)
++    response["user_id_string"] = "other-figma-user"
++    authorize(service, "auth0|other")
++    with vault.transaction() as session:
++        original = vault.locked_grant(session, SHARED_SUB)
++        other = vault.locked_grant(session, "auth0|other")
++        other.payload = original.payload
++    status = service.status("auth0|other")
++    assert not status["connected"] and status["state"] == "figma_vault_invalid"
++
++
++def test_one_figma_account_cannot_be_bound_to_multiple_subjects(setup):
++    service, _, _, _, _ = setup
++    authorize(service)
++    with pytest.raises(FigmaError, match="account_linked"):
++        authorize(service, "auth0|other")
++    assert not service.status("auth0|other")["connected"]
++
++
++@pytest.mark.parametrize("rotate", [True, False])
++def test_refresh_atomically_preserves_or_rotates_refresh_token(setup, rotate):
++    service, vault, now, calls, response = setup
++    authorize(service)
++    now[0] += 3600
++    response["access_token"] = "new-access"
++    if rotate:
++        response["refresh_token"] = "new-refresh"
++    else:
++        del response["refresh_token"]
++    assert service.status(SHARED_SUB)["connected"]
++    refresh = next(call for call in calls if call.url.path == "/v1/oauth/refresh")
++    assert parse_qs(refresh.content.decode()) == {"refresh_token": ["figma-refresh"]}
++    with vault.sessions() as session:
++        row = session.execute(select(FigmaGrant)).scalar_one()
++        payload = vault.unseal(vault.binding(SHARED_SUB, "grant"), row.payload)
++        assert payload["refresh_token"] == ("new-refresh" if rotate else "figma-refresh")
++        assert payload["access_token"] == "new-access"
++
++
++def test_concurrent_expired_grant_requests_refresh_once_across_service_instances(setup):
++    service, vault, now, calls, response = setup
++    authorize(service)
++    now[0] += 3600
++    response["access_token"] = "new-access"
++    barrier = threading.Barrier(4)
++    services = [
++        FigmaService(vault, identity=service.identity, client=service.client, now=lambda: now[0]) for _ in range(4)
++    ]
++
++    def use(instance):
++        barrier.wait()
++        return instance._access(SHARED_SUB)
++
++    with ThreadPoolExecutor(4) as executor:
++        assert list(executor.map(use, services)) == ["new-access"] * 4
++    assert sum(call.url.path == "/v1/oauth/refresh" for call in calls) == 1
++    # A stale in-flight request reuses the already-rotated token without refreshing again.
++    assert service._access(SHARED_SUB, rejected="figma-access") == "new-access"
++    assert sum(call.url.path == "/v1/oauth/refresh" for call in calls) == 1
++
++
++def test_status_requires_live_identity_validation_not_only_cached_grant(setup):
++    service, _, _, _, _ = setup
++    authorize(service)
++    service.client = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(403, text="denied")))
++    result = service.status(SHARED_SUB)
++    assert not result["connected"] and result["state"] == "figma_http_403"
++
++
++def test_file_selectors_depth_and_response_caps(setup, monkeypatch):
++    service, _, _, calls, _ = setup
++    authorize(service)
++    result = service.get_file(SHARED_SUB, "file123", ["1:2"], depth=3)
++    assert result["data"]["document"]["name"] == "Example"
++    assert calls[-1].url.path == "/v1/files/file123/nodes"
++    assert dict(calls[-1].url.params) == {"ids": "1:2", "depth": "3"}
++    for key in ("https://figma.com/file/abc", "../secret", "file?token=secret"):
++        with pytest.raises(ValueError):
++            service.get_file(SHARED_SUB, key)
++    for depth in (0, 11, True):
++        with pytest.raises(ValueError):
++            service.get_file(SHARED_SUB, "file123", depth=depth)
++    monkeypatch.setattr("solstice_mcp.figma.MAX_JSON_BYTES", 8)
++    with pytest.raises(FigmaError, match="response_too_large"):
++        service.get_file(SHARED_SUB, "file123")
++
++
++def images_service(
++    setup, *, url="https://s3-alpha.figma.com/img/test", body=b"\x89PNG\r\n\x1a\n", mime="image/png", status=200
++):
++    service, _, _, _, _ = setup
++    with service.vault.sessions() as session:
++        if session.execute(select(FigmaGrant).where(FigmaGrant.subject == SHARED_SUB)).scalar_one_or_none() is None:
++            authorize(service)
++    calls = []
++
++    def handler(request):
++        calls.append(request)
++        if request.url.host == "api.figma.com":
++            return httpx.Response(200, json={"images": {"1:2": url, "1:3": None}})
++        return httpx.Response(status, content=body, headers={"Content-Type": mime, "Location": "https://evil.example/"})
++
++    service.client = httpx.Client(transport=httpx.MockTransport(handler))
++    return service, calls
++
++
++def test_images_download_on_gateway_without_bearer_and_report_missing_nodes(setup):
++    service, calls = images_service(setup)
++    result = service.get_images(SHARED_SUB, "file123", ["1:2", "1:3"])
++    assert len(calls) == 2 and "authorization" not in calls[1].headers
++    assert calls[0].headers["authorization"] == "Bearer figma-access"
++    first, second = result["images"]
++    assert first["body"].startswith(b"\x89PNG") and first["sha256"] == hashlib.sha256(first["body"]).hexdigest()
++    assert first["source_url"] == "https://www.figma.com/design/file123?node-id=1%3A2"
++    assert second["error"] == "render_unavailable"
++
++
++@pytest.mark.parametrize(
++    "url",
++    [
++        "http://s3-alpha.figma.com/a",
++        "https://evil.example/a",
++        "https://127.0.0.1/a",
++        "https://s3-alpha.figma.com.evil.example/a",
++        "https://user:pass@s3-alpha.figma.com/a",
++        "https://s3-alpha.figma.com:8443/a",
++    ],
++)
++def test_images_reject_unapproved_urls_before_network(setup, url):
++    service, calls = images_service(setup, url=url)
++    with pytest.raises(FigmaError, match="image_url_invalid"):
++        service.get_images(SHARED_SUB, "file123", ["1:2"])
++    assert len(calls) == 1
++
++
++def test_image_redirect_type_and_byte_bounds_fail_closed(setup, monkeypatch):
++    service, calls = images_service(setup, status=302)
++    with pytest.raises(FigmaHTTPError):
++        service.get_images(SHARED_SUB, "file123", ["1:2"])
++    assert len(calls) == 2
++    service, _ = images_service(setup, mime="text/html", body=b"<html>bad</html>")
++    with pytest.raises(FigmaError, match="image_invalid"):
++        service.get_images(SHARED_SUB, "file123", ["1:2"])
++    service, _ = images_service(setup)
++    monkeypatch.setattr("solstice_mcp.figma.MAX_IMAGE_BYTES", 4)
++    with pytest.raises(FigmaError, match="response_too_large"):
++        service.get_images(SHARED_SUB, "file123", ["1:2"])
++
++
++def test_schema_is_explicit_and_production_rejects_sqlite(setup, tmp_path):
++    _, vault, _, _, _ = setup
++    vault.validate_schema()
++    with pytest.raises(ValueError, match="require PostgreSQL"):
++        FigmaVault(vault.sessions, vault.config).validate_schema()
++    engine = create_engine("sqlite:///" + str(tmp_path / "empty.sqlite"))
++    empty = FigmaVault(sessionmaker(engine), vault.config, allow_sqlite=True)
++    with pytest.raises(OperationalError):
++        empty.validate_schema()
++    assert not inspect(engine).get_table_names()
++    engine.dispose()
++
++
++def test_settings_disabled_by_default_and_secret_repr_hidden(monkeypatch):
++    assert not Settings().FIGMA_ENABLED
++    monkeypatch.setenv("FIGMA_ENABLED", "true")
++    assert Settings.from_env().FIGMA_ENABLED
++    assert "private-value" not in repr(Settings(FIGMA_CLIENT_SECRET="private-value", FIGMA_VAULT_KEYS="private-value"))
++    with pytest.raises(ValueError):
++        FigmaConfig("app", "secret", "https://evil.example/callback?redirect=x", Fernet.generate_key().decode())
++
++
++def mcp_client(service, app_harness, signing_material):
++    _, jwks = signing_material
++    app = build_mcp_app(
++        runtime_settings=Settings(AUTH0_DOMAIN="test.auth0.local", MCP_RESOURCE_URL=TEST_RESOURCE),
++        registry=app_harness.registry,
++        session_factory=app_harness.session_factory,
++        jwks_cache=JWKSCache(TEST_ISSUER + ".well-known/jwks.json", initial=jwks),
++        s3=app_harness.s3,
++        figma_service=service,
++    )
++    return TestClient(app.streamable_http_app(), base_url="https://mcp.test.local")
++
++
++def rpc(client, token, method, **params):
++    headers = {"Accept": "application/json, text/event-stream", "Authorization": "Bearer " + token}
++    return client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
++
++
++def test_mcp_subject_is_verified_and_cannot_be_selected_by_tool_argument(
++    setup, app_harness, signing_material, mint_token
++):
++    service, _, _, _, _ = setup
++    authorize(service)
++    with mcp_client(service, app_harness, signing_material) as client:
++        tools = rpc(client, mint_token(), "tools/list").json()["result"]["tools"]
++        selected = {tool["name"]: tool for tool in tools if tool["name"].startswith("solstice_figma_")}
++        assert len(selected) == 4
++        assert selected["solstice_figma_connect"]["annotations"]["readOnlyHint"] is False
++        assert all("subject" not in tool["inputSchema"]["properties"] for tool in selected.values())
++        response = rpc(client, mint_token(sub="auth0|other"), "tools/call", name="solstice_figma_status", arguments={})
++        assert response.json()["result"]["structuredContent"]["connected"] is False
++        response = rpc(client, mint_token(), "tools/call", name="solstice_figma_status", arguments={})
++        assert response.json()["result"]["structuredContent"]["connected"] is True
++        assert (
++            client.post("/mcp", headers={"Accept": "application/json, text/event-stream"}, json={}).status_code == 401
++        )
++
++
++@pytest.mark.parametrize("format", ["png", "svg"])
++def test_mcp_exports_are_embedded_and_callback_does_not_echo_secrets(
++    setup, app_harness, signing_material, mint_token, format
++):
++    body = b"\x89PNG\r\n\x1a\n" if format == "png" else b'<svg xmlns="http://www.w3.org/2000/svg"/>'
++    mime = "image/png" if format == "png" else "image/svg+xml"
++    service, _ = images_service(setup, body=body, mime=mime)
++    with mcp_client(service, app_harness, signing_material) as client:
++        response = rpc(
++            client,
++            mint_token(),
++            "tools/call",
++            name="solstice_figma_get_images",
++            arguments={"file_key": "file123", "node_ids": ["1:2"], "format": format},
++        )
++        result = response.json()["result"]
++        assert not result.get("isError")
++        assert result["content"][0]["type"] == ("image" if format == "png" else "resource")
++        assert result["structuredContent"]["images"][0]["sha256"] == hashlib.sha256(body).hexdigest()
++        assert "body" not in result["structuredContent"]["images"][0]
++        failed = client.get("/mcp/figma/callback?state=bad&code=SECRET&error=<script>alert(1)</script>")
++        assert failed.status_code == 400
++        assert "SECRET" not in failed.text and "alert(1)" not in failed.text
++        assert failed.headers["cache-control"] == "no-store"
++        assert "nonce-" in failed.headers["content-security-policy"] and "window.close()" in failed.text
++
++
++def test_forwarded_connect_ticket_cannot_link_victims_figma_to_attacker(setup):
++    service, vault, _, calls, _ = setup
++    result = service.connect("auth0|attacker")
++    ticket = parse_qs(urlsplit(result["authorization_url"]).query)["ticket"][0]
++    started = service.start_browser(ticket)
++    state = parse_qs(urlsplit(started["url"]).query)["state"][0]
++    service.identity.subject = "auth0|victim"
++    with pytest.raises(FigmaError, match="identity_mismatch"):
++        service.identity_callback(state=state, code="victim-code", browser_secret=started["cookie"])
++    assert not calls  # No Figma token exchange or request was made.
++    with vault.sessions() as session:
++        assert session.execute(select(FigmaPending)).scalar_one_or_none() is None
++        grant = session.execute(select(FigmaGrant)).scalar_one()
++        assert grant.subject == "auth0|attacker" and grant.payload is None
++
++
++def test_forwarded_auth0_callback_or_final_figma_url_fails_browser_binding(setup):
++    service, vault, _, calls, _ = setup
++    result = service.connect(SHARED_SUB)
++    ticket = parse_qs(urlsplit(result["authorization_url"]).query)["ticket"][0]
++    started = service.start_browser(ticket)
++    identity_state = parse_qs(urlsplit(started["url"]).query)["state"][0]
++    with pytest.raises(FigmaError, match="state_invalid"):
++        service.identity_callback(state=identity_state, code="code", browser_secret="x" * 43)
++    with pytest.raises(FigmaError, match="state_invalid"):
++        service.identity_callback(state=identity_state, code="code", browser_secret=started["cookie"])
++    _, state, cookie = figma_flow(service)
++    with pytest.raises(FigmaError, match="state_invalid"):
++        service.callback(state=state, code="victim-figma-code", browser_secret=None)
++    with pytest.raises(FigmaError, match="state_invalid"):
++        service.callback(state=state, code="victim-figma-code", browser_secret=cookie)
++    assert not calls
++    with vault.sessions() as session:
++        assert session.execute(select(FigmaGrant)).scalar_one().payload is None
++
++
++def test_http_browser_flow_rotates_secure_cookie_and_has_no_open_redirect(setup, app_harness, signing_material):
++    service, _, _, _, _ = setup
++    result = service.connect(SHARED_SUB)
++    ticket = parse_qs(urlsplit(result["authorization_url"]).query)["ticket"][0]
++    with mcp_client(service, app_harness, signing_material) as client:
++        start = client.get(f"/mcp/figma/connect?ticket={ticket}&redirect=https://evil.example", follow_redirects=False)
++        assert start.status_code == 302 and urlsplit(start.headers["location"]).hostname == "test.auth0.local"
++        cookie = start.headers["set-cookie"]
++        for required in ("__Host-solstice-figma-link", "Secure", "HttpOnly", "SameSite=lax", "Path=/"):
++            assert required in cookie
++        first_cookie = client.cookies.get("__Host-solstice-figma-link")
++        state = parse_qs(urlsplit(start.headers["location"]).query)["state"][0]
++        verified = client.get(f"/mcp/figma/identity/callback?state={state}&code=identity-code", follow_redirects=False)
++        assert verified.status_code == 302 and urlsplit(verified.headers["location"]).hostname == "www.figma.com"
++        assert client.cookies.get("__Host-solstice-figma-link") != first_cookie
++        state = parse_qs(urlsplit(verified.headers["location"]).query)["state"][0]
++        final = client.get(f"/mcp/figma/callback?state={state}&code=figma-code", follow_redirects=False)
++        assert final.status_code == 200
++        assert not client.cookies.get("__Host-solstice-figma-link")
++        assert service.status(SHARED_SUB)["connected"]
++
++
++@pytest.mark.parametrize(
++    "invalid", [None, "issuer", "audience", "nonce", "expired", "algorithm", "kid", "azp", "multi_aud"]
++)
++def test_auth0_browser_identity_verifies_signature_claims_nonce_and_pkce(signing_material, invalid):
++    import time
++
++    import jwt
++
++    from solstice_mcp.figma_identity import Auth0BrowserIdentity
++
++    private, jwks = signing_material
++    claims = {
++        "iss": TEST_ISSUER,
++        "aud": "gateway-link-client",
++        "sub": SHARED_SUB,
++        "iat": int(time.time()),
++        "exp": int(time.time()) + 120,
++        "nonce": "expected-nonce",
++    }
++    if invalid == "issuer":
++        claims["iss"] = "https://attacker.example/"
++    elif invalid == "audience":
++        claims["aud"] = "attacker-client"
++    elif invalid == "nonce":
++        claims["nonce"] = "other-nonce"
++    elif invalid == "expired":
++        claims["exp"] = int(time.time()) - 60
++    elif invalid == "azp":
++        claims["azp"] = "attacker-client"
++    elif invalid == "multi_aud":
++        claims["aud"] = ["gateway-link-client", "other-client"]
++    algorithm, key = ("HS256", "x" * 32) if invalid == "algorithm" else ("RS256", private)
++    token = jwt.encode(
++        claims, key, algorithm=algorithm, headers={"kid": "wrong-key" if invalid == "kid" else "test-key"}
++    )
++    requests = []
++
++    def handler(request):
++        requests.append(request)
++        return httpx.Response(200, json={"id_token": token, "access_token": "must-not-leave-identity-exchange"})
++
++    class Keys:
++        def get(self, *, refresh=False):
++            return jwks
++
++    client = httpx.Client(transport=httpx.MockTransport(handler))
++    identity = Auth0BrowserIdentity(
++        domain="test.auth0.local",
++        client_id="gateway-link-client",
++        client_secret="gateway-secret",
++        gateway_origin="https://mcp.test.local",
++        client=client,
++        jwks=Keys(),
++    )
++    authorization = parse_qs(
++        urlsplit(identity.authorization_url(state="state", nonce="expected-nonce", verifier="v" * 64)).query
++    )
++    assert authorization["code_challenge_method"] == ["S256"] and authorization["prompt"] == ["login"]
++    assert authorization["scope"] == ["openid"]
++    if invalid:
++        with pytest.raises(FigmaError, match="identity_failed"):
++            identity.exchange(code="code", verifier="v" * 64, nonce="expected-nonce")
++    else:
++        assert identity.exchange(code="code", verifier="v" * 64, nonce="expected-nonce") == SHARED_SUB
++    assert len(requests) == 1 and str(requests[0].url) == TEST_ISSUER + "oauth/token"
++    sent = json.loads(requests[0].content)
++    assert sent["code_verifier"] == "v" * 64 and sent["client_secret"] == "gateway-secret"
++    assert sent["redirect_uri"] == "https://mcp.test.local/mcp/figma/identity/callback"
++    assert "authorization" not in requests[0].headers
++    client.close()

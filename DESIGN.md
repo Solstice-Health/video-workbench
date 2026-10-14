@@ -140,24 +140,24 @@ type rather than an ever-smaller label.
 
 ## Layout
 
-The current shell has a left conversation navigator, a flexible chat column with
-its docked composer, and a collapsible workspace panel. Its desktop baseline is a
-220px navigator and 380px panel; above 1536px they grow to 240px and 420px. The chat
-and composer share their horizontal bounds. Feed width caps at 840px, with a
-narrower column beside the open panel. The desktop header is 96px tall.
+The shell has a 52px activity rail, a 196px file/conversation navigator, a left
+chat initially 360px wide, and a flexible canvas. The navigator grows to 220px above
+1536px and can be hidden from its rail control. Chat can be collapsed or resized
+with a pointer or arrow keys. Canvas tabs have explicit close controls, keyboard
+arrow navigation, and optional second groups. Groups can be joined without losing
+tabs; opening an existing file activates it rather than duplicating it.
 
-Below 1024px, the workspace becomes an overlay. Below 640px, conversations move
-into a drawer and the header compacts. Overlay controls must close by keyboard,
-restore focus, and prevent interaction with obscured content. Closed drawers must
-not remain in the tab order. Keep the composer reachable at small viewport heights
-and when the keyboard is open. Use 4px spacing steps and the source breakpoint scale.
+Below 1024px, Chat and Canvas are separate visible views and navigation becomes a
+drawer. Below 640px, the rail is 44px and header controls wrap. Hidden drawers are
+removed from keyboard navigation, Escape dismisses the drawer, and focus returns
+to the invoking control. Browser streams stop when their canvas view is hidden.
+Use 4px spacing steps and the source breakpoint scale.
 
-The browser panel was visually checked in the local application at 1280×720,
-1024×600, 640×560 and 390×600. Desktop resizing, mobile overlay bounds, ownership
-controls and letterboxed live content were exercised with a real headed browser.
-Earlier chat implementation checks were limited by a blocked preview; the latest
-checks cover the existing conversation shell and browser integration, not every
-chat interaction.
+The current shell was checked live at 1280×720, 1024×600 and 390×600. The checks
+covered actual file listing, paginated directories, isolated HTML dependencies,
+image/text split views, tab closure, import-event replay prevention, composer
+visibility and real integration availability. PDF and browser checks are recorded
+in docs/UI.md. Older browser checks also covered 640×560.
 
 ## Elevation & Depth
 
@@ -204,16 +204,19 @@ Workbench extensions follow these rules:
   current turn and continues with the new message. Queued messages are visible and
   removable. A stopped queue needs a visible resume path. No action implies the
   ability to alter a token stream already being emitted.
-- **Browser:** The header switches between Outputs and Browser. Browser uses a
-  larger split (58% initially), a keyboard-operable resize separator, compact tabs
-  and address controls, and one status bar. Below 1024px it becomes an overlay.
-  Take control and Return to agent explicitly govern interaction. The real
-  SolsticeMark follows verified agent coordinates; it is hidden during human
+- **Browser:** A canvas tab contains native browser tabs and compact address
+  controls. Take control and Return to agent explicitly govern interaction. The
+  real SolsticeMark follows verified agent coordinates and is hidden during human
   control. Letterboxing uses the same transform for cursor and pointer input.
-  Page dialogs stay inside this panel, with plain text and secondary actions.
-- **Workspace:** Outputs and Request tabs share one panel. Output selection,
-  native video controls, review flags, and download/full-review links remain
-  secondary to the conversation. Render real files only.
+  Page dialogs remain in the panel with plain text and secondary actions.
+- **Workspace:** A lazy file explorer opens real request assets in canvas tabs.
+  Images and videos preserve their proportions; HTML runs in an opaque sandbox;
+  text stays literal. PDF pages use bounded host rendering, with previous/next
+  controls. Outputs retains its real versions, flags and review links.
+- **Integrations:** The composer dropup selects plugins or MCP tools as message
+  context. Selection is separate from authentication. Actual status is paired with
+  words and an icon; an available but disconnected service is not shown as ready.
+  Public connection settings use a focused modal; secrets never enter the UI.
 
 Use one MessageBar at the top of the current panel, never a status bubble in
 message history. Its error, progress, and recovery copy must match actual server

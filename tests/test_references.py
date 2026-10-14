@@ -87,3 +87,32 @@ def test_missing_queued_folder_fails_before_new_chat_or_agent_call(ws, monkeypat
     with pytest.raises(ValueError):
         orchestrator.chat("Review", request_id=ws.id, context={"folders": ["deleted"]})
     assert not ws.load().chat and not called
+
+
+def test_plugins_survive_queue_restart_and_reach_agent_as_gateway_bound_context(ws, tmp_path, monkeypatch):
+    context = {"skills": [], "folders": [], "plugins": ["figma", "solstice"]}
+    queue = TurnQueue(tmp_path)
+    try:
+        queue.stop(ws)
+        assert queue.enqueue(ws, message="Use this design", context=context)["context"] == context
+    finally:
+        queue.close()
+    queue = TurnQueue(tmp_path)
+    try:
+        assert queue.snapshot(ws)["queue"][0]["context"] == context
+    finally:
+        queue.close()
+    monkeypatch.setattr(orchestrator.Workspace, "open", lambda request_id: ws)
+    seen = []
+    monkeypatch.setattr(orchestrator.job_lead, "run", lambda workspace, message, first_turn: seen.append(message) or "Ready")
+    monkeypatch.setattr(orchestrator, "ensure_review", lambda workspace: [])
+    monkeypatch.setattr(orchestrator.page, "build", lambda workspace: Path("review.html"))
+    orchestrator.chat("Use this design", request_id=ws.id, skip_index=True, context=context)
+    assert "integration_status" in seen[0] and "Solstice MCP gateway" in seen[0]
+    assert ws.load().chat[-1].context == context and ws.load().chat[-1].text == "Use this design"
+
+
+@pytest.mark.parametrize("plugins", [["not-installed"], "figma", ["figma", None], ["../credentials"]])
+def test_unknown_or_malformed_plugins_are_rejected_without_starting_a_turn(ws, plugins):
+    with pytest.raises(ValueError):
+        references.validate({"plugins": plugins}, ws)

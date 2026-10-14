@@ -14,7 +14,7 @@ and licenses are under `static/vendor/eeva/`. See [Eeva](EEVA.md) and
 ## Conversations and sending
 
 Open an existing conversation from the left navigator, or choose New conversation,
-attach a source video, and describe the edit. The output panel shows the latest
+attach a source video, and describe the edit. The Outputs canvas tab shows the latest
 committed version of each video, its real preview and flags, plus links to download
 the video or open the complete review. Merely opening a conversation does not run
 models or resolve old questions.
@@ -63,7 +63,7 @@ symlinks are excluded. This is a directory-name index of the agent's readable
 workspace, not a semantic index of the entire repository. A new conversation can
 select skills; folders become available after its workspace exists.
 
-Choose up to 12 references, then write your message. Each conversation keeps its
+Choose up to 12 references across skills, folders and plugins, then write your message. Each conversation keeps its
 own unsent reference selections while switching between chats. These drafts are
 in browser memory and are lost on page reload. Successful submission removes only
 the references sent; additions made during a pending save remain. Question answers
@@ -89,14 +89,56 @@ drafts and asynchronous submission. A fresh browser test tab was blocked with
 `ERR_BLOCKED_BY_CLIENT`; rendered visual layout remains unverified. No paid model
 turn was started for this feature's tests.
 
+## Workspace canvas
+
+The activity rail switches between Conversations and Workspace files. Click the
+active rail control to hide its navigator. Chat remains on the left, with a
+keyboard-operable resize divider and a collapse control. The canvas holds Outputs,
+Browser, and file tabs. Opening the same file focuses its existing tab. Split the
+canvas into two groups to compare files, move the active tab across groups, or join
+the groups without discarding tabs. Layout and open tabs are kept per conversation
+while the page is open; reloading starts with Outputs.
+
+The explorer lazily lists public request folders. Expand folders, filter visible
+loaded filenames, use Load more for paginated directories, and Refresh workspace
+files after external edits. It does not expose private browser, memory, credential
+or runtime files. The bounded text preview preserves literal text and offers the
+original file when truncated. Video/audio use native controls; images fit the canvas.
+HTML runs with scripts in an opaque sandbox, without same-origin access to the
+workbench; relative files use a request-scoped preview capability. PDF pages are
+rendered by the host with bounded dimensions and previous/next page controls,
+avoiding dependence on the browser's native PDF viewer. The original file remains
+available through Open.
+
+New integration imports open the first image and response JSON in the current
+conversation's canvas. Historical import events never reopen tabs on page load;
+seen sequence tracking prevents polling from reopening a manually closed tab.
+Importing files and opening them do not dispatch another agent turn.
+
+## Plugins and MCP connections
+
+The Plugins dropup beside the model pill lists the server's actual integration
+catalog and status. Select a plugin to stage it for your next general message;
+selection does not connect it or grant access. The same per-conversation draft
+rules apply as for skills and folders. Unavailable integrations stay selectable so
+the agent can explain setup, but their tools cannot run until the host verifies them.
+
+Manage connections opens public gateway/client/callback/read-tool settings. The
+callback defaults to this server's exact local URL. Connect Solstice opens a user
+sign-in popup; the host owns OAuth state, PKCE and tokens. Figma's separate Connect
+Figma action appears only when the authenticated gateway advertises a configured
+Figma extension and the user grant is missing. Popup completion triggers a fresh
+tool check, bounded to five minutes with a manual Check tools fallback. Disconnect
+also clears stale local connection state. No tokens or client secrets are entered
+into or returned to the frontend.
+
 ## Conversation browser
 
-Choose **Browser** in the header to replace the output panel with a live browser
-view. The desktop split starts at 58% and can be resized by dragging its divider
-or focusing the divider and using Left/Right (Home/End set the limits). At narrow
-widths it opens as an overlay. Hide the panel to return to chat, or choose Outputs
-to restore the existing previews. Hiding the viewer disconnects its stream; it
-does not close the browser session.
+Choose **Browser** in the header or explorer to open its canvas tab. Native browser
+tabs stay inside it. Resize or collapse chat to give the browser more room, or
+place another file in a second canvas group. At narrow widths, the Chat and Canvas
+controls switch views. Closing the canvas tab stops viewing but preserves the
+browser session; **Close browser** ends the session.
 
 Open browser defaults to headed mode, which opens a visible Chrome window and
 shows its live image here. Select headless before starting if no separate window
@@ -190,3 +232,20 @@ Native compaction's protocol was checked against the installed Docker image and
 its lifecycle tested with fixtures; a paid live compaction and a 60-minute silent
 stream were not run. Nothing in this frontend changes output acceptance or the
 existing verification flags.
+
+Workspace canvas checks use an isolated disposable request, without paid model
+calls or changing the ten-short request. Behavioral frontend tests cover immutable
+canvas transitions, global file-tab deduplication, pagination merge, historical
+import suppression, plugin context and public configuration serialization. Live
+checks cover 260-file pagination, HTML relative CSS/images/classic and module
+scripts plus parent-access isolation, image/text split groups, narrow layouts,
+truthful disconnected catalog states and import tab closure across reload.
+
+The workspace update also passed live embedded-browser startup, live viewing,
+human ownership and session close. Native PDFs were blank in the in-app browser;
+the bounded bitmap renderer resolved that limitation and passed one- and two-page
+navigation checks. A real 640×360 video fixture loaded with its measured one-second
+duration. The disposable request was removed afterward; the completed ten-short
+conversation and its source/native-thread records were unchanged. OAuth grant
+completion was not exercised against a real account; the UI truthfully showed
+Solstice Needs setup and Figma Unavailable, with no connected state fabricated.

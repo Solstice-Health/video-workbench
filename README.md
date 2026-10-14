@@ -41,9 +41,14 @@ vwb chat -i -r <request-id>      # keep talking to the same agent: "make short-0
   same tools.
 - **Public web research**: `web_search`, `web_fetch` and bounded `web_research` through OpenRouter, with host-held
   credentials, source links and logged usage. See [web tools](docs/WEB.md) for setup, limits and alternatives.
-- **Shared browser**: the main agent controls an isolated headed Chrome session through typed tools. The chat's
-  resizable Browser panel streams that same session, with tabs, a Solstice cursor and explicit human takeover.
+- **Workspace canvas**: collapsible chat, a file explorer, closeable tabs and two viewing groups for videos,
+  images, interactive local HTML, paged PDFs, text and the shared browser. The Python harness remains unchanged.
+- **Shared browser**: the main agent controls an isolated headed Chrome session through typed tools. The canvas
+  streams that same session, with tabs, a Solstice cursor and explicit human takeover.
   Headless mode and host-configured remote CDP are also available. See [browser setup and research](docs/BROWSER.md).
+- **Plugins and MCP**: select integrations in the composer. Solstice supports persistent host-owned OAuth and
+  approved read tools; Figma imports design JSON and previews through the optional Solstice gateway extension.
+  [Connection setup and Figma options](docs/INTEGRATIONS.md) describe the required registrations and deployment.
 
 ## Quickstart
 ```bash
@@ -70,6 +75,11 @@ queue; **Resume queued messages** starts it again. Loading the UI does not start
 an agent turn. See [the UI guide](docs/UI.md) for behavior and verification limits,
 and [Eeva integration](docs/EEVA.md) for the design system.
 
+Use the left rail to switch between conversations and workspace files. Open files
+in the canvas, split it into two groups, or collapse chat for more viewing space.
+PDF pages render locally, so no browser PDF plugin is required. The composer’s
+**Plugins** menu selects integrations; **Manage connections** handles sign-in.
+
 To enable the shared browser, install the pinned native runtime once:
 
 ```bash
@@ -78,7 +88,7 @@ uv run python -m vwb.browser.runtime install
 
 Chrome must be installed on the host; headed Linux also needs a display server. Open a conversation and choose
 **Browser**, then **Open browser**, or ask the agent to browse. **Take control** enables your pointer, typing and
-navigation; **Return to agent** invalidates its old observation before it can continue. Closing the panel keeps the
+navigation; **Return to agent** invalidates its old observation before it can continue. Closing the canvas tab keeps the
 session; **Close browser** stops it. Graceful UI shutdown closes UI-managed local browsers while retaining their private
 profiles. An independently started CLI browser is not adopted by merely viewing it. Remote sessions require
 `VWB_BROWSER_CDP_URL` on the host; closing the local client does not stop a provider's billing or remote browser.
@@ -113,6 +123,8 @@ The review page is `runs/<request>/review/index.html`.
 | `src/vwb/clip/`, `src/vwb/reframe/` | advisors: cuts, focus, crop tracks |
 | `src/vwb/tools/` | the typed toolkit and the tool gateway (`vwb tools` lists the current tools) |
 | `src/vwb/browser/` | pinned native driver, request-scoped sessions, ownership, observations and live stream relay |
+| `src/vwb/web/` | local HTTP control plane, Eeva workspace UI and bounded file/PDF previews |
+| `src/vwb/integrations/` | host-owned OAuth, Solstice MCP transport, approved reads and evidence imports |
 | `src/vwb/agents/` | job lead host, worker loops, swarm, Codex-in-Docker host, prompts |
 | `src/vwb/gateway/` | model gateway, Gemini and OpenAI providers, container services |
 | `config/` | model slots, policy dial, levers, flag catalog, platform profiles |

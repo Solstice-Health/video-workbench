@@ -1,0 +1,39 @@
+{
+  "date": "2026-10-14",
+  "upstream_base": "092b7b2d676041f6b5c1e3a0e5ed5ea65d022457",
+  "patch_sha256": "70589cbb26ccf18fd9d95a50843a9bdd0419a3cae290b28dabf9be0e47f08d45",
+  "patch_bytes": 86173,
+  "files": [
+    "docs/FIGMA_REST.md",
+    "migrations/20261014_figma.sql",
+    "requirements.lock.txt",
+    "requirements.txt",
+    "src/solstice_mcp/app.py",
+    "src/solstice_mcp/figma.py",
+    "src/solstice_mcp/figma_identity.py",
+    "src/solstice_mcp/settings.py",
+    "src/solstice_mcp/tools/figma.py",
+    "tests/test_figma.py"
+  ],
+  "clean_apply_check": true,
+  "applied_files_match_reviewed_clone": true,
+  "focused_tests": {
+    "passed": 36,
+    "seconds": 1.28
+  },
+  "upstream_suite": {
+    "passed": 613,
+    "seconds": 39.24,
+    "warnings": 2
+  },
+  "ruff": "pass",
+  "mypy_new_modules": "pass",
+  "independent_review": "No remaining blocker after two-hop account-linking CSRF fix.",
+  "not_tested": [
+    "real PostgreSQL migration and multi-process locking",
+    "registered Auth0/Figma apps and consenting-account OAuth",
+    "deployed callback routing and access-log redaction",
+    "live Figma CDN exports"
+  ],
+  "deployed": false
+}

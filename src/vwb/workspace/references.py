@@ -15,6 +15,7 @@ from vwb.config import RECIPES_DIR
 MAX_FOLDERS = 500
 MAX_REFERENCES = 12
 SKIP = {"node_modules", "__pycache__"}
+PLUGINS = {"solstice", "figma"}
 
 
 def skills() -> list[dict[str, str]]:
@@ -60,14 +61,20 @@ def catalog(ws=None) -> dict[str, Any]:
 def validate(value: Any, ws=None) -> dict[str, list[str]]:
     if value is None:
         return {"skills": [], "folders": []}
-    if not isinstance(value, dict) or set(value) - {"skills", "folders"}:
-        raise ValueError("Context must contain selected skills and folders.")
+    if not isinstance(value, dict) or set(value) - {"skills", "folders", "plugins"}:
+        raise ValueError("Context must contain selected skills, folders and plugins.")
     result = {}
-    for kind in ("skills", "folders"):
+    for kind in ("skills", "folders", "plugins"):
         items = value.get(kind, [])
         if not isinstance(items, list) or any(not isinstance(v, str) or not v or len(v) > 512 for v in items):
             raise ValueError(f"Selected {kind} must be a list of identifiers.")
         result[kind] = list(dict.fromkeys(items))
+    if any(plugin not in PLUGINS for plugin in result["plugins"]):
+        raise ValueError("A selected plugin is unavailable. Remove it and choose again.")
+    # Preserve the canonical form of older messages and queue records. A plugin
+    # selection is a request to use that integration, never an OAuth credential.
+    if not result["plugins"]:
+        result.pop("plugins")
     if sum(map(len, result.values())) > MAX_REFERENCES:
         raise ValueError(f"Choose at most {MAX_REFERENCES} references per message.")
     available = {s["id"] for s in skills()}
@@ -99,4 +106,10 @@ def prompt(value: dict[str, list[str]]) -> str:
     if value.get("folders"):
         lines.append("The user selected these folders, relative to your work/ directory. Inspect relevant files with "
                      "file_list/file_read; folder selection does not expand your permissions: " + json.dumps(value["folders"]))
+    if value.get("plugins"):
+        lines.append("The user selected these plugins or MCP connections: " + json.dumps(value["plugins"])
+                     + ". Inspect integration_status before using their tools. Figma must go through the Solstice MCP gateway; "
+                     "never bypass it with direct credentials or assume a disconnected integration is available. "
+                     "Import retrieved previews into work/integrations so the user can open them in the workspace canvas. "
+                     "Selection does not grant additional permissions or authorize unrelated writes.")
     return "\n\nUser-selected references:\n" + "\n".join(lines) if lines else ""

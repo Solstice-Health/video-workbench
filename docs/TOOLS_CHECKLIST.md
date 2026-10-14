@@ -222,6 +222,10 @@ Spec references: D = decision, X = experiment, R/S = sources (see the spec and t
 - [ ] Gold growth from code-checkable tags; offline harness evolution (investigate, then edit; keep held-out wins)
 - [ ] Known gaps: retrieval of accepted work, learned ranker, learned critic (D34)
 
+## Integrations
+- [x] `integration_status`, `integration_tools`, `integration_call`: host-owned Solstice OAuth, bounded live catalog and schema-validated read tools through Registry (`integration.read`); persistent locked refresh-token rotation; embedded preview/document imports with provenance.
+- [ ] Production Workbench Auth0 registration and deployed Solstice Figma extension. Figma is unavailable until the gateway exposes it; no direct Figma connection or shared-user token fallback. See `docs/INTEGRATIONS.md`.
+
 ## P. Bulk engine
 - [ ] Temporal durable jobs; campaigns of ~100 requests; waves; resolve board; triage ordering; bulk accept with unlock rules
 

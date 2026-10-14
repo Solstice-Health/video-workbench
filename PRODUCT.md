@@ -33,7 +33,11 @@ plane owns tools, provenance, checks, flags, and human acceptance.
 - Present nonblocking questions with options, navigation, and typed answers.
 - Show last-reported context usage separately from cumulative token usage.
 - Offer native compaction without replacing the conversation thread.
-- Show a conversation-scoped browser beside chat, with live viewing and explicit
+- Browse conversation files in an activity-rail explorer and open images, video,
+  HTML, PDF pages and text in closeable canvas tabs, with optional split groups.
+- Collapse or resize the left chat without losing its conversation or draft.
+- Select real plugins/MCP integrations for each message and manage their connection.
+- Show a conversation-scoped browser inside the canvas, with live viewing and explicit
   human/agent ownership. Headed mode is the default; headless is optional.
 - Keep the completed ten-short baseline conversation discoverable through a
   durable registration, with its existing native thread and media in place.
@@ -54,9 +58,10 @@ No output, token count, or successful check should be invented for presentation.
 
 ## Implementation Assumptions
 
-This version is a local single-user interface for the existing harness. The output
-preview is open beside chat on desktop and available on demand at narrow widths.
-The Browser control replaces that panel with a larger resizable browser view;
-closing or switching the panel preserves the conversation.
-The optional layout preference was unanswered, so this follows the supplied brief
-and repository rather than a separate user confirmation.
+This version is a local single-user interface for the existing harness. A left
+activity rail switches between conversations and workspace files. Chat sits to the
+left of a large canvas, with closeable tabs and up to two groups. Outputs open by
+default. At narrow widths, Chat and Canvas switch between full-width views.
+Integration selections express intent; only an authenticated, verified tool catalog
+is presented as connected. Figma requires a deployed gateway extension and its own
+user grant. No connection or output is simulated in the application.

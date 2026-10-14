@@ -1,7 +1,8 @@
 import htm from './vendor/htm.mjs';
 import {triggerAt, matchingOptions, toContext} from './composer-picker.js';
 import {ModelControl} from './model-control.js';
-import {BrowserPanel} from './browser-panel.js';
+import {WorkspaceExplorer, WorkspaceCanvas, initialCanvas, canvasReducer, importedTabs} from './workspace-canvas.js';
+import {IntegrationsControl} from './integrations-control.js';
 
 // Eeva and React are local, versioned assets. No network service is needed to open the UI.
 const {createElement, useState, useEffect, useRef, useCallback} = window.React;
@@ -22,7 +23,7 @@ function IconButton({name, label, onClick, disabled, ...rest}) {
 }
 
 function ReferenceTags({context}) {
-  const labels = [...(context?.skills || []).map(id => `/features ${id}`), ...(context?.folders || []).map(id => `@work/${id === '.' ? '' : `${id}/`}`)];
+  const labels = [...(context?.skills || []).map(id => `/features ${id}`), ...(context?.folders || []).map(id => `@work/${id === '.' ? '' : `${id}/`}`), ...(context?.plugins || []).map(id => `Plugin: ${id}`)];
   return labels.length ? html`<div className="message-references" aria-label="Message references">${labels.map(label => html`<span key=${label}>${label}</span>`)}</div>` : null;
 }
 
@@ -195,8 +196,19 @@ function App() {
   const [featuresError, setFeaturesError] = useState('');
   const pickerShell = useRef(null);
   const [error, setError] = useState(''), [info, setInfo] = useState(''), [loading, setLoading] = useState(true), [busy, setBusy] = useState(false);
-  const [panel, setPanel] = useState(() => window.innerWidth >= 1024), [sidebar, setSidebar] = useState(false), [outputId, setOutputId] = useState(null);
-  const [panelView, setPanelView] = useState('outputs');
+  const [sidebar, setSidebar] = useState(false), [outputId, setOutputId] = useState(null);
+  const [navigator, setNavigator] = useState('conversations'), [navigatorOpen, setNavigatorOpen] = useState(true);
+  const [chatShown, setChatShown] = useState(true), [mobileView, setMobileView] = useState('chat'), [chatWidth, setChatWidth] = useState(360);
+  const [canvases, setCanvases] = useState({});
+  const seenImports = useRef(new Map());
+  const chatResize = useRef(null), canvasKey = selected || 'new';
+  const canvas = canvases[canvasKey] || initialCanvas();
+  const dispatchCanvas = action => setCanvases(previous => ({...previous, [canvasKey]: canvasReducer(previous[canvasKey] || initialCanvas(), action)}));
+  const openCanvas = tab => {dispatchCanvas({type: 'open', tab}); setMobileView('canvas'); setSidebar(false);};
+  const explore = () => {setNavigator('workspace'); setNavigatorOpen(true); if (window.innerWidth < 1024) setSidebar(true);};
+  const activeCanvasPath = canvas.groups.find(g => g.id === canvas.focused)?.tabs.find(t => t.id === canvas.groups.find(g => g.id === canvas.focused)?.active)?.path;
+  const toggleNavigator = view => {setNavigator(view); if (window.innerWidth < 1024) setSidebar(value => view === navigator ? !value : true); else setNavigatorOpen(value => view === navigator ? !value : true);};
+  const resizeChat = value => setChatWidth(Math.max(300, Math.min(640, Math.min(window.innerWidth * .55, value))));
   const [qIndex, setQIndex] = useState(0), [answers, setAnswers] = useState({}), [questionDrafts, setQuestionDrafts] = useState({}), [questionsHidden, setQuestionsHidden] = useState(false);
   const [query, setQuery] = useState(''), [compactBusy, setCompactBusy] = useState(false), [isNearBottom, setIsNearBottom] = useState(true);
   const csrf = useRef(''), selection = useRef(null), feed = useRef(null), fileInput = useRef(null), composer = useRef(null);
@@ -205,7 +217,7 @@ function App() {
   const [mobile, setMobile] = useState(() => window.innerWidth < 640);
   useEffect(() => {
     const resize = () => {setNarrow(window.innerWidth < 1024); setMobile(window.innerWidth < 640);};
-    const escape = e => {if (e.key === 'Escape') {setSidebar(false); if (window.innerWidth < 1024) setPanel(false);}};
+    const escape = e => {if (e.key === 'Escape' && !e.defaultPrevented) setSidebar(false);};
     window.addEventListener('resize', resize); window.addEventListener('keydown', escape);
     return () => {window.removeEventListener('resize', resize); window.removeEventListener('keydown', escape);};
   }, []);
@@ -227,7 +239,7 @@ function App() {
     setDrafts(prev => ({...prev, [selection.current || 'new']: {text, uploads, references}}));
     setReferences(drafts[id || 'new']?.references || []); setPicker(null);
     setText(drafts[id || 'new']?.text || ''); setUploads(drafts[id || 'new']?.uploads || []); selection.current = id;
-    setSelected(id); setData(null); setError(''); setInfo(''); setQIndex(0); setOutputId(null); setSidebar(false);
+    setSelected(id); setMobileView('chat'); setChatShown(true); setData(null); setError(''); setInfo(''); setQIndex(0); setOutputId(null); setSidebar(false);
     snapshot.current = null; setIsNearBottom(true);
     if (id) {location.hash = id; setLoading(true); refresh(id).catch(e => setError(e.message)).finally(() => setLoading(false));}
     else {history.replaceState(null, '', location.pathname); setLoading(false); composer.current?.focus();}
@@ -279,10 +291,19 @@ function App() {
     return () => {live = false; clearTimeout(timer);};
   }, [selected, api, refresh]);
   useEffect(() => {
-    const overlay = mobile && sidebar ? document.querySelector('.sidebar') : narrow && panel ? document.querySelector(panelView === 'browser' ? '.browser-panel' : '.output-panel') : null;
-    if (!overlay) return;
-    const prior = document.activeElement;
-    const focusable = () => [...overlay.querySelectorAll('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled):not([tabindex="-1"]), [tabindex="0"]')].filter(el => !el.closest('[hidden]'));
+    if (!selected || !data || loading) return;
+    const result = importedTabs(data.events || [], seenImports.current.get(selected));
+    if (!seenImports.current.has(selected)) {try {result.cursor = Math.max(result.cursor, Number(sessionStorage.getItem(`vwb-import-cursor:${selected}`)) || 0);} catch (_) {}}
+    seenImports.current.set(selected, result.cursor);
+    try {sessionStorage.setItem(`vwb-import-cursor:${selected}`, String(result.cursor));} catch (_) {}
+    if (!result.tabs.length) return;
+    setCanvases(previous => ({...previous, [selected]: result.tabs.reduce((state, tab) => canvasReducer(state, {type: 'open', tab}), previous[selected] || initialCanvas())}));
+    setMobileView('canvas');
+  }, [selected, data?.events, loading]);
+  useEffect(() => {
+    if (!narrow || !sidebar) return;
+    const overlay = document.querySelector('.workspace-navigator'), prior = document.activeElement;
+    const focusable = () => [...overlay.querySelectorAll('button:not(:disabled),input:not(:disabled),a[href],[tabindex="0"]')];
     focusable()[0]?.focus();
     const trap = e => {
       if (e.key !== 'Tab' || e.defaultPrevented) return;
@@ -291,8 +312,8 @@ function App() {
       else if (!e.shiftKey && (document.activeElement === last || !overlay.contains(document.activeElement))) {e.preventDefault(); first?.focus();}
     };
     document.addEventListener('keydown', trap);
-    return () => {document.removeEventListener('keydown', trap); if (prior?.isConnected) prior.focus();};
-  }, [mobile, sidebar, narrow, panel, panelView]);
+    return () => {document.removeEventListener('keydown', trap); prior?.isConnected && prior.focus();};
+  }, [narrow, sidebar, navigator]);
   const chat = data?.request?.chat || [], active = data?.active, queue = (data?.queue || []).filter(j => ['queued', 'pending'].includes(j.status));
   const questions = (data?.asks || []).filter(q => ['open', 'defaulted'].includes(q.status));
   const question = questions[Math.min(qIndex, questions.length - 1)];
@@ -394,11 +415,16 @@ function App() {
   const messageEvents = (start, end) => (data?.events || []).filter(e => stamp(e.ts) >= stamp(start) && (!end || stamp(e.ts) <= stamp(end)));
   const latestHuman = [...chat].reverse().find(m => m.role === 'human');
   const rows = requests.filter(r => `${r.title} ${r.id}`.toLowerCase().includes(query.toLowerCase()));
-  return html`<${Surface} theme="editorial" background="chat" className=${`workbench ${panel ? 'with-panel' : ''} ${panel && panelView === 'browser' ? 'with-browser' : ''} ${sidebar ? 'nav-open' : ''}`}>
+  return html`<${Surface} theme="editorial" background="chat" className=${`workbench canvas-workbench ${navigatorOpen ? 'navigator-open' : ''} ${sidebar ? 'nav-open' : ''} ${chatShown ? 'chat-shown' : 'chat-hidden'} mobile-view-${mobileView}`} style=${{'--chat-width': `${chatWidth}px`}}>
     <a href="#conversation-feed" className="skip-link">Skip to conversation</a>
-    ${sidebar && html`<button className="nav-scrim" aria-label="Close conversations" onClick=${() => setSidebar(false)}></button>`}
-    <nav className="sidebar" aria-label="Conversations" inert=${mobile && !sidebar ? '' : undefined}>
-      <div className="brand"><span className="brand-name">Solstice</span><span className="brand-product">Video workbench</span></div>
+    <nav className="activity-rail" aria-label="Workbench sections"><div className="rail-brand" aria-label="Solstice video workbench"><${SolsticeMark} size=${24}/></div>
+      <${Tooltip} content="Conversations"><button aria-label="Conversations" aria-pressed=${navigator === 'conversations' && (narrow ? sidebar : navigatorOpen)} onClick=${() => toggleNavigator('conversations')}><${Icon} name="library" size=${18}/></button><//>
+      <${Tooltip} content="Workspace files"><button aria-label="Workspace files" aria-pressed=${navigator === 'workspace' && (narrow ? sidebar : navigatorOpen)} onClick=${() => toggleNavigator('workspace')}><${Icon} name="folder" size=${18}/></button><//>
+      <div className="rail-bottom"><${Tooltip} content="Local workbench"><span tabIndex="0" aria-label="Local workbench"><span className="local-dot"></span></span><//></div>
+    </nav>
+    ${narrow && sidebar && html`<button className="nav-scrim" aria-label="Close navigator" onClick=${() => setSidebar(false)}></button>`}
+    <nav className="sidebar workspace-navigator" aria-label=${navigator === 'workspace' ? 'Workspace navigator' : 'Conversations navigator'} inert=${(narrow ? !sidebar : !navigatorOpen) ? '' : undefined}>
+      ${navigator === 'conversations' ? html`<div className="navigator-heading"><h2>Conversations</h2><${IconButton} name="panel-right-close" label="Collapse navigator" onClick=${() => narrow ? setSidebar(false) : setNavigatorOpen(false)}/></div>
       <${Button} variant="secondary" size="sm" className="new-chat" onClick=${() => choose(null)}><${Icon} name="plus" size=${14}/> New conversation<//>
       <label className="conversation-search"><${Icon} name="search" size=${14}/><input value=${query} onChange=${e => setQuery(e.target.value)} placeholder="Find a conversation" aria-label="Find a conversation"/></label>
       <div className="section-label conversation-label">Conversations</div>
@@ -406,15 +432,20 @@ function App() {
         <span className="conversation-name">${title(r.title)}</span><span className="conversation-meta">${date(r.created)}<span>${r.active ? 'Working' : r.output_count ? `${r.output_count} outputs` : 'Conversation'}</span></span>
       </button>`)}${!rows.length && html`<p className="caption search-empty">${query ? 'No conversations match.' : 'Your conversations will appear here.'}</p>`}</div>
       <div className="sidebar-footer"><span className="local-dot"></span><span>Local workspace</span><${Tooltip} content="Your videos and conversation stay in this workbench’s local files."><span tabIndex="0" aria-label="Local workspace information"><${Icon} name="info" size=${13}/></span><//></div>
+
+      ` : html`<${WorkspaceExplorer} api=${api} requestId=${selected} activePath=${activeCanvasPath} onOpen=${openCanvas} onOutputs=${() => openCanvas({id:'outputs',kind:'outputs',title:'Outputs'})} onBrowser=${() => openCanvas({id:'browser',kind:'browser',title:'Browser'})}/>`}
     </nav>
-    <main className="main-workspace" inert=${mobile && sidebar ? '' : undefined}>
-      <header className="workspace-header"><div className="header-leading"><div className="mobile-nav"><${IconButton} name="folder" label="Open conversations" onClick=${() => setSidebar(true)}/></div><div><div className="header-path">Video workbench <span>/</span> ${selected ? 'Conversation' : 'Get started'}</div><h1>${name}</h1></div></div>
-        <div className="header-actions workspace-view-actions" role="group" aria-label="Workspace view">${current?.output_count > 0 && html`<span className="output-count">${current.output_count} outputs</span>`}
-          <${Tooltip} content="Outputs and request"><${Button} variant="text" size="sm" aria-label="Show outputs and request" aria-pressed=${panel && panelView === 'outputs'} onClick=${() => {setPanel(panelView === 'outputs' ? !panel : true); setPanelView('outputs');}}><${Icon} name="file" size=${16}/><span className="panel-button-label">Outputs</span><//><//>
-          <${Tooltip} content="Conversation browser"><${Button} variant="text" size="sm" aria-label="Show browser" aria-pressed=${panel && panelView === 'browser'} onClick=${() => {setPanel(panelView === 'browser' ? !panel : true); setPanelView('browser');}}><${Icon} name="link" size=${16}/><span className="panel-button-label">Browser</span><//><//></div>
+    <main className="main-workspace" inert=${narrow && sidebar ? '' : undefined}>
+      <header className="workspace-header"><div className="header-leading"><div><div className="header-path">Video workbench <span>/</span> ${selected ? 'Conversation' : 'Get started'}</div><h1>${name}</h1></div></div>
+        <div className="header-actions workspace-view-actions" role="group" aria-label="Workspace view">
+          <${Button} variant="text" size="sm" aria-label=${narrow ? 'Show chat' : chatShown ? 'Hide chat' : 'Show chat'} aria-pressed=${narrow ? mobileView === 'chat' : chatShown} onClick=${() => {if (narrow) setMobileView('chat'); else setChatShown(value => !value);}}><${Icon} name="file-text" size=${16}/><span>Chat</span><//>
+          ${narrow && html`<${Button} variant="text" size="sm" aria-label="Show canvas" aria-pressed=${mobileView === 'canvas'} onClick=${() => setMobileView('canvas')}><${Icon} name="table" size=${16}/><span>Canvas</span><//>`}
+          <${Tooltip} content="Open outputs"><${Button} variant="text" size="sm" aria-label="Show outputs and request" onClick=${() => openCanvas({id:'outputs',kind:'outputs',title:'Outputs'})}><${Icon} name="file" size=${16}/><span className="panel-button-label">Outputs</span><//><//>
+          <${Tooltip} content="Open browser"><${Button} variant="text" size="sm" aria-label="Show browser" onClick=${() => openCanvas({id:'browser',kind:'browser',title:'Browser'})}><${Icon} name="link" size=${16}/><span className="panel-button-label">Browser</span><//><//></div>
       </header>
-      <div className="workspace-body"><section className="chat-column" aria-label="Agent conversation" inert=${narrow && panel ? '' : undefined}>
-        ${!panel && notice && html`<div className="chat-panel-status"><${MessageBar} tone=${notice.tone}>${notice.text}<//></div>`}
+      <div className="workspace-body"><section className="chat-column" aria-label="Agent conversation" inert=${(!chatShown && !narrow) || (narrow && mobileView !== 'chat') ? '' : undefined}>
+        <div className="chat-pane-heading"><h2>Conversation</h2><span>${active ? 'Working' : current?.output_count ? `${current.output_count} outputs` : 'Ready'}</span><${IconButton} name="chevron-left" label="Collapse chat" onClick=${() => narrow ? setMobileView('canvas') : setChatShown(false)}/></div>
+        ${notice && html`<div className="chat-panel-status"><${MessageBar} tone=${notice.tone}>${notice.text}<//></div>`}
         <div id="conversation-feed" className="conversation-feed" ref=${feed} tabIndex="0" onScroll=${e => setIsNearBottom(e.currentTarget.scrollHeight - e.currentTarget.scrollTop - e.currentTarget.clientHeight < 100)}>
           <div className="feed-inner">${loading ? html`<p className="loading-copy">Opening your conversation…</p>` : !chat.length ? html`<div className="welcome"><${SolsticeMark} size=${28}/><h2>Good work starts<br/>with a conversation.</h2><p>Bring a video. Tell me what you want to make.<br/>We’ll shape it together, one edit at a time.</p><div className="welcome-hint"><${Icon} name="file" size=${16}/><span>Attach your source video to get started</span></div></div>` : html`
             <div className="conversation-start"><span>${date(data.request.created)}</span><span>One continuing conversation</span></div>
@@ -438,7 +469,7 @@ function App() {
             </div><div className="reference-footer">${picker.kind === 'skill' ? 'Choose a skill, then describe what you want to do.' : 'Folders are indexed from this conversation’s work/ workspace.'}${features.folders_truncated && picker.kind === 'folder' ? ' Showing the first 500 folders.' : ''}</div>
           </div>`}
           ${!answering && references.length > 0 && html`<div className="reference-chips" role="group" aria-label="Selected references">${references.map(r => html`<span className="reference-chip" key=${`${r.kind}:${r.id}`}>
-            <${Icon} name=${r.kind === 'skill' ? 'sparkles' : 'folder'} size=${13}/><span>${r.kind === 'skill' ? `/features ${r.name}` : `@${r.name}`}</span>
+            <${Icon} name=${r.kind === 'skill' ? 'sparkles' : r.kind === 'plugin' ? 'library' : 'folder'} size=${13}/><span>${r.kind === 'skill' ? `/features ${r.name}` : r.kind === 'plugin' ? r.name : `@${r.name}`}</span>
             <${IconButton} name="x" label=${`Remove ${r.name}`} onClick=${() => setReferences(prev => prev.filter(x => x.kind !== r.kind || x.id !== r.id))}/></span>`)}</div>`}
           <${Composer} ref=${composer} value=${composerText} onValueChange=${setComposerText} onSend=${value => send(value)} working=${!!active}
             canSend=${!busy && (!picker || answering) && (!!composerText.trim() || !!answer)} onStop=${active?.can_stop === false ? undefined : () => mutate('/stop')} onAttach=${answering || busy ? undefined : () => fileInput.current?.click()}
@@ -447,14 +478,23 @@ function App() {
             question=${questions.length ? html`<${QuestionQueue} questions=${questions} index=${qIndex} setIndex=${setQIndex} answer=${answer} setAnswer=${value => setAnswers(prev => ({...prev, [question.id]: value}))} hidden=${questionsHidden} setHidden=${setQuestionsHidden}/>` : undefined}
             attachments=${uploads.length ? html`<div className="staged-files">${uploads.map(u => html`<span className="staged-file" key=${u.id}><${Icon} name="file" size=${14}/>${u.name}<${IconButton} name="x" label=${`Remove ${u.name}`} onClick=${() => setUploads(prev => prev.filter(x => x.id !== u.id))}/></span>`)}</div>` : answer ? html`<span className="selected-answer"><${Icon} name="check" size=${12}/> Answer selected. Send to confirm.</span>` : undefined}
             className="workbench-composer"/>
-          <div className="composer-footer"><div className="composer-model"><${ModelControl} api=${api} requestId=${selected} onNotice=${notice => {if (notice.tone === 'error') setError(notice.text); else setInfo(notice.text);}}/>${active && html`<span className="queue-label">Send queues</span>`}</div>
+          <div className="composer-footer"><div className="composer-model"><${ModelControl} api=${api} requestId=${selected} onNotice=${notice => {if (notice.tone === 'error') setError(notice.text); else setInfo(notice.text);}}/><${IntegrationsControl} api=${api} disabled=${answering || busy} selected=${references.filter(r => r.kind === 'plugin')} onToggle=${item => {
+              if (!references.some(r => r.kind === 'plugin' && r.id === item.id) && references.length >= 12) {setError('Choose at most 12 references per message.'); return;}
+              setReferences(previous => previous.some(r => r.kind === 'plugin' && r.id === item.id) ? previous.filter(r => r.kind !== 'plugin' || r.id !== item.id) : [...previous,item]);
+            }}/>${active && html`<span className="queue-label">Send queues</span>`}</div>
             <div className="composer-footer-actions">${active && active.can_stop !== false && html`<button className="send-now" disabled=${busy || (picker && !answering) || (!composerText.trim() && !answer)} onClick=${() => send(composerText, 'now')}>Send now <${Icon} name="arrow-up" size=${12}/></button>`}
               <${ContextUsage} usage=${data?.usage} active=${active} pending=${queue.length > 0} compact=${compact} busy=${compactBusy}/></div></div>
         </div><div className="composer-help"><span>${busy ? 'Saving…' : answering ? (uploads.length ? 'Your attached videos are kept for your next general message.' : 'Answering this question. Collapse it to write another message.') : active ? (active.can_stop === false ? 'This turn is running in a terminal. Your message will queue.' : 'Send now stops the current turn and continues with your message.') : 'Enter to send · Shift + Enter for a new line'}</span><span>${selected ? 'Changes stay in this conversation' : 'MP4, MOV, MKV or WebM'}</span></div></div></div>
         <input ref=${fileInput} className="visually-hidden" type="file" multiple accept="video/*,.mkv" onChange=${e => {upload([...e.target.files]); e.target.value = '';}} aria-label="Attach source videos"/>
       </section>
-      ${panel && (panelView === 'browser' ? html`<${BrowserPanel} key=${selected || 'new'} api=${api} requestId=${selected} notice=${notice} onClose=${() => setPanel(false)}/>`
-        : html`<${OutputPanel} data=${data} outputId=${outputId} setOutputId=${setOutputId} notice=${notice} onClose=${() => setPanel(false)}/>`)}
+      <div className="chat-resize-handle" role="separator" aria-label="Resize chat" aria-orientation="vertical" aria-valuemin="300" aria-valuemax="640" aria-valuenow=${Math.round(chatWidth)} tabIndex="0"
+        onKeyDown=${event => {const value = {ArrowLeft: chatWidth - 16, ArrowRight: chatWidth + 16, Home:300, End:640}[event.key]; if(value !== undefined){event.preventDefault(); resizeChat(value);}}}
+        onPointerDown=${event => {chatResize.current = event.currentTarget.parentElement.getBoundingClientRect().left; event.currentTarget.setPointerCapture(event.pointerId);}}
+        onPointerMove=${event => {if(chatResize.current != null) resizeChat(event.clientX - chatResize.current);}}
+        onPointerUp=${event => {chatResize.current = null; event.currentTarget.releasePointerCapture(event.pointerId);}} onPointerCancel=${() => {chatResize.current = null;}}></div>
+      <${WorkspaceCanvas} visible=${!narrow || mobileView === 'canvas'} api=${api} requestId=${selected} state=${canvas} dispatch=${dispatchCanvas} onExplore=${explore}
+        renderOutputs=${() => html`<${OutputPanel} data=${data} outputId=${outputId} setOutputId=${setOutputId} onClose=${() => dispatchCanvas({type:'close',id:'outputs'})}/>`}/>
+
       </div>
     </main>
   <//>`;
