@@ -33,6 +33,10 @@ plane owns tools, provenance, checks, flags, and human acceptance.
 - Present nonblocking questions with options, navigation, and typed answers.
 - Show last-reported context usage separately from cumulative token usage.
 - Offer native compaction without replacing the conversation thread.
+- Show a conversation-scoped browser beside chat, with live viewing and explicit
+  human/agent ownership. Headed mode is the default; headless is optional.
+- Keep the completed ten-short baseline conversation discoverable through a
+  durable registration, with its existing native thread and media in place.
 - Preserve source provenance, output versions, verification and acceptance rules.
 - Keep vendor keys in the host gateway, away from the browser and agent plane.
 
@@ -52,5 +56,7 @@ No output, token count, or successful check should be invented for presentation.
 
 This version is a local single-user interface for the existing harness. The output
 preview is open beside chat on desktop and available on demand at narrow widths.
+The Browser control replaces that panel with a larger resizable browser view;
+closing or switching the panel preserves the conversation.
 The optional layout preference was unanswered, so this follows the supplied brief
 and repository rather than a separate user confirmation.

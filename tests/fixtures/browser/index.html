@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Workbench browser acceptance</title>
+<style>
+body { margin: 24px; font: 16px/1.4 sans-serif; color: #172235; background: #fff; }
+button, input, select { font: inherit; padding: 8px; margin: 4px; }
+section { margin: 16px 0; }
+canvas { position: absolute; left: 800px; top: 100px; width: 240px; height: 120px; border: 2px solid #172235; }
+#bottom { margin-top: 1000px; }
+</style>
+<h1>Workbench browser acceptance</h1>
+<p>Ordinary paragraph evidence must survive a full accessibility snapshot.</p>
+<section>
+  <label>Your name <input id="name" autocomplete="off"></label>
+  <button id="save">Save name</button>
+  <p id="saved" role="status">No name saved</p>
+</section>
+<section>
+  <label>Colour <select id="colour"><option value="red">Red</option><option value="blue">Blue</option></select></label>
+  <label><input id="enabled" type="checkbox"> Enable option</label>
+</section>
+<section>
+  <label>Upload fixture <input type="file" id="upload"></label>
+  <p id="uploaded" role="status">No upload selected</p>
+  <a href="download.txt" download="fixture.txt">Download fixture</a>
+</section>
+<section>
+  <button id="prompt">Open prompt</button>
+  <p id="prompt-result" role="status">Prompt unopened</p>
+  <a href="child.html" target="_blank">Open sibling page</a>
+  <a href="#bottom">Go to bottom</a>
+</section>
+<canvas id="visual" width="240" height="120" aria-label="Visual click target"></canvas>
+<p id="canvas-result" role="status">Canvas clicks: 0</p>
+<section id="bottom"><h2>Bottom section</h2><button id="bottom-button">Bottom button</button></section>
+<script>
+const $ = id => document.getElementById(id);
+$('save').onclick = () => { $('saved').textContent = 'Saved: ' + $('name').value; };
+$('upload').onchange = () => { $('uploaded').textContent = 'Selected file: ' + $('upload').files[0].name; };
+$('prompt').onclick = () => { const answer = prompt('Fixture prompt', 'default'); $('prompt-result').textContent = 'Prompt answer: ' + (answer === null ? 'dismissed' : answer); };
+$('bottom-button').onclick = () => { $('bottom-button').textContent = 'Bottom clicked'; };
+let clicks = 0, phase = 0;
+$('visual').onclick = () => { $('canvas-result').textContent = 'Canvas clicks: ' + (++clicks); sessionStorage.setItem('fixture-canvas-clicks', String(clicks)); };
+const paint = () => { const ctx = $('visual').getContext('2d'); ctx.fillStyle = phase++ % 2 ? '#284f72' : '#386a8b'; ctx.fillRect(0, 0, 240, 120); ctx.fillStyle = '#fff'; ctx.font = '18px sans-serif'; ctx.fillText('Click this visual target', 18, 65); };
+paint(); setInterval(paint, 250);
+</script>

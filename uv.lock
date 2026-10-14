@@ -1626,6 +1626,7 @@ dependencies = [
     { name = "scipy" },
     { name = "typer" },
     { name = "vtracer" },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -1657,6 +1658,7 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.14" },
     { name = "typer", specifier = ">=0.15" },
     { name = "vtracer", specifier = ">=0.6.15" },
+    { name = "websockets", specifier = ">=15,<17" },
 ]
 
 [package.metadata.requires-dev]

@@ -1,6 +1,7 @@
 import htm from './vendor/htm.mjs';
 import {triggerAt, matchingOptions, toContext} from './composer-picker.js';
 import {ModelControl} from './model-control.js';
+import {BrowserPanel} from './browser-panel.js';
 
 // Eeva and React are local, versioned assets. No network service is needed to open the UI.
 const {createElement, useState, useEffect, useRef, useCallback} = window.React;
@@ -195,6 +196,7 @@ function App() {
   const pickerShell = useRef(null);
   const [error, setError] = useState(''), [info, setInfo] = useState(''), [loading, setLoading] = useState(true), [busy, setBusy] = useState(false);
   const [panel, setPanel] = useState(() => window.innerWidth >= 1024), [sidebar, setSidebar] = useState(false), [outputId, setOutputId] = useState(null);
+  const [panelView, setPanelView] = useState('outputs');
   const [qIndex, setQIndex] = useState(0), [answers, setAnswers] = useState({}), [questionDrafts, setQuestionDrafts] = useState({}), [questionsHidden, setQuestionsHidden] = useState(false);
   const [query, setQuery] = useState(''), [compactBusy, setCompactBusy] = useState(false), [isNearBottom, setIsNearBottom] = useState(true);
   const csrf = useRef(''), selection = useRef(null), feed = useRef(null), fileInput = useRef(null), composer = useRef(null);
@@ -277,20 +279,20 @@ function App() {
     return () => {live = false; clearTimeout(timer);};
   }, [selected, api, refresh]);
   useEffect(() => {
-    const overlay = mobile && sidebar ? document.querySelector('.sidebar') : narrow && panel ? document.querySelector('.output-panel') : null;
+    const overlay = mobile && sidebar ? document.querySelector('.sidebar') : narrow && panel ? document.querySelector(panelView === 'browser' ? '.browser-panel' : '.output-panel') : null;
     if (!overlay) return;
     const prior = document.activeElement;
-    const focusable = () => [...overlay.querySelectorAll('button:not(:disabled), a[href], input, [tabindex="0"]')].filter(el => !el.closest('[hidden]'));
+    const focusable = () => [...overlay.querySelectorAll('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled):not([tabindex="-1"]), [tabindex="0"]')].filter(el => !el.closest('[hidden]'));
     focusable()[0]?.focus();
     const trap = e => {
-      if (e.key !== 'Tab') return;
+      if (e.key !== 'Tab' || e.defaultPrevented) return;
       const nodes = focusable(), first = nodes[0], last = nodes.at(-1);
       if (e.shiftKey && (document.activeElement === first || !overlay.contains(document.activeElement))) {e.preventDefault(); last?.focus();}
       else if (!e.shiftKey && (document.activeElement === last || !overlay.contains(document.activeElement))) {e.preventDefault(); first?.focus();}
     };
     document.addEventListener('keydown', trap);
     return () => {document.removeEventListener('keydown', trap); if (prior?.isConnected) prior.focus();};
-  }, [mobile, sidebar, narrow, panel]);
+  }, [mobile, sidebar, narrow, panel, panelView]);
   const chat = data?.request?.chat || [], active = data?.active, queue = (data?.queue || []).filter(j => ['queued', 'pending'].includes(j.status));
   const questions = (data?.asks || []).filter(q => ['open', 'defaulted'].includes(q.status));
   const question = questions[Math.min(qIndex, questions.length - 1)];
@@ -392,7 +394,7 @@ function App() {
   const messageEvents = (start, end) => (data?.events || []).filter(e => stamp(e.ts) >= stamp(start) && (!end || stamp(e.ts) <= stamp(end)));
   const latestHuman = [...chat].reverse().find(m => m.role === 'human');
   const rows = requests.filter(r => `${r.title} ${r.id}`.toLowerCase().includes(query.toLowerCase()));
-  return html`<${Surface} theme="editorial" background="chat" className=${`workbench ${panel ? 'with-panel' : ''} ${sidebar ? 'nav-open' : ''}`}>
+  return html`<${Surface} theme="editorial" background="chat" className=${`workbench ${panel ? 'with-panel' : ''} ${panel && panelView === 'browser' ? 'with-browser' : ''} ${sidebar ? 'nav-open' : ''}`}>
     <a href="#conversation-feed" className="skip-link">Skip to conversation</a>
     ${sidebar && html`<button className="nav-scrim" aria-label="Close conversations" onClick=${() => setSidebar(false)}></button>`}
     <nav className="sidebar" aria-label="Conversations" inert=${mobile && !sidebar ? '' : undefined}>
@@ -407,7 +409,9 @@ function App() {
     </nav>
     <main className="main-workspace" inert=${mobile && sidebar ? '' : undefined}>
       <header className="workspace-header"><div className="header-leading"><div className="mobile-nav"><${IconButton} name="folder" label="Open conversations" onClick=${() => setSidebar(true)}/></div><div><div className="header-path">Video workbench <span>/</span> ${selected ? 'Conversation' : 'Get started'}</div><h1>${name}</h1></div></div>
-        <div className="header-actions">${current?.output_count > 0 && html`<span className="output-count">${current.output_count} outputs</span>`}<${Button} variant="text" size="sm" aria-label="Toggle workspace panel" aria-pressed=${panel} onClick=${() => setPanel(!panel)}><${Icon} name="panel-right-close" size=${16}/><span className="panel-button-label">Workspace</span><//></div>
+        <div className="header-actions workspace-view-actions" role="group" aria-label="Workspace view">${current?.output_count > 0 && html`<span className="output-count">${current.output_count} outputs</span>`}
+          <${Tooltip} content="Outputs and request"><${Button} variant="text" size="sm" aria-label="Show outputs and request" aria-pressed=${panel && panelView === 'outputs'} onClick=${() => {setPanel(panelView === 'outputs' ? !panel : true); setPanelView('outputs');}}><${Icon} name="file" size=${16}/><span className="panel-button-label">Outputs</span><//><//>
+          <${Tooltip} content="Conversation browser"><${Button} variant="text" size="sm" aria-label="Show browser" aria-pressed=${panel && panelView === 'browser'} onClick=${() => {setPanel(panelView === 'browser' ? !panel : true); setPanelView('browser');}}><${Icon} name="link" size=${16}/><span className="panel-button-label">Browser</span><//><//></div>
       </header>
       <div className="workspace-body"><section className="chat-column" aria-label="Agent conversation" inert=${narrow && panel ? '' : undefined}>
         ${!panel && notice && html`<div className="chat-panel-status"><${MessageBar} tone=${notice.tone}>${notice.text}<//></div>`}
@@ -449,7 +453,8 @@ function App() {
         </div><div className="composer-help"><span>${busy ? 'Saving…' : answering ? (uploads.length ? 'Your attached videos are kept for your next general message.' : 'Answering this question. Collapse it to write another message.') : active ? (active.can_stop === false ? 'This turn is running in a terminal. Your message will queue.' : 'Send now stops the current turn and continues with your message.') : 'Enter to send · Shift + Enter for a new line'}</span><span>${selected ? 'Changes stay in this conversation' : 'MP4, MOV, MKV or WebM'}</span></div></div></div>
         <input ref=${fileInput} className="visually-hidden" type="file" multiple accept="video/*,.mkv" onChange=${e => {upload([...e.target.files]); e.target.value = '';}} aria-label="Attach source videos"/>
       </section>
-      ${panel && html`<${OutputPanel} data=${data} outputId=${outputId} setOutputId=${setOutputId} notice=${notice} onClose=${() => setPanel(false)}/>`}
+      ${panel && (panelView === 'browser' ? html`<${BrowserPanel} key=${selected || 'new'} api=${api} requestId=${selected} notice=${notice} onClose=${() => setPanel(false)}/>`
+        : html`<${OutputPanel} data=${data} outputId=${outputId} setOutputId=${setOutputId} notice=${notice} onClose=${() => setPanel(false)}/>`)}
       </div>
     </main>
   <//>`;

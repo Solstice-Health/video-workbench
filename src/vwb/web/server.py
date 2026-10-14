@@ -23,8 +23,10 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from vwb import models
 from vwb.agents.events import context_usage, read_events
+from vwb.browser.service import BrowserConflict, BrowserSession
 from vwb.config import RUNS_DIR
 from vwb.util.jsonio import read_json, write_json
+from vwb.web.history import request_ids, resolve_request
 from vwb.web.queue import QueueConflict, TurnQueue
 from vwb.workspace import Workspace, references
 from vwb.workspace.request import SUBDIRS, Request, now_iso
@@ -75,12 +77,25 @@ class Workbench:
         self.mutation_lock = threading.RLock()
 
     def workspace(self, request_id: str) -> Workspace:
-        if not IDENTIFIER.fullmatch(request_id):
-            raise ValueError("Invalid request id.")
-        root = safe_child(self.runs_dir, request_id)
-        if not (root / "request.json").is_file():
-            raise FileNotFoundError("That conversation was not found.")
-        return Workspace(root)
+        return Workspace(resolve_request(self.runs_dir, request_id))
+
+    def close_browsers(self) -> None:
+        """Stop UI-managed daemons after workers stop; preserve private profiles.
+
+        Browser sessions started from an independent CLI are not adopted merely
+        by reading their status. Remote Chrome belongs to its configured host.
+        """
+        for request_id in request_ids(self.runs_dir):
+            try:
+                ws = self.workspace(request_id)
+                state_path = ws.root / ".browser" / "state.json"
+                if (not state_path.is_symlink() and state_path.is_file()
+                        and read_json(state_path, {}).get("ui_managed")):
+                    BrowserSession(ws).ui_action({"action": "close"})
+            except Exception:
+                # Other sessions still need cleanup if one external endpoint is
+                # unavailable. Keep its durable state for the next explicit close.
+                continue
 
     @staticmethod
     def asks(ws: Workspace) -> list[dict[str, Any]]:
@@ -91,11 +106,9 @@ class Workbench:
 
     def requests(self) -> list[dict[str, Any]]:
         requests = []
-        for path in self.runs_dir.glob("*/request.json"):
-            if path.parent.name.startswith(".") or not IDENTIFIER.fullmatch(path.parent.name):
-                continue
+        for request_id in request_ids(self.runs_dir):
             try:
-                ws = self.workspace(path.parent.name)
+                ws = self.workspace(request_id)
                 req = ws.load()
                 state = self.queue.snapshot(ws)
                 output_count = len(list(ws.canvas.glob("*/HEAD")))
@@ -361,6 +374,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(references.catalog())
             if parts == ["api", "models"]:
                 return self._json(models.catalog(self.app.runs_dir))
+            if len(parts) in {4, 5} and parts[:2] == ["api", "requests"] and parts[3] == "browser":
+                session = BrowserSession(self.app.workspace(parts[2]))
+                if len(parts) == 4:
+                    return self._json(session.status())
+                if parts[4] == "stream":
+                    return self._browser_stream(session)
             if len(parts) in {3, 4} and parts[:2] == ["api", "requests"]:
                 ws = self.app.workspace(parts[2])
                 if len(parts) == 3:
@@ -395,6 +414,8 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[:2] == ["api", "requests"]:
                 ws = self.app.workspace(parts[2])
                 action = parts[3]
+                if action == "browser":
+                    return self._json(BrowserSession(ws).ui_action(body))
                 if action == "model":
                     return self._json({"selection": models.set_selection(ws, body.get("selection"), self.app.runs_dir),
                                        "applies_to": "next_turn"})
@@ -418,6 +439,31 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 5 and parts[:2] == ["api", "requests"] and parts[3] == "queue":
                 return self._json({"job": self.app.queue.cancel(self.app.workspace(parts[2]), parts[4])})
         raise FileNotFoundError("That endpoint was not found.")
+
+    def _browser_stream(self, session: BrowserSession) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        if self.command == "HEAD":
+            return
+        events = session.stream()
+        try:
+            for name, payload in events:
+                self.wfile.write(f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode())
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception:
+            # Headers have already been sent. Never append an HTTP error page or
+            # expose a CDP endpoint in a stream failure.
+            self.wfile.write(b'event: state\ndata: {"error":"The browser stream disconnected. Reconnect to continue."}\n\n')
+        finally:
+            events.close()
 
     def _upload(self) -> None:
         if self.headers.get("Transfer-Encoding"):
@@ -512,7 +558,7 @@ class Handler(BaseHTTPRequestHandler):
         except PermissionError as exc:
             self.close_connection = True
             self._json({"error": str(exc)}, HTTPStatus.FORBIDDEN)
-        except QueueConflict as exc:
+        except (QueueConflict, BrowserConflict) as exc:
             self.close_connection = True
             self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
         except FileNotFoundError as exc:
@@ -546,3 +592,4 @@ def serve(*, port: int = 8765, open_browser: bool = True, runs_dir: Path = RUNS_
     finally:
         server.server_close()
         app.queue.close()
+        app.close_browsers()

@@ -152,10 +152,12 @@ restore focus, and prevent interaction with obscured content. Closed drawers mus
 not remain in the tab order. Keep the composer reachable at small viewport heights
 and when the keyboard is open. Use 4px spacing steps and the source breakpoint scale.
 
-Viewport validation is still outstanding. Component and interaction checks ran in
-a DOM environment, but the controlled browser blocked the local URL with
-`ERR_BLOCKED_BY_CLIENT`; desktop/mobile layout, clipping, and rendered focus states
-have not received visual verification.
+The browser panel was visually checked in the local application at 1280×720,
+1024×600, 640×560 and 390×600. Desktop resizing, mobile overlay bounds, ownership
+controls and letterboxed live content were exercised with a real headed browser.
+Earlier chat implementation checks were limited by a blocked preview; the latest
+checks cover the existing conversation shell and browser integration, not every
+chat interaction.
 
 ## Elevation & Depth
 
@@ -202,6 +204,13 @@ Workbench extensions follow these rules:
   current turn and continues with the new message. Queued messages are visible and
   removable. A stopped queue needs a visible resume path. No action implies the
   ability to alter a token stream already being emitted.
+- **Browser:** The header switches between Outputs and Browser. Browser uses a
+  larger split (58% initially), a keyboard-operable resize separator, compact tabs
+  and address controls, and one status bar. Below 1024px it becomes an overlay.
+  Take control and Return to agent explicitly govern interaction. The real
+  SolsticeMark follows verified agent coordinates; it is hidden during human
+  control. Letterboxing uses the same transform for cursor and pointer input.
+  Page dialogs stay inside this panel, with plain text and secondary actions.
 - **Workspace:** Outputs and Request tabs share one panel. Output selection,
   native video controls, review flags, and download/full-review links remain
   secondary to the conversation. Render real files only.

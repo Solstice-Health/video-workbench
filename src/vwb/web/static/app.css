@@ -45,6 +45,8 @@ svg {flex-shrink: 0;}
 .workspace-header h1 {font-size: 17px; line-height: 24px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin: 0;}
 .header-actions {display: flex; gap: 20px; align-items: center; flex-shrink: 0;}
 .header-actions button {gap: 8px;}
+.workspace-view-actions {gap: 8px;}
+.workspace-view-actions button[aria-pressed=true] {background: var(--ds-surface-band); color: var(--ds-text-primary);}
 .output-count {font-size: 12px; color: var(--ds-text-secondary);}
 .workspace-body {display: flex; flex: 1; min-height: 0; padding: 0 20px 20px 0; gap: 12px;}
 .chat-column {display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; position: relative;}
@@ -56,6 +58,8 @@ svg {flex-shrink: 0;}
 .agent-turn {min-width: 0; overflow-wrap: anywhere;}
 .agent-turn p, .agent-turn li {overflow-wrap: anywhere;}
 .agent-turn pre {white-space: pre-wrap;}
+.with-browser .agent-turn div:has(> [role=table]) {overflow-x: auto;}
+.with-browser .agent-turn [role=table] {min-width: 560px;}
 .activity {margin-bottom: 12px; color: var(--ds-text-secondary);}
 .activity > div:first-child {color: var(--ds-text-secondary);}
 .thinking-stream {margin: 12px 0 16px; padding: 16px 20px; background: var(--ds-surface-sunken); border-radius: 8px; box-shadow: var(--ds-elevation-edge); font-size: 13px; line-height: 20px; white-space: pre-wrap; overflow-wrap: anywhere;}

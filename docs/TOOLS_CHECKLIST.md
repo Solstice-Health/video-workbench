@@ -52,6 +52,8 @@ Spec references: D = decision, X = experiment, R/S = sources (see the spec and t
 - [ ] Hostile-text injection fixtures (on-screen text, web pages) with "an obeyed injection fails the build"
 
 ## D. Job intake and chat desk
+- [x] Shared browser toolkit: `browser_open`, `browser_observe`, `browser_act`, `browser_files`, `browser_dialog`, `browser_close`; native agent-browser 0.39.1, isolated profiles, headed default or headless, policy/role gates and per-call ledger. Full snapshots plus viewport images; stale observation rejection, explicit human ownership, interrupted-operation fencing and no automatic action replay. Real headed/headless acceptance covers forms, canvas coordinates, stable tabs, iframe references, native prompts, uploads/downloads and cleanup; real Astra/Codex turn completed form + screenshot-based canvas click in five browser calls (2026-10-14). See `docs/BROWSER.md` and `scripts/browser_smoke.py`.
+- [~] Remote browser: host-configured CDP transport is implemented; hosted session provisioning, provider authentication/profile management, remote file-transfer adapters and billing shutdown have not been implemented or tested. Local client shutdown disconnects rather than destroys the remote browser.
 - [x] `vwb chat`: new request from a message (media paths found in the message) or a follow-up turn (D24 v0 desk)
 - [x] `vwb chat -i`: one conversation over many messages in the terminal; Ctrl-C stops the running turn and keeps the conversation open; one turn at a time per request (turn lock refuses a second message) (B31); exercised 2026-10-12
 - [x] `job_spec`: the job lead records what it understood plus every assumed default (ASSUMED-DEFAULT)

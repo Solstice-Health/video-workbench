@@ -7,6 +7,7 @@ from vwb.tools.base import Registry, Tool, ToolContext, ToolResult
 
 def build_registry() -> Registry:
     from vwb.tools import (
+        browser_tools,
         canvas_tools,
         edit_tools,
         file_tools,
@@ -19,7 +20,7 @@ def build_registry() -> Registry:
     )
     tools: list[Tool] = []
     for module in (job_tools, file_tools, index_tools, media_tools, edit_tools, gen_tools, canvas_tools, people_tools,
-                   web_tools):
+                   web_tools, browser_tools):
         tools.extend(module.TOOLS)
     return Registry(tools)
 

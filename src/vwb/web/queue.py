@@ -36,6 +36,7 @@ class TurnQueue:
         self.owns_containers = command is None
         self.lock = threading.RLock()
         self.states: dict[str, dict[str, Any]] = {}
+        self.workspaces: dict[str, Workspace] = {}
         self.processes: dict[str, subprocess.Popen] = {}
         self.logs: dict[str, Any] = {}
         self.stopping: dict[str, float] = {}
@@ -54,6 +55,9 @@ class TurnQueue:
         return ws.memory / "web_queue.json"
 
     def _state(self, ws: Workspace) -> dict[str, Any]:
+        known = self.workspaces.get(ws.id)
+        if known and known.root.resolve() != ws.root.resolve():
+            raise QueueConflict("A different conversation already uses this id.")
         if ws.id not in self.states:
             state = read_json(self._path(ws), {"jobs": [], "paused": False})
             unfinished = False
@@ -68,6 +72,9 @@ class TurnQueue:
                 state["paused"] = True
                 write_json(self._path(ws), state)
             self.states[ws.id] = state
+            # A registered historical request can live deeper under runs/. Keep
+            # its exact location for dispatch, persistence and shutdown.
+            self.workspaces[ws.id] = ws
         return self.states[ws.id]
 
     @staticmethod
@@ -207,7 +214,7 @@ class TurnQueue:
     def _tick(self) -> None:
         with self.lock:
             for rid, state in self.states.items():
-                ws = Workspace(self.runs_dir / rid)
+                ws = self.workspaces[rid]
                 proc = self.processes.get(rid)
                 if proc and proc.poll() is not None:
                     job = next(j for j in state["jobs"] if j["status"] in {"running", "stopping"})
@@ -252,7 +259,7 @@ class TurnQueue:
         try:
             with self.lock:
                 for rid in list(self.processes):
-                    ws = Workspace(self.runs_dir / rid)
+                    ws = self.workspaces[rid]
                     self.states[rid]["paused"] = True
                     self._interrupt(ws)
                     self._save(ws)

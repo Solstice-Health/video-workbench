@@ -89,6 +89,50 @@ drafts and asynchronous submission. A fresh browser test tab was blocked with
 `ERR_BLOCKED_BY_CLIENT`; rendered visual layout remains unverified. No paid model
 turn was started for this feature's tests.
 
+## Conversation browser
+
+Choose **Browser** in the header to replace the output panel with a live browser
+view. The desktop split starts at 58% and can be resized by dragging its divider
+or focusing the divider and using Left/Right (Home/End set the limits). At narrow
+widths it opens as an overlay. Hide the panel to return to chat, or choose Outputs
+to restore the existing previews. Hiding the viewer disconnects its stream; it
+does not close the browser session.
+
+Open browser defaults to headed mode, which opens a visible Chrome window and
+shows its live image here. Select headless before starting if no separate window
+is wanted. Close the browser before changing modes. Remote browser is also available when the host explicitly configures a remote
+endpoint. Existing remote sessions are labeled Remote; connection details stay
+on the server.
+
+The agent owns a newly opened browser. Take control enables the address field,
+back/forward/reload, tabs and direct interaction with the live page. Return to agent
+releases held keys/buttons and hands control back. Navigation and keyboard/pointer
+input share a serialized queue; frame acknowledgements travel independently.
+Pointer moves and wheel events coalesce without reordering button or key events.
+Click the page to type; Escape returns keyboard focus to the ownership control.
+The viewport uses a text input sink for ordinary text, paste and composition.
+Select-all uses a bounded native compatibility action for text inputs and editable
+content, including same-origin frames. Cross-origin frame select-all is currently
+unsupported; ordinary pointer interaction and text input still use the native
+browser.
+
+The Solstice mark shows the agent's verified cursor position during agent control.
+Image pixels, viewport CSS coordinates and letterboxing are accounted for in both
+cursor placement and human input. Unknown coordinates do not produce a cursor.
+Page alert/confirm/prompt messages appear as plain text inside the panel, with
+Dismiss/Accept and a response field for prompts. They require human control.
+
+Connection errors pause input and expose Reconnect. The viewer opens an SSE stream
+only while the panel is open and the session is running. Each decoded frame is
+acknowledged after a paint, including identical images, so the native driver keeps
+at most one frame in flight. Frames from a prior session/tab are acknowledged and
+discarded. No native WebSocket/CDP address or provider token reaches the frontend.
+
+The original ten-short baseline conversation is registered through
+`runs/.ui/history.json`. The registration points to its existing request within
+`runs/benchmarks/`; assets, chat bytes and native thread remain in place. This is
+an explicit request registration, not recursive discovery of all benchmark runs.
+
 ## Questions
 
 Questions appear above the composer. Previous/next controls switch between them,
@@ -133,8 +177,15 @@ cumulative accounting, native compaction completion/failure and interrupted thre
 persistence. DOM interaction checks exercise the real Eeva bundle with actual saved
 conversation data and mocked mutations, without starting a paid model run.
 
-The controlled Chrome preview blocked local URLs with `ERR_BLOCKED_BY_CLIENT`, so
-desktop/mobile visual layout and real-browser interaction QA remain unverified.
+The earlier controlled preview blocked local URLs. The browser integration was
+subsequently tested against the real local server at desktop and mobile widths
+(1280×720, 1024×600, 640×560 and 390×600), including the saved ten-short chat,
+resizing, ownership, live images and direct page input. Live checks verified
+new/select/close tabs, navigation history, prompt responses, wheel scrolling,
+Escape focus, Meta/Control select-all with long text, and the agent mark at exact
+native coordinates. Pure coordinate/input
+checks cover letterboxing, captured drag bounds, URL validation and event order.
+These checks do not revalidate every older chat interaction.
 Native compaction's protocol was checked against the installed Docker image and
 its lifecycle tested with fixtures; a paid live compaction and a 60-minute silent
 stream were not run. Nothing in this frontend changes output acceptance or the

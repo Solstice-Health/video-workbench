@@ -38,6 +38,9 @@ capabilities:
   web.fetch: allow
   web.research: allow               # combined search/fetch also requires both rows above to allow
   asset.fetch: allow                # into quarantine/ only
+  browser.observe: allow           # shared browser accessibility + viewport evidence
+  browser.control: allow           # typed actions in an isolated browser; human ownership wins
+  browser.files: allow             # bounded explicit workspace uploads/downloads, logged through Registry
 
 roles:
   # Which tools each role may call. "*" means every tool not listed under deny.
