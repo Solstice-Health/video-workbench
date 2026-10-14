@@ -176,7 +176,8 @@ def _difference_key(region: np.ndarray, bg: np.ndarray, core_dist: float = 60.0,
     return alpha, fg
 
 
-def matte_extract(image: np.ndarray, box: list[float], *, pad: float = 0.04) -> dict[str, Any]:
+def matte_extract(image: np.ndarray, box: list[float], *, pad: float = 0.04,
+                  preserve_rgb: bool = False) -> dict[str, Any]:
     """Deterministic cut-out that keeps the source pixels: a background key when the region sits on a
     flat colour, otherwise GrabCut seeded by the box. Provenance class 'segmented'."""
     from vwb.index.layout import background_color
@@ -185,22 +186,36 @@ def matte_extract(image: np.ndarray, box: list[float], *, pad: float = 0.04) -> 
     m = pad * max(w, h)
     x0, y0, x1, y1 = int(max(0, x - m)), int(max(0, y - m)), int(min(W, x + w + m)), int(min(H, y + h + m))
     region = np.ascontiguousarray(image[y0:y1, x0:x1, :3])
+    source_alpha = image[y0:y1, x0:x1, 3] if image.shape[2] == 4 else np.full(region.shape[:2], 255, np.uint8)
     bg, uniform = background_color(region, band=0.04)
-    if uniform > 0.85:
+    if preserve_rgb and np.any(source_alpha < 255):
+        alpha, fg = source_alpha.astype(np.float32) / 255.0, region.astype(np.float32)
+        method = 'existing alpha'
+    elif uniform > 0.85:
         alpha, fg = _difference_key(region, bg.astype(np.float32))
         method = "flat-background key"
     else:
         mask = np.zeros(region.shape[:2], np.uint8)
-        rect = (int(x - x0), int(y - y0), max(2, int(w)), max(2, int(h)))
+        rh, rw = region.shape[:2]
+        if min(rh, rw) < 5:
+            raise ValueError('Draw a larger subject region with some background around its edge.')
+        rx, ry = max(1, min(rw - 2, int(x - x0))), max(1, min(rh - 2, int(y - y0)))
+        rect = (rx, ry, max(1, min(int(w), rw - rx - 1)), max(1, min(int(h), rh - ry - 1)))
         bgd, fgd = np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64)
         cv2.grabCut(cv2.cvtColor(region, cv2.COLOR_RGB2BGR), mask, rect, bgd, fgd, 6, cv2.GC_INIT_WITH_RECT)
         hard = np.isin(mask, (cv2.GC_FGD, cv2.GC_PR_FGD)).astype(np.float32)
         alpha = cv2.GaussianBlur(hard, (0, 0), 1.2)
         fg = region.astype(np.float32)
         method = "grabcut"
+    alpha = np.minimum(alpha, source_alpha.astype(np.float32) / 255.0)
+    if preserve_rgb:
+        fg = region.astype(np.float32)
     rgba = np.dstack([np.clip(fg, 0, 255), alpha * 255.0]).astype(np.uint8)
-    stats = qa.alpha_stats(rgba)
-    bb = stats["bbox"] or [0, 0, rgba.shape[1], rgba.shape[0]]
+    # Keep low-alpha edge pixels too. QA's bbox uses a visibility threshold,
+    # which is unsuitable for a lossless crop of an existing alpha channel.
+    ys, xs = np.nonzero(rgba[..., 3] > 0)
+    bb = ([int(xs.min()), int(ys.min()), int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1)]
+          if len(xs) else [0, 0, rgba.shape[1], rgba.shape[0]])
     tight = np.ascontiguousarray(rgba[bb[1]:bb[1] + bb[3], bb[0]:bb[0] + bb[2]])
     return {"rgba": tight, "placed": [x0 + bb[0], y0 + bb[1], bb[2], bb[3]], "method": method,
             "alpha": qa.alpha_stats(tight), "uniform_background": round(uniform, 3)}
@@ -209,7 +224,7 @@ def matte_extract(image: np.ndarray, box: list[float], *, pad: float = 0.04) -> 
 # ---------------------------------------------------------------- inpaint
 
 def inpaint(gw: Gateway, image: np.ndarray, mask: np.ndarray, prompt: str, *, quality: str | None = None, tries: int = 1,
-            feather: int = 4, purpose: str = "sunburst.inpaint") -> dict[str, Any]:
+            feather: int = 4, purpose: str = "sunburst.inpaint", exact_mask: bool = False) -> dict[str, Any]:
     """Regenerate the pixels where mask > 0 (image RGB or RGBA, mask HxW). The model sees a context
     window around the mask; outside the (feathered) mask the result is the original, exactly."""
     H, W = image.shape[:2]
@@ -221,7 +236,8 @@ def inpaint(gw: Gateway, image: np.ndarray, mask: np.ndarray, prompt: str, *, qu
     x0, y0, x1, y1 = max(0, bx0 - m), max(0, by0 - m), min(W, bx1 + m), min(H, by1 + m)
     crop = np.ascontiguousarray(image[y0:y1, x0:x1, :3])
     cm = (mask[y0:y1, x0:x1] > 0).astype(np.uint8)
-    cm = cv2.dilate(cm, np.ones((2 * feather + 1, 2 * feather + 1), np.uint8))
+    if not exact_mask:
+        cm = cv2.dilate(cm, np.ones((2 * feather + 1, 2 * feather + 1), np.uint8))
     cw, ch = crop.shape[1], crop.shape[0]
     mw, mh = valid_size(cw, ch, long_edge=max(1024, min(2048, max(cw, ch))))
     model_img = _resize(crop, mw, mh)

@@ -56,6 +56,8 @@ for supported models, capability checks, credential overrides and context limits
 | `media/` | immutable source copies (hard links) | intake |
 | `index/` | the edit index (SQLite), dossier, audio facts, readings | index builder |
 | `work/` | the agents' editor: `outputs/<id>/canvas.json`, notes, drafts, advisor results | agents (file tools, Codex shell) |
+| `work/studio/` | uploaded inputs and per-job image/video outputs, input snapshots and generation receipts | studio control plane; readable by agents |
+| `.studio/` | private request-local job records, upload receipts and canonical staging | studio control plane only |
 | `copy/deck.json` | every typeset string with provenance | `copy_add` and the compiler only |
 | `canvas/<id>/v<N>.json` | immutable committed versions with HEAD | `canvas_commit` (job lead) |
 | `plates/` | Remotion alpha plates by content hash | render |
@@ -65,6 +67,36 @@ for supported models, capability checks, credential overrides and context limits
 | `asks/` | question tickets and remembered answers | broker; answers via the CLI |
 | `ledger/`, `swarm/`, `memory/` | ledger and call log; mailbox and worker transcripts; plan and notes | control plane, agents |
 | `release/` | accepted outputs with signed release records | `vwb accept` |
+
+## Direct generation studios
+
+The browser's image/video studios submit request-local jobs to `studio/service.py`
+without starting an agent turn. Each job runs in a separate host process through
+`studio/worker.py`, which calls the existing generation tools through
+`Registry.call`. Role checks, `gen.image`/`gen.video` policy, call logs and asset
+provenance therefore also apply to direct UI generation. Local background removal
+uses the existing matte tool without a provider call; it retains source RGB/alpha
+and registers a separate full-source inverse-alpha mask as segmented. The mask
+and pinned source can be reused for an explicit inpaint job. `StudioGateway` pins a
+compatible configured model for the job; it does not silently fall back to a
+different model. Vendor keys remain in the host gateway.
+
+Inputs are validated and snapshotted before dispatch. Uploaded and registered
+sources must still match their receipts. Public `work/studio/` files are published
+through pinned no-follow directory descriptors; private staging and durable job
+state remain outside `work/`. Each result has an asset reference, file hash,
+measured media metadata and a receipt linking its controls and sources. Exact-mask
+studio inpaint preserves pixels outside the submitted mask. Local segmentation
+is approximate; model-based subject extraction remains a generative recovery,
+with its fidelity limits retained and no source-aligned mask inferred from its
+bounding-box registration.
+
+Studio jobs have independent idempotency keys, bounded concurrency, cancellation,
+a parent-liveness pipe and a host deadline. Browser reload reconnects to saved
+job state. A server restart never replays paid work: unfinished saved jobs become
+interrupted and require a new explicit submission. Local cancellation cannot
+revoke a provider request already accepted remotely. See [the studio UI and API
+guide](UI.md#image-and-video-studios) for operations and capability limits.
 
 ## The edit index (spec D19, D35)
 Eager, deterministic facts first; model readings stored as claims beside them; every row has a producer and status.

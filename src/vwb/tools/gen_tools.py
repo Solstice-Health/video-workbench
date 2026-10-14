@@ -103,7 +103,7 @@ def sunburst_extract(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     if method == "matte":
         if not box:
             return ToolResult.error("method matte needs a box")
-        res = sb.matte_extract(src.rgba, box)
+        res = sb.matte_extract(src.rgba, box, preserve_rgb=bool(a.get('preserve_rgb')))
         receipt, extra = "matte.extract", {"method": res["method"], "uniform_background": res["uniform_background"]}
         region = src.rgba[res["placed"][1]:res["placed"][1] + res["placed"][3], res["placed"][0]:res["placed"][0] + res["placed"][2]]
         shown = [region, res["rgba"]]
@@ -186,7 +186,8 @@ def sunburst_inpaint(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     if a.get("crop") and parse_json_arg(a.get("mask") or {}).get("text_tracks"):
         return ToolResult.error("text_tracks/blocks are in source-frame pixels; inpaint the full frame, then crop when placing")
     mask = _mask_from(ctx, a, a["source"], src.rgba.shape[:2])
-    res = sb.inpaint(ctx.gateway, src.rgba, mask, a["prompt"], quality=a.get("quality"), tries=int(a.get("tries", 1)))
+    res = sb.inpaint(ctx.gateway, src.rgba, mask, a["prompt"], quality=a.get("quality"), tries=int(a.get("tries", 1)),
+                     exact_mask=bool(a.get("exact_mask")))
     rgb = res["rgb"]
     rgba = np.dstack([rgb, src.rgba[..., 3]])
     fit = {"native_size": [rgb.shape[1], rgb.shape[0]], "seam": res["seam"], "mask_px": res["mask_px"],
@@ -474,14 +475,17 @@ TOOLS = [
          "background key or GrabCut in the box). Returns the asset ref and where it sat in the source (placed_in_source).",
          schema({"source": REF, "box": BOX, "subject": {"type": "string"}, "method": {"type": "string",
                  "enum": ["sunburst", "matte"]}, "crop": BOX, "quality": QUALITY, "slot": {"type": "string"},
+                 "preserve_rgb": {"type": "boolean", "description": "For matte: keep original RGB and use existing alpha when present."},
                  "note": {"type": "string"}}, ["source"]), sunburst_extract, "gen.image", "gen"),
     Tool("sunburst_inpaint", "Masked inpaint: regenerate only the masked pixels of a frame or asset, for example to remove "
          "text, footnotes, a logo or an object, or to clean a plate behind an element you lift out. mask: {boxes: "
          "[[x,y,w,h]], text_tracks: [ids], blocks: [ids] (index ids, on source frames), asset: an alpha mask, pad}. "
          "Every pixel outside the feathered mask stays the original; the seam and any text left inside the mask are "
-         "measured. tries up to 4 (the best seam wins).",
+         "measured. exact_mask=true feathers inward and preserves every pixel outside the submitted mask. "
+         "tries up to 4 (the best seam wins).",
          schema({"source": REF, "mask": {"type": "object"}, "prompt": {"type": "string"}, "crop": BOX, "tries": {"type": "integer"},
-                 "quality": QUALITY, "slot": {"type": "string"}, "note": {"type": "string"}}, ["source", "mask", "prompt"]),
+                 "quality": QUALITY, "slot": {"type": "string"}, "note": {"type": "string"},
+                 "exact_mask": {"type": "boolean"}}, ["source", "mask", "prompt"]),
          sunburst_inpaint, "gen.image", "gen"),
     Tool("sunburst_outpaint", "Outpaint: extend a frame, crop or asset to a new canvas size or aspect (for example a 16:9 "
          "background or artwork to a full 1080x1920 vertical plate). The image is fitted into `place` [x, y, w, h] on a "

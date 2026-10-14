@@ -190,6 +190,123 @@ def test_invalid_cursors_and_explicit_scan_cap(ws, monkeypatch):
     assert len(result["entries"]) == 3 and result["notice"]
 
 
+def test_quick_open_ranks_names_before_paths_across_workspace_roots(ws):
+    for path in ("work/shot-folder/report.md", "assets/shot.png", "renders/shot-02.mp4",
+                 "work/deep/shot", "work/a-shot.txt", "work/shot", "canvas/unrelated.json"):
+        put(ws, path)
+    result = files.search_files(ws, " ShOt ")
+    assert [entry["path"] for entry in result["entries"]] == [
+        "work/shot", "work/deep/shot", "assets/shot.png", "renders/shot-02.mp4",
+        "work/a-shot.txt", "work/shot-folder/report.md",
+    ]
+    assert result["query"] == "ShOt" and result["matched"] == 6
+    assert result["coverage"]["complete"] and not result["truncated"]
+    assert all(entry["kind"] == "file" and not entry["type_verified"] for entry in result["entries"])
+    assert str(ws.root) not in json.dumps(result)
+
+
+def test_quick_open_matches_unicode_and_full_relative_paths(ws):
+    put(ws, "work/STRASSE/Überblick.md")
+    result = files.search_files(ws, "straße/über")
+    assert [entry["path"] for entry in result["entries"]] == ["work/STRASSE/Überblick.md"]
+
+
+def test_quick_open_preserves_all_private_and_symlink_exclusions(ws, tmp_path):
+    for path in ("work/.env", "work/.git/index", "work/secrets/note.txt", "work/auth-token.txt",
+                 "work/id_rsa", "work/private.key", "memory/note.txt", "work/node_modules/note.js",
+                 "work/credentials.json", "work/tokens.json", "work/notes.txt"):
+        put(ws, path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "outside-note.txt").write_text("not public")
+    (ws.work / "linked").symlink_to(outside, target_is_directory=True)
+    (ws.work / "linked-note.txt").symlink_to(outside / "outside-note.txt")
+    os.mkfifo(ws.work / "pipe-note.txt")
+    result = files.search_files(ws, ".")
+    assert {entry["path"] for entry in result["entries"]} == {"work/tokens.json", "work/notes.txt"}
+    assert result["coverage"]["complete"]
+
+
+def test_quick_open_never_reads_file_contents_or_decodes_previews(ws, monkeypatch):
+    put(ws, "work/deep/image.png", b"deliberately not a real image")
+    native_open = os.open
+
+    def directories_only(path, flags, *args, **kwargs):
+        assert flags & os.O_DIRECTORY, "Quick Open must not open files"
+        return native_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(files.os, "open", directories_only)
+    result = files.search_files(ws, "image")
+    assert result["entries"][0]["preview_kind"] == "image"
+    assert not result["entries"][0]["type_verified"]
+
+
+def test_quick_open_result_cap_keeps_best_matches_without_claiming_missing_scan(ws):
+    for path in ("work/zfoo.txt", "work/foo-long.txt", "assets/foo", "work/foo"):
+        put(ws, path)
+    result = files.search_files(ws, "foo", limit=2)
+    assert [entry["path"] for entry in result["entries"]] == ["assets/foo", "work/foo"]
+    assert result["matched"] == 4 and result["truncated"] and result["notice"]
+    assert result["coverage"]["complete"] and not result["coverage"]["reasons"]
+
+
+def test_quick_open_scan_budget_counts_excluded_entries_and_reports_partial_coverage(ws, monkeypatch):
+    for i in range(6):
+        put(ws, f"work/.hidden-{i}")
+    monkeypatch.setattr(files, "MAX_SEARCH_ENTRIES", 3)
+    result = files.search_files(ws, "hidden")
+    assert result["scanned"] == result["scan_limit"] == 3 and not result["entries"]
+    assert result["truncated"] and not result["coverage"]["complete"]
+    assert result["coverage"]["reasons"] == ["scan_limit"] and result["notice"]
+
+
+def test_quick_open_rejects_invalid_query_limit_and_avoids_blank_scans(ws, monkeypatch):
+    for query in (None, 4, "a" * (files.MAX_SEARCH_QUERY + 1), "a\x00b", "a\nb"):
+        with pytest.raises(ValueError):
+            files.search_files(ws, query)
+    for limit in (0, files.MAX_SEARCH_RESULTS + 1, True, "2"):
+        with pytest.raises(ValueError):
+            files.search_files(ws, "name", limit=limit)
+
+    def no_scan(*args, **kwargs):
+        pytest.fail("Empty queries must not scan the workspace")
+
+    monkeypatch.setattr(files.os, "scandir", no_scan)
+    result = files.search_files(ws, "  ")
+    assert result["query"] == "" and result["scanned"] == 0 and result["entries"] == []
+
+
+def test_quick_open_cannot_follow_directory_replacement_before_descent(ws, tmp_path, monkeypatch):
+    put(ws, "work/nested/allowed.txt")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "outside.txt").write_text("not public")
+    native_open = os.open
+    replaced = False
+
+    def racing_open(path, flags, *args, **kwargs):
+        nonlocal replaced
+        if path == "nested" and not replaced:
+            replaced = True
+            (ws.work / "nested").rename(ws.work / ".old")
+            (ws.work / "nested").symlink_to(outside, target_is_directory=True)
+        return native_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(files.os, "open", racing_open)
+    result = files.search_files(ws, ".txt")
+    assert replaced and result["entries"] == []
+    assert "unavailable_directory" in result["coverage"]["reasons"]
+    assert not result["coverage"]["complete"]
+
+
+def test_quick_open_does_not_return_paths_the_preview_cannot_open(ws, monkeypatch):
+    put(ws, "work/nested/hidden.txt")
+    monkeypatch.setattr(files, "MAX_PATH_DEPTH", 2)
+    result = files.search_files(ws, "hidden")
+    assert result["entries"] == [] and result["truncated"]
+    assert result["coverage"]["reasons"] == ["path_limit"]
+
+
 @pytest.mark.parametrize(("name", "content", "kind", "mime"), [
     ("movie.mp4", b"\x00\x00\x00\x18ftypisom\x00\x00", "video", "video/mp4"),
     ("movie.webm", b"\x1aE\xdf\xa3", "video", "video/webm"),

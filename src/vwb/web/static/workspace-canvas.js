@@ -1,5 +1,6 @@
 import htm from './vendor/htm.mjs';
 import {BrowserPanel} from './browser-panel.js';
+import {GenerationStudio} from './generation-studio.js';
 const {createElement, useState, useEffect, useRef} = window.React;
 const html = htm.bind(createElement);
 const {Button, Icon, Tooltip, MessageBar, SolsticeMark} = window.Eeva;
@@ -67,6 +68,7 @@ export function importedTabs(events, seen) {
   return {cursor, tabs: [...paths.values()]};
 }
 export const fileTab = entry => ({id: `file:${entry.path}`, kind: 'file', title: entry.name || entry.path.split('/').at(-1), path: entry.path});
+export const studioTab = kind => ({id: `${kind}-studio`, kind: `${kind}-studio`, title: kind === 'video' ? 'Video studio' : 'Image studio'});
 function IconAction({name, label, ...props}) {
   return html`<${Tooltip} content=${label}><${Button} variant="text" iconOnly aria-label=${label} ...${props}><${Icon} name=${name} size=${16}/><//><//>`;
 }
@@ -74,7 +76,9 @@ function IconAction({name, label, ...props}) {
 export function WorkspaceExplorer({api, requestId, onOpen, onOutputs, onBrowser, activePath}) {
   const [folders, setFolders] = useState({}), [expanded, setExpanded] = useState(new Set(['']));
   const [loading, setLoading] = useState(new Set()), [error, setError] = useState(''), [query, setQuery] = useState('');
+  const [search, setSearch] = useState(null), [searching, setSearching] = useState(false), [searchError, setSearchError] = useState('');
   const generation = useRef(0), busyPaths = useRef(new Set());
+  const dragFile = (event, entry) => {event.dataTransfer.effectAllowed='copy'; event.dataTransfer.setData('application/x-vwb-workspace-file', JSON.stringify({requestId,path:entry.path,name:entry.name})); event.dataTransfer.setData('text/plain', entry.path);};
   const load = async (path, token = generation.current, cursor = null) => {
     if (!requestId || busyPaths.current.has(path)) return;
     busyPaths.current.add(path); setLoading(p => new Set(p).add(path)); setError('');
@@ -89,15 +93,30 @@ export function WorkspaceExplorer({api, requestId, onOpen, onOutputs, onBrowser,
     load('', generation.current);
     return () => {generation.current++;};
   }, [requestId]);
+  useEffect(() => {
+    let live = true; setSearch(null); setSearchError('');
+    if (!query.trim() || !requestId) {setSearching(false); return;}
+    setSearching(true);
+    const timer = setTimeout(() => api(`/api/requests/${encodeURIComponent(requestId)}/workspace/search?q=${encodeURIComponent(query.trim())}`)
+      .then(result => {if (live) setSearch(result);}).catch(e => {if (live) setSearchError(e.message);})
+      .finally(() => {if (live) setSearching(false);}), 180);
+    return () => {live=false; clearTimeout(timer);};
+  }, [api, requestId, query]);
   const toggle = path => {
     if (expanded.has(path)) setExpanded(p => {const n = new Set(p); n.delete(path); return n;});
     else {setExpanded(p => new Set(p).add(path)); if (!folders[path]) load(path);}
   };
+  useEffect(() => {
+    const refresh = event => {if (event.detail?.requestId === requestId) for (const path of expanded) load(path);};
+    window.addEventListener('vwb-workspace-changed', refresh);
+    return () => window.removeEventListener('vwb-workspace-changed', refresh);
+  }, [requestId, expanded]);
   const entries = (path, depth = 0) => {
     const rows = folders[path]?.entries || [];
     const rendered = rows.filter(e => !query || e.kind === 'directory' || e.name.toLowerCase().includes(query.toLowerCase())).map(entry => {
       const directory = entry.kind === 'directory', open = expanded.has(entry.path);
       return html`<li key=${entry.path}><button className=${`workspace-file-row ${activePath === entry.path ? 'selected' : ''}`} style=${{'--depth': depth}}
+        draggable=${!directory} onDragStart=${event => {if (!directory) dragFile(event,entry);}}
         aria-expanded=${directory ? open : undefined} title=${entry.path} onClick=${() => directory ? toggle(entry.path) : onOpen(fileTab(entry))}>
         <${Icon} name=${directory ? open ? 'chevron-down' : 'chevron-right' : 'file'} size=${14}/><span>${entry.name}</span>
         ${directory && loading.has(entry.path) && html`<span className="caption">…</span>`}</button>
@@ -109,10 +128,14 @@ export function WorkspaceExplorer({api, requestId, onOpen, onOutputs, onBrowser,
   };
   const reload = () => {generation.current++; busyPaths.current = new Set(); setLoading(new Set()); setFolders({}); setExpanded(new Set([''])); load('');};
   return html`<div className="workspace-explorer"><div className="navigator-heading"><h2>Workspace</h2><${IconAction} name="refresh" label="Refresh workspace files" disabled=${!requestId || loading.has('')} onClick=${reload}/></div>
-    <div className="explorer-shortcuts"><button onClick=${onOutputs}><${Icon} name="file" size=${14}/>Outputs</button><button onClick=${onBrowser}><${Icon} name="link" size=${14}/>Browser</button></div>
-    <label className="conversation-search"><${Icon} name="search" size=${14}/><input aria-label="Filter visible workspace files" placeholder="Filter visible files" value=${query} onChange=${e => setQuery(e.target.value)}/></label>
+    <div className="explorer-shortcuts"><button onClick=${onOutputs}><${Icon} name="file" size=${14}/>Outputs</button><button onClick=${onBrowser}><${Icon} name="link" size=${14}/>Browser</button>
+      <button onClick=${() => onOpen(studioTab('image'))}><${Icon} name="sparkles" size=${14}/>Images</button><button onClick=${() => onOpen(studioTab('video'))}><${Icon} name="file" size=${14}/>Video</button></div>
+    <label className="conversation-search"><${Icon} name="search" size=${14}/><input aria-label="Quick open workspace files" placeholder="Find a file…" value=${query} onChange=${e => setQuery(e.target.value)} onKeyDown=${event => {if(event.key === 'Escape'){event.preventDefault();setQuery('');} if(event.key === 'ArrowDown'){event.preventDefault();event.currentTarget.closest('.workspace-explorer').querySelector('.workspace-search-results button')?.focus();}}}/></label>
     ${error && html`<p className="explorer-error" role="alert">${error}<button className="text-action" onClick=${() => load('')}>Try again</button></p>`}
-    <div className="workspace-file-list">${!requestId ? html`<p className="navigator-empty">Choose a conversation to browse its files.</p>` : loading.has('') && !folders[''] ? html`<p className="navigator-empty">Reading workspace…</p>` : html`<ul aria-label="Workspace files">${entries('')}</ul>`}</div>
+    <div className="workspace-file-list">${!requestId ? html`<p className="navigator-empty">Choose a conversation to browse its files.</p>` : query.trim() ? html`<div className="workspace-search-results" aria-label="Workspace search results">
+      ${searchError ? html`<p className="explorer-error" role="alert">${searchError}</p>` : searching ? html`<p className="navigator-empty" role="status">Finding files…</p>` : html`<p className="workspace-search-summary" role="status">${search?.entries?.length || 0} matches${search?.truncated ? ' · Search limited; refine the name' : ''}</p>`}
+      <ul>${(search?.entries || []).map(entry => html`<li key=${entry.path}><button className="workspace-search-result" draggable="true" onDragStart=${event => dragFile(event,entry)} onClick=${() => onOpen(fileTab(entry))} title=${entry.path}><${Icon} name="file" size=${14}/><span><strong>${entry.name}</strong><small>${entry.path}</small></span></button></li>`)}</ul>
+    </div>` : loading.has('') && !folders[''] ? html`<p className="navigator-empty">Reading workspace…</p>` : html`<ul aria-label="Workspace files">${entries('')}</ul>`}</div>
     <div className="explorer-footer"><${Icon} name="folder" size=${13}/><span>Conversation files</span></div>
   </div>`;
 }
@@ -160,6 +183,25 @@ function FilePreview({api, requestId, tab}) {
   </section>`;
 }
 
+function CanvasNewTab({onOpen, onExplore}) {
+  const [open, setOpen] = useState(false), shell = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const outside = event => {if (!shell.current?.contains(event.target)) setOpen(false);};
+    const escape = event => {if (event.key === 'Escape') {setOpen(false); shell.current?.querySelector('button')?.focus();}};
+    document.addEventListener('pointerdown', outside); document.addEventListener('keydown', escape);
+    return () => {document.removeEventListener('pointerdown', outside); document.removeEventListener('keydown', escape);};
+  }, [open]);
+  const choose = tab => {setOpen(false); onOpen(tab);};
+  return html`<div className="canvas-new-tab" ref=${shell}><${IconAction} name="plus" label="Open a canvas tab" aria-expanded=${open} onClick=${() => setOpen(value => !value)}/>
+    ${open && html`<div className="canvas-new-menu" aria-label="New canvas tab">
+      <button onClick=${() => choose(studioTab('image'))}><${Icon} name="sparkles" size=${16}/><span>Image studio<small>Create and edit with Sunburst</small></span></button>
+      <button onClick=${() => choose(studioTab('video'))}><${Icon} name="file" size=${16}/><span>Video studio<small>Generate with Omni</small></span></button>
+      <button onClick=${() => choose({id:'browser',kind:'browser',title:'Browser'})}><${Icon} name="link" size=${16}/><span>Browser</span></button>
+      <button onClick=${() => {setOpen(false); onExplore();}}><${Icon} name="folder" size=${16}/><span>Workspace files</span></button>
+    </div>`}</div>`;
+}
+
 export function WorkspaceCanvas({api, requestId, state, dispatch, renderOutputs, onExplore, notice, visible = true}) {
   const focusTab = (event, group, index) => {
     const next = {ArrowLeft: (index - 1 + group.tabs.length) % group.tabs.length, ArrowRight: (index + 1) % group.tabs.length, Home: 0, End: group.tabs.length - 1}[event.key];
@@ -172,14 +214,15 @@ export function WorkspaceCanvas({api, requestId, state, dispatch, renderOutputs,
       <div className="canvas-tabbar"><div className="canvas-tabs" role="tablist" aria-label=${`${group.id === 'primary' ? 'Main' : 'Second'} canvas tabs`}>
         ${group.tabs.map((item, i) => html`<div className=${`canvas-tab ${item.id === group.active ? 'active' : ''}`} key=${item.id}>
           <button role="tab" aria-selected=${item.id === group.active} tabIndex=${item.id === group.active ? 0 : -1} title=${item.path || item.title} onClick=${() => dispatch({type: 'select', group: group.id, id: item.id})} onKeyDown=${event => focusTab(event, group, i)}>
-            <${Icon} name=${item.kind === 'browser' ? 'link' : 'file'} size=${14}/><span>${item.title}</span></button>
+            <${Icon} name=${item.kind === 'browser' ? 'link' : item.kind === 'image-studio' ? 'sparkles' : 'file'} size=${14}/><span>${item.title}</span></button>
           <${IconAction} name="x" label=${`Close canvas tab ${item.title}`} onClick=${event => {const row = event.currentTarget.closest('[role=tablist]'); dispatch({type: 'close', group: group.id, id: item.id}); requestAnimationFrame(() => row?.querySelector('[aria-selected=true]')?.focus());}}/></div>`)}</div>
-        <div className="canvas-group-actions"><${IconAction} name="link" label="Open browser in canvas" onClick=${() => dispatch({type: 'open', group: group.id, tab: {id: 'browser', kind: 'browser', title: 'Browser'}})}/>
+        <div className="canvas-group-actions"><${CanvasNewTab} onExplore=${onExplore} onOpen=${item => dispatch({type:'open',group:group.id,tab:item})}/>
           ${state.groups.length === 1 ? html`<${IconAction} name="table" label="Split canvas into two groups" onClick=${() => dispatch({type: 'split'})}/>` : html`<${IconAction} name=${group.id === 'secondary' ? 'x' : 'table'} label=${group.id === 'secondary' ? 'Join canvas groups' : 'Move active tab to other group'} disabled=${group.id === 'primary' && !tab} onClick=${() => dispatch(group.id === 'secondary' ? {type: 'join'} : {type: 'move', group: group.id, id: tab?.id})}/>`}</div></div>
       <div className="canvas-group-content" role="tabpanel" aria-label=${tab?.title || 'Empty canvas'}>
         ${!visible ? null : tab?.kind === 'browser' ? html`<${BrowserPanel} key=${requestId || 'new'} embedded api=${api} requestId=${requestId} notice=${notice} onClose=${() => dispatch({type: 'close', group: group.id, id: tab.id})}/>`
           : tab?.kind === 'outputs' ? renderOutputs()
           : tab?.kind === 'file' ? html`<${FilePreview} key=${tab.id} api=${api} requestId=${requestId} tab=${tab}/>`
+          : ['image-studio','video-studio'].includes(tab?.kind) ? html`<${GenerationStudio} key=${`${requestId}:${tab.id}`} kind=${tab.kind === 'video-studio' ? 'video' : 'image'} api=${api} requestId=${requestId} onOpen=${item => dispatch({type:'open',group:group.id,tab:item})}/>`
           : html`<div className="canvas-empty"><${Icon} name="folder" size=${18}/><h3>A place for your work</h3><p>Open a file from the workspace, or bring the browser alongside your conversation.</p><div><${Button} variant="secondary" size="sm" onClick=${onExplore}>Browse workspace<//><${Button} variant="text" size="sm" onClick=${() => dispatch({type: 'open', group: group.id, tab: {id: 'browser', kind: 'browser', title: 'Browser'}})}>Open browser<//></div></div>`}
       </div></section>`;})}
   </section>`;

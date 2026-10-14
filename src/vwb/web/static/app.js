@@ -1,7 +1,7 @@
 import htm from './vendor/htm.mjs';
 import {triggerAt, matchingOptions, toContext} from './composer-picker.js';
 import {ModelControl} from './model-control.js';
-import {WorkspaceExplorer, WorkspaceCanvas, initialCanvas, canvasReducer, importedTabs} from './workspace-canvas.js';
+import {WorkspaceExplorer, WorkspaceCanvas, initialCanvas, canvasReducer, importedTabs, studioTab} from './workspace-canvas.js';
 import {IntegrationsControl} from './integrations-control.js';
 import {COMPACT_WIDTH, paneLayout, panePreferences} from './pane-layout.js';
 
@@ -235,7 +235,13 @@ function App() {
   const [mobile, setMobile] = useState(() => window.innerWidth < 640);
   useEffect(() => {
     const resize = () => {setViewportWidth(window.innerWidth); setNarrow(window.innerWidth < COMPACT_WIDTH); setMobile(window.innerWidth < 640); paneDrag.current=null; setResizingPane(null);};
-    const escape = e => {if (e.key === 'Escape' && !e.defaultPrevented) setSidebar(false);};
+    const escape = e => {
+      if (e.key === 'Escape' && !e.defaultPrevented) setSidebar(false);
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault(); setNavigator('workspace'); setNavigatorOpen(true); if (window.innerWidth < COMPACT_WIDTH) setSidebar(true);
+        requestAnimationFrame(() => document.querySelector('[aria-label="Quick open workspace files"]')?.focus());
+      }
+    };
     window.addEventListener('resize', resize); window.addEventListener('keydown', escape);
     return () => {window.removeEventListener('resize', resize); window.removeEventListener('keydown', escape);};
   }, []);
@@ -441,6 +447,8 @@ function App() {
     <nav className="activity-rail" aria-label="Workbench sections"><div className="rail-brand" aria-label="Solstice video workbench"><${SolsticeMark} size=${24}/></div>
       <${Tooltip} content="Conversations"><button aria-label="Conversations" aria-pressed=${navigator === 'conversations' && (narrow ? sidebar : navigatorOpen)} onClick=${() => toggleNavigator('conversations')}><${Icon} name="library" size=${18}/></button><//>
       <${Tooltip} content="Workspace files"><button aria-label="Workspace files" aria-pressed=${navigator === 'workspace' && (narrow ? sidebar : navigatorOpen)} onClick=${() => toggleNavigator('workspace')}><${Icon} name="folder" size=${18}/></button><//>
+      <${Tooltip} content="Image studio"><button aria-label="Open image studio" onClick=${() => openCanvas(studioTab('image'))}><${Icon} name="sparkles" size=${18}/></button><//>
+      <${Tooltip} content="Video studio"><button aria-label="Open video studio" onClick=${() => openCanvas(studioTab('video'))}><${Icon} name="file" size=${18}/></button><//>
       <div className="rail-bottom"><${Tooltip} content="Local workbench"><span tabIndex="0" aria-label="Local workbench"><span className="local-dot"></span></span><//></div>
     </nav>
     ${narrow && sidebar && html`<button className="nav-scrim" aria-label="Close navigator" onClick=${() => setSidebar(false)}></button>`}

@@ -6,9 +6,10 @@ import json
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from vwb.config import RUNS_DIR, secrets, slot
 from vwb.util.hashing import sha256_text
@@ -100,10 +101,14 @@ class Gateway:
         self.ledger.append("flag.raised", "gateway", flag.to_dict())
 
     # ---- retries and fallbacks ----
+    def resolve_slot(self, slot_name: str) -> dict[str, Any]:
+        """Host-owned slot selection; specialised callers may pin a configured model."""
+        return slot(slot_name)
+
     def with_fallbacks(self, slot_name: str, fn: Callable[[dict[str, Any]], SlotCall],
                        attempts: int = 4) -> SlotCall:
         """Call fn(slot_config) with retries; on persistent failure try each fallback config."""
-        primary = slot(slot_name)
+        primary = self.resolve_slot(slot_name)
         configs = [primary] + [dict(primary, **fb) for fb in primary.get("fallbacks", [])]
         last_error: Exception | None = None
         for i, cfg in enumerate(configs):

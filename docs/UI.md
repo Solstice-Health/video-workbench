@@ -98,7 +98,7 @@ to adjust their widths. Both support arrow keys, Home/End and double-click to re
 widths survive reloads. Chat remains on the left with a collapse control. Split
 view remains available from 768px; smaller windows use the Chat/Canvas switch.
 The canvas holds Outputs,
-Browser, and file tabs. Opening the same file focuses its existing tab. Split the
+Browser, Image studio, Video studio, and file tabs. Opening the same file focuses its existing tab. Split the
 canvas into two groups to compare files, move the active tab across groups, or join
 the groups without discarding tabs. Layout and open tabs are kept per conversation
 while the page is open; reloading starts with Outputs.
@@ -118,6 +118,111 @@ New integration imports open the first image and response JSON in the current
 conversation's canvas. Historical import events never reopen tabs on page load;
 seen sequence tracking prevents polling from reopening a manually closed tab.
 Importing files and opening them do not dispatch another agent turn.
+
+## Image and video studios
+
+Open **Image studio** or **Video studio** from the canvas's new-tab menu or the
+workspace navigator. Each studio belongs to the current conversation. Its jobs run
+independently of the chat queue, so generation does not start another agent turn or
+block typing in chat. Recent generations shows durable job history. Open a finished
+result in a file tab, download it, edit it again, or reuse its settings and saved
+inputs. Generation details exposes tool warnings and quality notes, including
+seam or extraction-fidelity concerns. Draft controls and drawings also survive page reload in session storage
+when the browser permits it; submitted jobs are saved on the host.
+
+Drop images or videos from your computer, drag a file from the current workspace
+explorer, or enter a public workspace file path. Images accept PNG, JPEG and WebP
+up to 40 MiB and 16 megapixels, with an 8192-pixel edge limit; they are decoded,
+orientation-corrected and normalized to PNG. Videos accept MP4, MOV, M4V, WebM and
+MKV up to 250 MiB. Video edit/extend sources must be at most ten seconds. Inputs
+are snapshotted before submission, and uploaded/registered assets are checked
+against their saved hashes before their provenance is reused. Cross-request drag
+references, private paths and symlinks are rejected.
+
+Image generation defaults to Sunburst; background removal defaults to local
+source-preserving masking. Width and height are normalized to the
+adapter's size rules: multiples of 16, aspect ratios from 1:3 to 3:1, a maximum
+3840-pixel edge, and 655,360 to 8,294,400 pixels. The canvas displays the effective
+size. Effort selects low, medium, high, extra high or max. Creation and
+reference-guided edits expose Transparent background and Allow text controls.
+
+- **Create** generates from a prompt and optional references.
+- **Edit** generates a new image guided by its source and references. Optional
+  markup is sent as an additional annotated reference with instructions to follow
+  the marks without reproducing them. It does not guarantee unchanged pixels.
+- **Inpaint** uses a painted PNG alpha mask at the source's exact dimensions.
+  Alpha above 127 selects editable pixels; transparent pixels remain unchanged.
+  The studio calls `sunburst_inpaint` with `exact_mask=true`, which feathers inward
+  and restores every unselected source pixel. Source dimensions and the original
+  alpha channel are retained. The existing agent-tool default can still expand its
+  feathered mask unless `exact_mask` is requested.
+- **Outpaint** lets you move and scale the source within a larger canvas. The
+  model fills the surrounding area. Placed source pixels are restored except for
+  a 32-pixel blend along edges adjoining generated pixels; the receipt identifies
+  the retained and exact boxes.
+- **Remove background** defaults to **Preserve source (local)**, which needs no
+  provider credential. Draw a subject rectangle or use the whole image. Existing
+  source alpha is retained; otherwise a flat-background key or GrabCut estimates
+  the foreground. Original RGB values are kept. The cutout and a separate
+  full-source-size `background-mask.png` are saved with segmented provenance.
+  The mask's alpha is `255 - foreground alpha`: opaque pixels select background
+  for editing, including areas outside the chosen subject region. **Use background
+  mask** loads the pinned original source and mask into Inpaint. Local segmentation
+  is approximate, so inspect the mask first; GrabCut uses an inset seed to retain
+  background samples when the whole frame is selected. Inpaint still needs a
+  configured image provider and retains the source's original alpha channel.
+  **Regenerate cutout (Sunburst)** instead requires a subject description and may
+  redraw it. Fidelity and text comparisons remain in its tool result and receipt.
+  No source-aligned mask is inferred from the model's bounding-box registration.
+
+Video defaults to Omni 1.1. Choose a prompt, first and optional last frames, up to
+three image references, or a video to edit/extend. Controls expose 3–10 seconds,
+720p or 1080p, and 9:16 or 16:9. Generated clips retain their provider audio. The
+model picker comes from compatible configurations in `config/slots.yaml`: the
+current image catalog includes Sunburst and its configured Flare alternative;
+the current video catalog has only Omni 1.1. Adding a compatible configured model
+enables a real choice without claiming support for a different vendor's protocol.
+The selected model stays pinned for that job, including retries. Provider keys
+remain in the host gateway and are managed through Models and APIs.
+
+Uploads are saved under `work/studio/inputs/<upload-id>/`. Job inputs, outputs and
+`receipt.json` are kept under `work/studio/images/<job-id>/` or
+`work/studio/videos/<job-id>/`. Generated files also have immutable `slot:…@…`
+asset references with provenance, hashes and measured media metadata. These paths
+and receipts are available to subsequent agent work. Generation does not commit a
+composition or accept a finished video.
+
+Private job records live in `.studio/jobs/`; canonical staging and upload receipts
+also stay in `.studio/`, outside the agent's mounted work folder and public file
+explorer. The server permits two active studio workers and up to twelve owned jobs.
+Duplicate submission keys return the original job rather than paying twice. Stop
+job terminates the owned local process group. A parent-loss pipe and a one-hour
+deadline stop orphaned or hung local workers. Graceful shutdown cancels outstanding
+jobs; unfinished records found after an abnormal restart become Interrupted.
+Nothing automatically replays or resumes a generation. Stopping the local worker
+cannot guarantee cancellation or refund of a request already accepted by a provider.
+
+API routes are request-scoped under `/api/requests/:id/studio`: GET
+`/capabilities`, GET/POST `/jobs`, GET `/jobs/:job-id`, POST
+`/jobs/:job-id/cancel`, and POST `/uploads` for binary media. Mutations use the
+same loopback Host, Origin and CSRF checks as chat. Job responses include reusable
+input/mask metadata and capability-scoped preview URLs; no provider credentials
+are returned. Background jobs accept `background_method: "matte" | "sunburst"`
+(default `matte`). A local result's `background_mask` holds its separate mask
+metadata and preview URL; `reusable_inputs[0]` is the pinned source for subsequent
+inpaint. The main `artifacts` list continues to hold the cutout. Generation runs
+through the existing `Registry.call` policy, role
+and call-log path. Public file writes use descriptor-pinned, no-follow publication.
+
+Backend verification covers upload/asset tampering, mask geometry and exact
+outside-mask equality, private paths and symlinks, idempotency, history/reuse,
+policy enforcement, cancellation, parent loss, deadlines and HTTP origin/CSRF
+checks without paid calls. Local mask tests also cover credential-free execution,
+off-origin region reconstruction, safe whole-frame GrabCut initialization, original
+RGB preservation and edge-touching alpha, including partially transparent pixels.
+Separate live provider checks produced a 1024×1024
+Sunburst PNG and a three-second 720p Omni clip with 72 decoded frames. These checks
+confirm those provider paths; they do not qualify every model, effort or operation.
 
 ## Plugins and MCP connections
 
@@ -253,3 +358,15 @@ duration. The disposable request was removed afterward; the completed ten-short
 conversation and its source/native-thread records were unchanged. OAuth grant
 completion was not exercised against a real account; the UI truthfully showed
 Solstice Needs setup and Figma Unavailable, with no connected state fabricated.
+
+The studio build passed 507 regression tests on 2026-10-14. Live checks in a
+separate synthetic request verified a real 1024×1024 Sunburst generation, painted
+inpainting, 1024×1536 outpainting with custom placement, local background removal,
+mask refinement followed by Sunburst background replacement, and a real three-second
+720p Omni clip. Both inpainting paths preserve every unmarked pixel. File upload,
+workspace drag-and-drop from Quick Open, draft recovery after reload, tab switching,
+video playback and 390px/800px responsive layouts were checked in the browser.
+The Solstice mark and wave-of-dots waiting state rendered during generation.
+The original ten-short request was not used for these checks. Other video modes
+and alternate configured models are covered by adapter/contract tests, not by
+additional paid provider runs in this verification.

@@ -28,6 +28,9 @@ from vwb.agents.events import context_usage, read_events
 from vwb.browser.service import BrowserConflict, BrowserSession
 from vwb.config import RUNS_DIR
 from vwb.integrations import IntegrationError, IntegrationService
+from vwb.studio import assets as studio_assets
+from vwb.studio.models import capabilities as studio_capabilities
+from vwb.studio.service import StudioJobs
 from vwb.util.jsonio import read_json, write_json
 from vwb.web import pdf_preview, workspace_files
 from vwb.web.history import request_ids, resolve_request
@@ -79,6 +82,23 @@ class Workbench:
         self.csrf_token = secrets.token_urlsafe(32)
         self.upload_dir = self.runs_dir / ".ui" / "uploads"
         self.mutation_lock = threading.RLock()
+        self.studio = StudioJobs()
+
+    def studio_entry(self, ws: Workspace, row: dict) -> dict:
+        """Public studio records use the same capability-scoped file previews."""
+        row = dict(row)
+        if row.get("path"):
+            row["url"] = self.preview_entry(ws.id, {"kind": "file", "path": row["path"]})["url"]
+        if row.get("result"):
+            row["result"] = dict(row["result"])
+            row["result"]["artifacts"] = [self.studio_entry(ws, item) for item in row["result"].get("artifacts", [])]
+            if row["result"].get("background_mask"):
+                row["result"]["background_mask"] = self.studio_entry(ws, row["result"]["background_mask"])
+        if row.get("reusable_inputs"):
+            row["reusable_inputs"] = [self.studio_entry(ws, item) for item in row["reusable_inputs"]]
+        if row.get("reusable_mask"):
+            row["reusable_mask"] = self.studio_entry(ws, row["reusable_mask"])
+        return row
 
     def workspace(self, request_id: str) -> Workspace:
         return Workspace(resolve_request(self.runs_dir, request_id))
@@ -415,6 +435,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(models.catalog(self.app.runs_dir))
             if parts == ["api", "integrations"]:
                 return self._json(self.app.integrations.status())
+            if len(parts) in {5, 6} and parts[:2] == ["api", "requests"] and parts[3] == "studio":
+                ws = self.app.workspace(parts[2])
+                if parts[4] == "capabilities" and len(parts) == 5:
+                    return self._json(studio_capabilities())
+                if parts[4] == "jobs":
+                    if len(parts) == 6:
+                        return self._json(self.app.studio_entry(ws, self.app.studio.get(ws, parts[5])))
+                    result = self.app.studio.list(ws, query.get("kind", [None])[0])
+                    result["jobs"] = [self.app.studio_entry(ws, row) for row in result["jobs"]]
+                    return self._json(result)
             if len(parts) in {4, 5} and parts[:2] == ["api", "requests"] and parts[3] == "workspace":
                 ws = self.app.workspace(parts[2])
                 relative = query.get("path", [""])[0]
@@ -424,6 +454,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(listing)
                 if parts[4] == "file":
                     return self._json(self.app.preview_entry(ws.id, workspace_files.metadata(ws, relative)))
+                if parts[4] == "search":
+                    result = workspace_files.search_files(ws, query.get("q", [""])[0], limit=40)
+                    result["entries"] = [self.app.preview_entry(ws.id, item) for item in result["entries"]]
+                    return self._json(result)
                 if parts[4] == "pdf":
                     return self._json(pdf_preview.render(ws, relative, int(query.get("page", ["1"])[0])))
             if len(parts) in {4, 5} and parts[:2] == ["api", "requests"] and parts[3] == "browser":
@@ -453,7 +487,21 @@ class Handler(BaseHTTPRequestHandler):
         elif self.command == "POST":
             if parts == ["api", "uploads"]:
                 return self._upload()
+            if len(parts) == 5 and parts[:2] == ["api", "requests"] and parts[3:] == ["studio", "uploads"]:
+                if self.headers.get("Transfer-Encoding"):
+                    raise ValueError("Chunked uploads are not supported.")
+                ws = self.app.workspace(parts[2])
+                result = studio_assets.upload(ws, self.rfile, int(self.headers.get("Content-Length", "0")),
+                                              name=unquote(self.headers.get("X-Filename", "input.png")),
+                                              kind=self.headers.get("X-Upload-Kind", "image"))
+                return self._json(self.app.studio_entry(ws, result), 201)
             body = self._body()
+            if len(parts) in {5, 7} and parts[:2] == ["api", "requests"] and parts[3:5] == ["studio", "jobs"]:
+                ws = self.app.workspace(parts[2])
+                if len(parts) == 5:
+                    return self._json(self.app.studio_entry(ws, self.app.studio.submit(ws, body)), 202)
+                if parts[6] == "cancel":
+                    return self._json(self.app.studio_entry(ws, self.app.studio.cancel(ws, parts[5])))
             if parts == ["api", "integrations", "figma", "connect"]:
                 return self._json(self.app.integrations.begin_figma_auth())
             if len(parts) == 3 and parts[:2] == ["api", "integrations"]:
@@ -682,6 +730,7 @@ def serve(*, port: int = 8765, open_browser: bool = True, runs_dir: Path = RUNS_
     try:
         server = WorkbenchServer(("127.0.0.1", port), app)
     except BaseException:
+        app.studio.close()
         app.queue.close()
         raise
     url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -694,5 +743,6 @@ def serve(*, port: int = 8765, open_browser: bool = True, runs_dir: Path = RUNS_
         pass
     finally:
         server.server_close()
+        app.studio.close()
         app.queue.close()
         app.close_browsers()

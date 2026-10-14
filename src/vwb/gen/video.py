@@ -22,7 +22,6 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from vwb.config import slot
 from vwb.gateway import gemini as gem
 from vwb.gateway.core import Gateway
 
@@ -59,7 +58,7 @@ def generate(gw: Gateway, *, task: str, prompt: str, out: Path, first: np.ndarra
         f = gem.upload(gw, video)
         parts.append({"type": "video", "uri": f.uri})
     parts.append({"type": "text", "text": prompt})
-    cfg = slot(SLOT)
+    cfg = gw.resolve_slot(SLOT)
     res = resolution or cfg.get("resolution", "1080p")
     fmt = {"type": "video", "aspect_ratio": aspect, "resolution": res, "duration": f"{seconds}s"}
     gen_cfg: dict[str, Any] = {"video_config": {"task": TASKS[task]}}

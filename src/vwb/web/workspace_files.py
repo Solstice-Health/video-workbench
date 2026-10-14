@@ -15,6 +15,7 @@ import json
 import mimetypes
 import os
 import stat
+from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -33,6 +34,9 @@ MAX_TEXT_BYTES = 128 * 1024
 SNIFF_BYTES = 8192
 MAX_PATH_BYTES = 4096
 MAX_PATH_DEPTH = 32
+MAX_SEARCH_ENTRIES = 10_000
+MAX_SEARCH_RESULTS = 100
+MAX_SEARCH_QUERY = 256
 
 _PRIVATE_NAMES = frozenset({
     "agent", "memory", "ledger", "swarm", "asks", "node_modules", "__pycache__",
@@ -286,6 +290,97 @@ def listing(ws: Workspace, path: str = "", *, cursor: str | None = None, limit: 
     return {"path": path, "entries": result, "next_cursor": next_cursor, "truncated": capped,
             "scan_limit": MAX_DIRECTORY_ENTRIES,
             "notice": "This directory exceeds the bounded scan; only the first scanned entries are shown." if capped else None}
+
+
+def search_files(ws: Workspace, query: str, limit: int = 40) -> dict:
+    """Quick Open by filename/path, with explicit bounded coverage and no file reads.
+
+    This is a fresh metadata scan, not a content index. Every encountered directory
+    entry consumes the shared scan budget, including excluded names. Each directory
+    is reopened through pinned no-follow descriptors; queued paths cannot redirect
+    the traversal through a symlink. Search results must still use metadata/open_file
+    when opened, since an entry can change after this scan.
+    """
+    if (not isinstance(query, str) or len(query) > MAX_SEARCH_QUERY
+            or any(ord(char) < 32 or ord(char) == 127 for char in query)):
+        raise ValueError(f"The search query must be at most {MAX_SEARCH_QUERY} characters without controls.")
+    if type(limit) is not int or not 1 <= limit <= MAX_SEARCH_RESULTS:
+        raise ValueError(f"The search result limit must be between 1 and {MAX_SEARCH_RESULTS}.")
+    query = query.strip()
+    needle = query.casefold()
+    roots, reasons, matches = [], set(), []
+    scanned = 0
+    # Useful authored files precede the potentially large render/plate caches.
+    priority = ("work", "assets", "canvas", "copy", "renders", "sources", "media", "index", "review", "release", "qc", "plates")
+    if needle:
+        with _open(ws, (), directory=True) as descriptor:
+            for name in sorted(PUBLIC_ROOTS, key=lambda name: (priority.index(name) if name in priority else len(priority), name)):
+                try:
+                    info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    reasons.add("unavailable_directory")
+                    continue
+                if stat.S_ISDIR(info.st_mode):
+                    roots.append(name)
+        pending = deque((name,) for name in roots)
+        while pending:
+            if scanned >= MAX_SEARCH_ENTRIES:
+                reasons.add("scan_limit")
+                break
+            parts = pending.popleft()
+            children = []
+            try:
+                with _open(ws, parts, directory=True) as descriptor:
+                    stamp = _stamp(os.fstat(descriptor))
+                    with os.scandir(descriptor) as entries:
+                        for entry in entries:
+                            if scanned >= MAX_SEARCH_ENTRIES:
+                                reasons.add("scan_limit")
+                                break
+                            scanned += 1
+                            if not _public_name(entry.name):
+                                continue
+                            path = "/".join((*parts, entry.name))
+                            try:
+                                child_parts = _parts(path)
+                            except (ValueError, PermissionError):
+                                reasons.add("path_limit")
+                                continue
+                            try:
+                                info = entry.stat(follow_symlinks=False)
+                            except OSError:
+                                reasons.add("directory_changed")
+                                continue
+                            if stat.S_ISDIR(info.st_mode):
+                                children.append(child_parts)
+                                continue
+                            if not stat.S_ISREG(info.st_mode):
+                                continue
+                            name, folded_path = entry.name.casefold(), path.casefold()
+                            rank = (0 if name == needle else 1 if name.startswith(needle)
+                                    else 2 if needle in name else 3 if needle in folded_path else None)
+                            if rank is not None:
+                                matches.append(((rank, len(parts), folded_path, path), _entry(path, info)))
+                    if _stamp(os.fstat(descriptor)) != stamp:
+                        reasons.add("directory_changed")
+            except OSError:
+                reasons.add("unavailable_directory")
+            pending.extend(sorted(children, key=lambda value: (tuple(p.casefold() for p in value), value)))
+    matches.sort(key=lambda value: value[0])
+    result_limited = len(matches) > limit
+    incomplete = bool(reasons)
+    notices = []
+    if incomplete:
+        notices.append("Only part of the permitted workspace was searched; browse its folders for more files.")
+    if result_limited:
+        notices.append(f"Showing the best {limit} of {len(matches)} matches in the searched files.")
+    return {"query": query, "entries": [entry for _, entry in matches[:limit]], "scanned": scanned,
+            "matched": len(matches), "limit": limit, "scan_limit": MAX_SEARCH_ENTRIES,
+            "truncated": incomplete or result_limited,
+            "coverage": {"roots": roots, "complete": not incomplete, "reasons": sorted(reasons)},
+            "notice": " ".join(notices) or None}
 
 
 def metadata(ws: Workspace, path: str) -> dict:

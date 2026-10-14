@@ -106,6 +106,18 @@ def test_workspace_discovery_and_preview_metadata_use_safe_local_urls(api):
     assert str(api["ws"].root) not in raw.decode()
 
 
+def test_quick_open_finds_unexpanded_files_and_uses_the_preview_boundary(api):
+    status, _, raw = api["request"]("/api/requests/r-canvas/workspace/search?q=page.html")
+    assert status == 200, raw
+    result = json.loads(raw)
+    assert [row["path"] for row in result["entries"]] == ["work/design/page.html"]
+    assert result["entries"][0]["url"].startswith("/preview/r-canvas/")
+    assert result["coverage"]["complete"]
+    assert api["request"]("/api/requests/r-canvas/workspace/search?q=private")[0] == 200
+    assert not json.loads(api["request"]("/api/requests/r-canvas/workspace/search?q=private")[2])["entries"]
+    assert api["request"]("/api/requests/r-canvas/workspace/search?q=page", headers={"Origin":"https://attacker.invalid"})[0] == 403
+
+
 def test_opaque_html_can_load_siblings_only_with_a_current_preview_capability(api):
     entry = metadata(api, "work/design/page.html")
     sibling = entry["url"].rsplit("/", 1)[0] + "/art.svg"

@@ -29,6 +29,7 @@ RECEIPT_PROV = {
     "asset_lab.rung4": "traced",
     "asset_lab.rung5": "generative_motion",
     "matte.extract": "segmented",               # source pixels kept, alpha computed
+    "matte.background_mask": "segmented",       # full-source inverse foreground alpha for studio inpaint
     "asset.trace": "traced",                    # re-drawn as vector curves (VTracer)
     "canvas.snapshot": "composite",             # a frame of a designed canvas (for motion between pages)
     "sunburst.extract": "generative_recovery",  # a source element, redrawn by the image model
