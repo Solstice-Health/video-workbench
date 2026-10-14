@@ -83,3 +83,29 @@ assert.equal(integrationState({state:'unavailable',available:false}),'Unavailabl
 assert.equal(integrationState({state:'disconnected',available:true}),'Not connected');
 assert.equal(integrationState({}),'Not reported');
 """)
+
+
+def test_pane_resizing_fits_the_available_space_and_releases_hidden_panes():
+    run_js(r"""
+import assert from 'node:assert/strict';
+const {paneLayout, panePreferences, COMPACT_WIDTH}=await import('../../src/vwb/web/static/pane-layout.js');
+assert.equal(COMPACT_WIDTH,768);
+for(const width of [768,800,1024,1280,1536,1920]) {
+  for(const nav of [false,true]) for(const chat of [false,true]) {
+    const p=paneLayout(width,{navigator:480,chat:2000},nav,chat);
+    const total=52+(nav?p.navigator+8:0)+(chat?p.chat+12:0)+(width>=1536?20:12);
+    assert.ok(width-total>=200,`canvas squeezed at ${width}`);
+    assert.ok(p.navigator>=144 && p.chat>=280);
+    assert.ok(p.navigator<=p.navigatorMax && p.chat<=p.chatMax);
+  }
+}
+const a=paneLayout(1280,{navigator:196,chat:360},true,true);
+const b=paneLayout(1280,{navigator:196,chat:520},true,true);
+assert.equal(b.chat-a.chat,160); // Previously CSS silently capped this at 340.
+const wider=paneLayout(1280,{navigator:320,chat:520},true,true);
+assert.equal(wider.navigator,320); assert.equal(wider.chat,520);
+assert.ok(paneLayout(800,{navigator:196,chat:600},false,true).chat > paneLayout(800,{navigator:196,chat:600},true,true).chat);
+assert.ok(paneLayout(800,{navigator:480,chat:360},true,false).navigator > paneLayout(800,{navigator:480,chat:360},true,true).navigator);
+assert.deepEqual(panePreferences({navigator:null,chat:Infinity}),{navigator:196,chat:360});
+assert.deepEqual(panePreferences({navigator:240,chat:480}),{navigator:240,chat:480});
+""")

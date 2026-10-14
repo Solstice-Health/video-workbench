@@ -92,8 +92,12 @@ turn was started for this feature's tests.
 ## Workspace canvas
 
 The activity rail switches between Conversations and Workspace files. Click the
-active rail control to hide its navigator. Chat remains on the left, with a
-keyboard-operable resize divider and a collapse control. The canvas holds Outputs,
+active rail control to hide its navigator. Drag the divider at the navigator's
+right edge to resize the workspace sidebar, or the divider between chat and canvas
+to adjust their widths. Both support arrow keys, Home/End and double-click to reset;
+widths survive reloads. Chat remains on the left with a collapse control. Split
+view remains available from 768px; smaller windows use the Chat/Canvas switch.
+The canvas holds Outputs,
 Browser, and file tabs. Opening the same file focuses its existing tab. Split the
 canvas into two groups to compare files, move the active tab across groups, or join
 the groups without discarding tabs. Layout and open tabs are kept per conversation

@@ -141,13 +141,14 @@ type rather than an ever-smaller label.
 ## Layout
 
 The shell has a 52px activity rail, a 196px file/conversation navigator, a left
-chat initially 360px wide, and a flexible canvas. The navigator grows to 220px above
-1536px and can be hidden from its rail control. Chat can be collapsed or resized
-with a pointer or arrow keys. Canvas tabs have explicit close controls, keyboard
+chat initially 360px wide, and a flexible canvas. An 8px divider resizes the navigator;
+a 12px divider resizes chat against the canvas. Both derive bounds from available
+space, support pointer and keyboard input, and retain preferred widths across reloads.
+The navigator can be hidden from its rail control; chat can be collapsed. Canvas tabs have explicit close controls, keyboard
 arrow navigation, and optional second groups. Groups can be joined without losing
 tabs; opening an existing file activates it rather than duplicating it.
 
-Below 1024px, Chat and Canvas are separate visible views and navigation becomes a
+Below 768px, Chat and Canvas are separate visible views and navigation becomes a
 drawer. Below 640px, the rail is 44px and header controls wrap. Hidden drawers are
 removed from keyboard navigation, Escape dismisses the drawer, and focus returns
 to the invoking control. Browser streams stop when their canvas view is hidden.

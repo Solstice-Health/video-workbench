@@ -3,6 +3,7 @@ import {triggerAt, matchingOptions, toContext} from './composer-picker.js';
 import {ModelControl} from './model-control.js';
 import {WorkspaceExplorer, WorkspaceCanvas, initialCanvas, canvasReducer, importedTabs} from './workspace-canvas.js';
 import {IntegrationsControl} from './integrations-control.js';
+import {COMPACT_WIDTH, paneLayout, panePreferences} from './pane-layout.js';
 
 // Eeva and React are local, versioned assets. No network service is needed to open the UI.
 const {createElement, useState, useEffect, useRef, useCallback} = window.React;
@@ -197,26 +198,43 @@ function App() {
   const pickerShell = useRef(null);
   const [error, setError] = useState(''), [info, setInfo] = useState(''), [loading, setLoading] = useState(true), [busy, setBusy] = useState(false);
   const [sidebar, setSidebar] = useState(false), [outputId, setOutputId] = useState(null);
-  const [navigator, setNavigator] = useState('conversations'), [navigatorOpen, setNavigatorOpen] = useState(true);
-  const [chatShown, setChatShown] = useState(true), [mobileView, setMobileView] = useState('chat'), [chatWidth, setChatWidth] = useState(360);
+  const [navigator, setNavigator] = useState('conversations'), [navigatorOpen, setNavigatorOpen] = useState(() => window.innerWidth >= 1024);
+  const [chatShown, setChatShown] = useState(true), [mobileView, setMobileView] = useState('chat');
+  const [paneSizes, setPaneSizes] = useState(() => {try {return panePreferences(JSON.parse(localStorage.getItem('vwb-pane-sizes')));} catch (_) {return panePreferences();}});
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth), [resizingPane, setResizingPane] = useState(null);
+  const layout = paneLayout(viewportWidth, paneSizes, navigatorOpen, chatShown);
   const [canvases, setCanvases] = useState({});
   const seenImports = useRef(new Map());
-  const chatResize = useRef(null), canvasKey = selected || 'new';
+  const paneDrag = useRef(null), canvasKey = selected || 'new';
   const canvas = canvases[canvasKey] || initialCanvas();
   const dispatchCanvas = action => setCanvases(previous => ({...previous, [canvasKey]: canvasReducer(previous[canvasKey] || initialCanvas(), action)}));
   const openCanvas = tab => {dispatchCanvas({type: 'open', tab}); setMobileView('canvas'); setSidebar(false);};
-  const explore = () => {setNavigator('workspace'); setNavigatorOpen(true); if (window.innerWidth < 1024) setSidebar(true);};
+  const explore = () => {setNavigator('workspace'); setNavigatorOpen(true); if (window.innerWidth < COMPACT_WIDTH) setSidebar(true);};
   const activeCanvasPath = canvas.groups.find(g => g.id === canvas.focused)?.tabs.find(t => t.id === canvas.groups.find(g => g.id === canvas.focused)?.active)?.path;
-  const toggleNavigator = view => {setNavigator(view); if (window.innerWidth < 1024) setSidebar(value => view === navigator ? !value : true); else setNavigatorOpen(value => view === navigator ? !value : true);};
-  const resizeChat = value => setChatWidth(Math.max(300, Math.min(640, Math.min(window.innerWidth * .55, value))));
+  const toggleNavigator = view => {setNavigator(view); if (window.innerWidth < COMPACT_WIDTH) setSidebar(value => view === navigator ? !value : true); else setNavigatorOpen(value => view === navigator ? !value : true);};
+  const resizePane = (kind, value) => setPaneSizes(previous => ({...previous, [kind]: Math.max(layout[`${kind}Min`], Math.min(layout[`${kind}Max`], value))}));
+  const finishResize = event => {
+    paneDrag.current = null; setResizingPane(null);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+  const divider = kind => html`<div className=${`pane-resize-handle ${kind === 'chat' ? 'chat' : 'navigator'}-resize-handle`} role="separator"
+    aria-label=${kind === 'chat' ? 'Resize chat and canvas' : 'Resize workspace sidebar'} aria-orientation="vertical"
+    aria-valuemin=${layout[`${kind}Min`]} aria-valuemax=${Math.round(layout[`${kind}Max`])} aria-valuenow=${Math.round(layout[kind])}
+    title="Drag to resize. Arrow keys adjust; double-click resets." tabIndex="0"
+    onDoubleClick=${() => resizePane(kind, kind === 'chat' ? 360 : 196)}
+    onKeyDown=${event => {const next = {ArrowLeft:layout[kind] - 16, ArrowRight:layout[kind] + 16, Home:layout[`${kind}Min`], End:layout[`${kind}Max`]}[event.key]; if(next !== undefined){event.preventDefault(); resizePane(kind, next);}}}
+    onPointerDown=${event => {if(event.button !== 0) return; event.preventDefault(); event.currentTarget.focus(); paneDrag.current = {id:event.pointerId, x:event.clientX, width:layout[kind]}; event.currentTarget.setPointerCapture(event.pointerId); setResizingPane(kind);}}
+    onPointerMove=${event => {const drag=paneDrag.current; if(drag?.id === event.pointerId) resizePane(kind, drag.width + event.clientX - drag.x);}}
+    onPointerUp=${finishResize} onPointerCancel=${finishResize} onLostPointerCapture=${() => {paneDrag.current=null; setResizingPane(null);}}></div>`;
+  useEffect(() => {try {localStorage.setItem('vwb-pane-sizes', JSON.stringify(paneSizes));} catch (_) {}}, [paneSizes]);
   const [qIndex, setQIndex] = useState(0), [answers, setAnswers] = useState({}), [questionDrafts, setQuestionDrafts] = useState({}), [questionsHidden, setQuestionsHidden] = useState(false);
   const [query, setQuery] = useState(''), [compactBusy, setCompactBusy] = useState(false), [isNearBottom, setIsNearBottom] = useState(true);
   const csrf = useRef(''), selection = useRef(null), feed = useRef(null), fileInput = useRef(null), composer = useRef(null);
   const snapshot = useRef(null), pollCount = useRef(0);
-  const [narrow, setNarrow] = useState(() => window.innerWidth < 1024);
+  const [narrow, setNarrow] = useState(() => window.innerWidth < COMPACT_WIDTH);
   const [mobile, setMobile] = useState(() => window.innerWidth < 640);
   useEffect(() => {
-    const resize = () => {setNarrow(window.innerWidth < 1024); setMobile(window.innerWidth < 640);};
+    const resize = () => {setViewportWidth(window.innerWidth); setNarrow(window.innerWidth < COMPACT_WIDTH); setMobile(window.innerWidth < 640); paneDrag.current=null; setResizingPane(null);};
     const escape = e => {if (e.key === 'Escape' && !e.defaultPrevented) setSidebar(false);};
     window.addEventListener('resize', resize); window.addEventListener('keydown', escape);
     return () => {window.removeEventListener('resize', resize); window.removeEventListener('keydown', escape);};
@@ -415,7 +433,10 @@ function App() {
   const messageEvents = (start, end) => (data?.events || []).filter(e => stamp(e.ts) >= stamp(start) && (!end || stamp(e.ts) <= stamp(end)));
   const latestHuman = [...chat].reverse().find(m => m.role === 'human');
   const rows = requests.filter(r => `${r.title} ${r.id}`.toLowerCase().includes(query.toLowerCase()));
-  return html`<${Surface} theme="editorial" background="chat" className=${`workbench canvas-workbench ${navigatorOpen ? 'navigator-open' : ''} ${sidebar ? 'nav-open' : ''} ${chatShown ? 'chat-shown' : 'chat-hidden'} mobile-view-${mobileView}`} style=${{'--chat-width': `${chatWidth}px`}}>
+  // Eeva Surface does not forward style, so pane variables belong on a native element.
+  return html`<${Surface} theme="editorial" background="chat">
+    <div className=${`workbench canvas-workbench ${navigatorOpen ? 'navigator-open' : ''} ${sidebar ? 'nav-open' : ''} ${chatShown ? 'chat-shown' : 'chat-hidden'} mobile-view-${mobileView}`} style=${{'--chat-width': `${layout.chat}px`, '--navigator-width': `${layout.navigator}px`}}>
+    ${resizingPane && html`<div className="pane-resize-shield" aria-hidden="true"></div>`}
     <a href="#conversation-feed" className="skip-link">Skip to conversation</a>
     <nav className="activity-rail" aria-label="Workbench sections"><div className="rail-brand" aria-label="Solstice video workbench"><${SolsticeMark} size=${24}/></div>
       <${Tooltip} content="Conversations"><button aria-label="Conversations" aria-pressed=${navigator === 'conversations' && (narrow ? sidebar : navigatorOpen)} onClick=${() => toggleNavigator('conversations')}><${Icon} name="library" size=${18}/></button><//>
@@ -435,6 +456,7 @@ function App() {
 
       ` : html`<${WorkspaceExplorer} api=${api} requestId=${selected} activePath=${activeCanvasPath} onOpen=${openCanvas} onOutputs=${() => openCanvas({id:'outputs',kind:'outputs',title:'Outputs'})} onBrowser=${() => openCanvas({id:'browser',kind:'browser',title:'Browser'})}/>`}
     </nav>
+    ${divider('navigator')}
     <main className="main-workspace" inert=${narrow && sidebar ? '' : undefined}>
       <header className="workspace-header"><div className="header-leading"><div><div className="header-path">Video workbench <span>/</span> ${selected ? 'Conversation' : 'Get started'}</div><h1>${name}</h1></div></div>
         <div className="header-actions workspace-view-actions" role="group" aria-label="Workspace view">
@@ -487,16 +509,13 @@ function App() {
         </div><div className="composer-help"><span>${busy ? 'Saving…' : answering ? (uploads.length ? 'Your attached videos are kept for your next general message.' : 'Answering this question. Collapse it to write another message.') : active ? (active.can_stop === false ? 'This turn is running in a terminal. Your message will queue.' : 'Send now stops the current turn and continues with your message.') : 'Enter to send · Shift + Enter for a new line'}</span><span>${selected ? 'Changes stay in this conversation' : 'MP4, MOV, MKV or WebM'}</span></div></div></div>
         <input ref=${fileInput} className="visually-hidden" type="file" multiple accept="video/*,.mkv" onChange=${e => {upload([...e.target.files]); e.target.value = '';}} aria-label="Attach source videos"/>
       </section>
-      <div className="chat-resize-handle" role="separator" aria-label="Resize chat" aria-orientation="vertical" aria-valuemin="300" aria-valuemax="640" aria-valuenow=${Math.round(chatWidth)} tabIndex="0"
-        onKeyDown=${event => {const value = {ArrowLeft: chatWidth - 16, ArrowRight: chatWidth + 16, Home:300, End:640}[event.key]; if(value !== undefined){event.preventDefault(); resizeChat(value);}}}
-        onPointerDown=${event => {chatResize.current = event.currentTarget.parentElement.getBoundingClientRect().left; event.currentTarget.setPointerCapture(event.pointerId);}}
-        onPointerMove=${event => {if(chatResize.current != null) resizeChat(event.clientX - chatResize.current);}}
-        onPointerUp=${event => {chatResize.current = null; event.currentTarget.releasePointerCapture(event.pointerId);}} onPointerCancel=${() => {chatResize.current = null;}}></div>
+      ${divider('chat')}
       <${WorkspaceCanvas} visible=${!narrow || mobileView === 'canvas'} api=${api} requestId=${selected} state=${canvas} dispatch=${dispatchCanvas} onExplore=${explore}
         renderOutputs=${() => html`<${OutputPanel} data=${data} outputId=${outputId} setOutputId=${setOutputId} onClose=${() => dispatchCanvas({type:'close',id:'outputs'})}/>`}/>
 
       </div>
     </main>
+    </div>
   <//>`;
 }
 
