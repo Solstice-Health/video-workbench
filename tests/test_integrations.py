@@ -15,7 +15,7 @@ from PIL import Image
 from vwb.integrations import IntegrationError, IntegrationService
 from vwb.integrations.artifacts import import_result
 from vwb.integrations.service import CALLBACK_PATH, GATEWAYS, ISSUER
-from vwb.integrations.transport import HTTP, MCP, Unauthorized
+from vwb.integrations.transport import HTTP, MCP, Unauthorized, _sse
 from vwb.tools import build_registry
 from vwb.tools.base import ToolContext
 from vwb.workspace import Workspace
@@ -377,6 +377,44 @@ def test_transport_sse_no_redirect_or_error_secret():
         with pytest.raises(IntegrationError, match="302"):
             MCP(HTTP(client)).execute(GATEWAYS[0], "secret", "tools/list")
     assert len(seen) == 1
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\u0085"])
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n", "\r"])
+def test_transport_sse_preserves_unicode_inside_json(separator, line_ending):
+    reply = {"jsonrpc": "2.0", "id": 3,
+             "result": {"content": [{"type": "text", "text": "Before" + separator + "after"}]}}
+    frame = line_ending.join(["event: message", "data: " + json.dumps(reply, ensure_ascii=False), "", ""])
+    assert list(_sse(frame.encode())) == [reply]
+
+
+def test_transport_sse_fragmented_utf8_through_http():
+    reply = {"jsonrpc": "2.0", "id": 3,
+             "result": {"content": [{"type": "text", "text": "Layer\u2028next\u2029last\u0085end"}]}}
+    raw = ("data: " + json.dumps(reply, ensure_ascii=False) + "\r\n\r\n").encode()
+
+    class Fragments(httpx.SyncByteStream):
+        def __iter__(self):
+            # Split each Unicode code point and CRLF across network chunks.
+            yield from (raw[index:index + 1] for index in range(len(raw)))
+
+    def respond(request):
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=Fragments())
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        status, _, result = HTTP(client).request("POST", GATEWAYS[0], payload={"id": 3})
+    assert status == 200 and result == reply
+
+
+@pytest.mark.parametrize("raw", [b'data: {"jsonrpc":', b'data: {"id": 3}\n',
+                                  b'data: {"text": "\xe2\x80'])
+def test_transport_sse_does_not_parse_incomplete_events(raw):
+    assert list(_sse(raw)) == []
+
+
+def test_transport_sse_rejects_malformed_complete_json():
+    with pytest.raises(IntegrationError, match="invalid MCP event"):
+        list(_sse(b"data: {invalid JSON}\n\n"))
 
 
 def test_transport_failure_does_not_replay_tool():

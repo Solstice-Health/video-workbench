@@ -66,11 +66,13 @@ class HTTP:
 
 def _sse(raw: bytes):
     try:
-        text = raw.decode("utf-8").replace("\r\n", "\n")
+        text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     except UnicodeDecodeError:
         return
     for event in text.split("\n\n")[:-1]:
-        data = "\n".join(line[5:].lstrip(" ") for line in event.splitlines() if line.startswith("data:"))
+        # SSE recognizes only CR/LF line endings. str.splitlines() also splits
+        # Unicode separators inside otherwise valid JSON strings from Figma.
+        data = "\n".join(line[5:].lstrip(" ") for line in event.split("\n") if line.startswith("data:"))
         if data:
             try:
                 yield json.loads(data)
