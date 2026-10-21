@@ -42,8 +42,9 @@ def main() -> int:
             from vwb.orchestrator import chat
             result = chat(job["message"], request_id=job["request"],
                           attach=[Path(p) for p in job.get("attachments", [])],
+                          attachment_refs=job.get("attachment_refs"),
                           skip_index=job.get("skip_index", True), context=job.get("context"),
-                          main_config=job.get("main_config"))
+                          main_config=job.get("main_config"), resume_message=job.get("resume_message"))
         write_json(result_path, {"status": "completed", "result": result})
         return 0
     except KeyboardInterrupt:

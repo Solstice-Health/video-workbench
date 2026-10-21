@@ -17,6 +17,7 @@ Assets were prepared for Video Workbench on 2026-10-12.
   refer to undefined non-prefixed variables.
 - `fonts/aileron-{100,300,400,600,700,800}.woff2` were copied from the organization's
   existing `Solstice-Frontend/public/fonts/aileron` checkout. No 500 face was invented.
+  `fonts/Aileron-NOTICE.txt` records the author's redistribution terms and source.
 - `spectral.css` and `fonts/spectral-300-0.ttf` were cached from the Google Fonts
   Spectral 300 stylesheet. `fonts/Spectral-OFL.txt` retains the upstream license.
 - `assets/Logos/solstice-mark.svg` and `solstice-mark-ember.svg` use the exact filled
@@ -30,6 +31,15 @@ Assets were prepared for Video Workbench on 2026-10-12.
   tailwind-merge packages from the organization's local frontend checkout were used.
   Their exact versions are recorded in `bundle-dependencies.json`; their available
   license texts are preserved under `licenses/`.
+
+The distribution audit on 2026-10-21 added notices for 11 dependencies whose
+published packages omitted a LICENSE file. Each exact version in
+`bundle-dependencies.json` was checked for its MIT declaration and repository.
+The ten Radix notices use the WorkOS license from
+https://github.com/radix-ui/primitives/blob/main/LICENSE;
+`react-remove-scroll-bar` uses its upstream license from
+https://github.com/theKashey/react-remove-scroll-bar/blob/master/LICENSE.
+All 47 listed dependencies now have their own notice under `licenses/`.
 
 The bundle was built with the existing native esbuild executable under
 `generators/remotion/node_modules/@esbuild/darwin-arm64/bin/esbuild`:

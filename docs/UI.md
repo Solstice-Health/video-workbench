@@ -14,7 +14,10 @@ and licenses are under `static/vendor/eeva/`. See [Eeva](EEVA.md) and
 ## Conversations and sending
 
 Open an existing conversation from the left navigator, or choose New conversation,
-attach a source video, and describe the edit. The Outputs canvas tab shows the latest
+describe a video, paste a Figma design link, or optionally attach a source video.
+For a Figma reference, connect and select Figma MCP (desktop), Figma direct or Figma via Solstice in
+Plugins. A source-free request uses a duration-based canvas; the current renderer
+supplies silence when no source narration exists. The Outputs canvas tab shows the latest
 committed version of each video, its real preview and flags, plus links to download
 the video or open the complete review. Merely opening a conversation does not run
 models or resolve old questions.
@@ -27,7 +30,13 @@ a time under the existing turn lock:
   cleanup, and puts the new message ahead of queued messages on the same request.
   Changes already made by tools remain in place.
 - **Stop** interrupts the current turn and pauses queued messages. Queued messages
-  can be removed or resumed explicitly. Restarting the server preserves pending
+  can be removed or resumed explicitly. Resume turn continues the most recent
+  interrupted message or compaction in the same saved conversation, even when
+  no messages are queued. It is separate from Resume queued messages. The
+  continuation retains the original model settings and context; its prompt
+  instructs the agent to inspect completed work before acting. A persisted
+  source/continuation link makes repeated clicks idempotent. These controls
+  are unavailable while a UI or terminal turn is active. Restarting the server preserves pending
   messages and leaves them paused.
 - A turn started in another terminal is visible, but must be stopped there. The
   UI can queue a message behind it.
@@ -46,7 +55,7 @@ submissions; active turns and already queued messages keep their captured settin
 See [the model and API guide](MODELS.md) for exact model IDs, supported speed modes,
 context budgets, private host key overrides and provider-specific limits.
 
-## Skills and folder references
+## Skills and path references
 
 Type `/features` in a general message to open the skills menu above the composer.
 Continue typing to filter the available recipe names and descriptions. The catalog
@@ -55,15 +64,38 @@ and Shorts. Select by clicking, or use Up/Down then Enter or Tab. Enter selects 
 menu item without sending the message; Escape dismisses the menu. Shift+Enter still
 inserts a newline. Selections appear as removable chips.
 
-Type `@` at the start of a word to choose a folder in the current conversation's
-`work/` workspace. Folder paths filter as you type; email addresses are ordinary
-text. Folder names are indexed on demand when a conversation or picker opens, up
-to 500 directories and eight levels. Hidden folders, dependency/cache folders and
-symlinks are excluded. This is a directory-name index of the agent's readable
-workspace, not a semantic index of the entire repository. A new conversation can
-select skills; folders become available after its workspace exists.
+Type `@` at the start of a word to choose a file or folder in the current
+conversation's `work/` workspace. Use `@"work/Campaign assets/"` for paths with
+spaces. Email addresses remain ordinary text. You can also drag a file or folder
+from the work/ section of the workspace sidebar into the composer.
+Search is debounced and bounded to 100 results and 10,000 scanned entries, with
+an explicit notice if more remain. Entering a folder prefix narrows traversal;
+an exact file path is resolved directly even beyond the discovery budget.
+Hidden paths, dependency/cache folders and symlinks are excluded. This searches
+the agent's readable workspace, not a semantic index of the entire repository.
 
-Choose up to 12 references across skills, folders and plugins, then write your message. Each conversation keeps its
+Choose **Import a local path** in the `@` menu, or type an absolute path or `~/`
+path to prefill the importer. It copies a local file or folder once into
+`work/imports/<id>/<original-name>/`, preserving nested filenames. On APFS an
+independent copy-on-write clone avoids copying all bytes; other filesystems use
+bounded streaming copies. Originals stay separate from agent-editable working
+copies. No model turn starts until you send your message. In a new conversation,
+importing first creates an empty workspace and retains your draft.
+
+Imports run in the background with progress and cancellation. Reloading recovers
+active import progress. Only completed imports appear in the workspace and can
+be selected; incomplete files stay private and are removed on failure/cancel.
+After a server interruption, unfinished imports report failure and must be
+started again. Imports accept up to 10,000 files / 100 GiB per batch, with a
+50,000-entry discovery bound. Hidden files, links and dependency folders are
+skipped with counts; unreadable files and exceeded limits fail explicitly.
+
+One folder reference covers its nested files without applying the 12-file
+inline attachment limit to each child. Files are inspected as needed, not
+automatically loaded into model context. Bulk imported videos are work files,
+not automatically indexed media sources; sandbox scripts can transform them.
+
+Choose up to 100 references across skills, paths and plugins, then write your message. Each conversation keeps its
 own unsent reference selections while switching between chats. These drafts are
 in browser memory and are lost on page reload. Successful submission removes only
 the references sent; additions made during a pending save remain. Question answers
@@ -71,11 +103,12 @@ do not consume selections staged for the next general message.
 
 Selected references travel as structured context in the durable queue and saved
 human chat turn. The agent receives skill names with `skill_read` instructions and
-folder paths with `file_list`/`file_read` instructions. The human message text stays
+file/folder paths with inspection and batch enumeration instructions. The human message text stays
 unchanged; references appear alongside the message and queued entries. The backend
 validates selections both at enqueue and execution. A folder removed while queued
 fails explicitly before starting an agent turn. Selections do not grant new access
-or automatically attach all folder contents.
+or automatically attach all folder contents. References point to the working
+files as they exist when used; inline attachments retain their separate pinned-original behavior.
 
 API: `GET /api/features` lists skills; `GET /api/requests/:id/features` also lists
 folders. General message/new-request payloads accept
@@ -90,6 +123,26 @@ drafts and asynchronous submission. A fresh browser test tab was blocked with
 turn was started for this feature's tests.
 
 ## Workspace canvas
+
+The Canvases tab lists general agent-authored HTML artifacts in addition to file
+previews and video compositions. Published artifacts open automatically and can
+use arbitrary inline HTML/CSS/JavaScript with explicitly listed local assets.
+Each publication has an immutable HTML revision and stable review item IDs.
+Selections inside the sandbox propose an item, normalized region and optional
+video time. The user applies the selection, writes feedback in the host panel and
+chooses Send feedback or Send now; the iframe cannot submit messages itself.
+Feedback keeps the artifact revision and target metadata in both its durable
+record and queued chat message. Reopen published artifacts from Canvases after a
+reload. Files changed since publication require a new artifact revision.
+
+Questions can now show “Agent waiting for you.” An answer resumes that pending
+tool directly; it does not stop and relaunch the conversation. Non-blocking
+questions retain the existing queue behavior. Answers to blocking questions are
+shown as human chat messages from their durable ticket records.
+
+Turn activity also has an expandable helper monitor with tasks, parent IDs,
+status, tool counts, recent tool output, public progress and results. This is
+observability for the supervised tree; it does not expose private model reasoning.
 
 The activity rail switches between Conversations and Workspace files. Click the
 active rail control to hide its navigator. Drag the divider at the navigator's
@@ -226,6 +279,14 @@ confirm those provider paths; they do not qualify every model, effort or operati
 
 ## Plugins and MCP connections
 
+**Direct MCP:** Manage connections has an Add MCP server form for a name and
+Streamable HTTP URL. Automatic mode connects a public server or opens browser
+OAuth consent. Advanced fields support a bearer token or pre-registered client
+credentials and scopes. Saved connections expose their tool catalog with explicit
+enable/disable controls, editable settings, Refresh, Disconnect and Remove.
+The composer can select each saved server independently of the provider presets.
+OAuth callbacks validate the originating popup and current Workbench origin.
+
 The Plugins dropup beside the model pill lists the server's actual integration
 catalog and status. Select a plugin to stage it for your next general message;
 selection does not connect it or grant access. The same per-conversation draft
@@ -299,12 +360,42 @@ does not apply another timeout or accept the recommendation.
 
 ## Activity and context
 
+Chat accepts any file type through the attachment picker or local drag/drop, and
+images can be pasted from the clipboard. Send is enabled for attachment-only
+messages. Up to 12 files per message and 4 GiB per file are accepted. Files show in
+the queued and saved message with image thumbnails where supported, canvas preview
+links, and an original download. Unknown binary formats remain downloadable and
+available to agent scripts. Source videos keep their existing indexing flow.
+
+The agent sees durable file identities/paths and bounded image payloads when its
+model supports images. Original files stay pinned even if an agent edits the working
+copy. PDF examination supports text/search and rendered pages, including crop/zoom;
+OCR is explicit and depends on local Apple Vision. Image summaries and paths can be
+saved for future replay, and compaction never deletes attachment files or chat refs.
+Answering an expanded question preserves staged attachments for the next general
+message rather than silently sending them as part of the answer.
+
 Thinking expands to the public reasoning summaries and messages emitted by the
 provider. It does not expose hidden chain of thought. Old runs may have no summaries
 because they requested none. New Codex turns request automatic reasoning summaries.
 Tool cards expand to input and output, including bash commands when available.
 The frontend polls incremental events, and periodically refreshes request/output
-state. Scrolling up keeps your place; Jump to latest returns to the active turn.
+metadata without downloading activity again. Repeated snapshots of the same item
+replace earlier snapshots in client state. Initial activity is limited to the most
+recent 300 logical items and roughly 1 MiB; one indivisible large item may exceed
+the byte target. **Load earlier activity** pages the rest without moving the live
+cursor or calling a model. Long chats initially render the latest 40 messages,
+with **Show earlier messages** to reveal older turns. Tool and helper details mount
+their full payloads only when opened. Scrolling up keeps your place; Jump to latest
+returns to the active turn.
+
+The canonical `memory/chat_events.jsonl` remains intact. A disposable SQLite index
+stores event identities, sequence numbers and byte offsets, so warm polls read
+appended bytes and selected items rather than parsing the entire history. Repeated
+thinking snapshots are coalesced for delivery; final text is retained in full.
+Direct API hosts publish changed public text at most twice per second and always
+flush the final snapshot. Billing totals also aggregate new complete log lines
+incrementally. These optimizations do not change model context or compaction.
 
 The small pie in the composer footer opens context usage. Codex uses its reported
 token count and context window, configured to the selected budget. Direct Anthropic

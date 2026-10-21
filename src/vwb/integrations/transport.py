@@ -79,12 +79,14 @@ def _sse(raw: bytes):
 
 
 class MCP:
-    def __init__(self, http: HTTP):
+    def __init__(self, http: HTTP, *, service_name: str = "Solstice", client_name: str = "solstice-video-workbench"):
         self.http = http
+        self.service_name, self.client_name = service_name, client_name
 
-    def execute(self, url: str, token: str, method: str, params: dict | None = None) -> dict:
-        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json, text/event-stream",
-                   "Content-Type": "application/json"}
+    def execute(self, url: str, token: str | None, method: str, params: dict | None = None) -> dict:
+        headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         sequence = 0
 
         def rpc(name: str, arguments: dict | None = None, notification=False):
@@ -97,20 +99,20 @@ class MCP:
                 body["params"] = arguments
             status, received, reply = self.http.request("POST", url, headers=headers, payload=body)
             if status == 401:
-                raise Unauthorized("Solstice authorization expired or was rejected. Reconnect in Integrations.")
+                raise Unauthorized(f"{self.service_name} authorization expired or was rejected. Reconnect in Integrations.")
             if status == 403:
-                raise IntegrationError("Solstice denied this request. Check your account access and mcp:connect scope.")
+                raise IntegrationError(f"{self.service_name} denied this request. Check your account access and required permissions.")
             if status < 200 or status >= 300:
-                raise IntegrationError(f"Solstice gateway returned HTTP {status}. The call was not replayed.")
+                raise IntegrationError(f"{self.service_name} returned HTTP {status}. The call was not replayed.")
             if notification:
                 return None
             if not isinstance(reply, dict) or reply.get("id") != sequence or reply.get("jsonrpc") != "2.0":
-                raise IntegrationError("Solstice returned an invalid MCP response.")
+                raise IntegrationError(f"{self.service_name} returned an invalid MCP response.")
             if "error" in reply:
-                raise IntegrationError("Solstice could not complete the MCP request. Check the tool and connection.")
+                raise IntegrationError(f"{self.service_name} could not complete the MCP request. Check the tool and connection.")
             result = reply.get("result")
             if not isinstance(result, dict):
-                raise IntegrationError("Solstice returned an invalid MCP result.")
+                raise IntegrationError(f"{self.service_name} returned an invalid MCP result.")
             if name == "initialize":
                 session = received.get("mcp-session-id")
                 if session:
@@ -125,7 +127,7 @@ class MCP:
 
         try:
             rpc("initialize", {"protocolVersion": PROTOCOL, "capabilities": {},
-                               "clientInfo": {"name": "solstice-video-workbench", "version": "0.1.0"}})
+                               "clientInfo": {"name": self.client_name, "version": "0.1.0"}})
             rpc("notifications/initialized", notification=True)
             if method != "tools/list":
                 return rpc(method, params or {})

@@ -9,6 +9,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..");
 const out = join(root, "public", "fonts");
 mkdirSync(out, { recursive: true });
+mkdirSync(join(out, "licenses"), { recursive: true });
 const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
 const ids = Object.keys(pkg.dependencies).filter((d) => d.startsWith("@fontsource/")).sort();
 
@@ -18,8 +19,12 @@ for (const id of ids) {
   const dir = join(root, "node_modules", id);
   const meta = JSON.parse(readFileSync(join(dir, "metadata.json"), "utf8"));
   const version = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).version;
+  const license = ["LICENSE", "LICENSE.txt", "OFL.txt", "OFL.md"].find((name) => existsSync(join(dir, name)));
+  if (!license) throw new Error(`no redistribution license found for ${id}`);
+  const licenseFile = `licenses/${meta.id}.txt`;
+  copyFileSync(join(dir, license), join(out, licenseFile));
   const entry = { family: meta.family, id: meta.id, version, license: meta.license?.type ?? "OFL-1.1",
-    category: meta.category, faces: [] };
+    license_file: licenseFile, category: meta.category, faces: [] };
   for (const style of ["normal", "italic"]) {
     for (const w of meta.weights) {
       if (w < 300) continue;

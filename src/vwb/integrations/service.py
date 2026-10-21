@@ -18,6 +18,9 @@ from jsonschema.exceptions import SchemaError, ValidationError
 
 from vwb.config import RUNS_DIR
 
+from .figma_direct import DirectFigma
+from .figma_mcp import DesktopFigma
+from .remote_mcp import RemoteMCP
 from .store import IntegrationError, Store
 from .transport import HTTP, MCP, Unauthorized
 
@@ -82,10 +85,14 @@ def _payload(result: dict) -> dict:
 
 
 class IntegrationService:
-    def __init__(self, runs_dir: Path = RUNS_DIR, *, http: HTTP | None = None, mcp: MCP | None = None):
+    def __init__(self, runs_dir: Path = RUNS_DIR, *, http: HTTP | None = None, mcp: MCP | None = None,
+                 direct: DirectFigma | None = None, desktop: DesktopFigma | None = None):
         self.store = Store(runs_dir)
         self.http = http or HTTP()
         self.mcp = mcp or MCP(self.http)
+        self.direct = direct or DirectFigma(runs_dir)
+        self.desktop = desktop or DesktopFigma(runs_dir)
+        self.remote = RemoteMCP(runs_dir)
 
     def _config(self, state: dict) -> dict:
         configured = state.get("config", {})
@@ -131,20 +138,21 @@ class IntegrationService:
         figma_status = state.get("figma", {})
         figma_available = bool(connected and figma and figma_status.get("configured") is True)
         figma_connected = bool(figma_available and figma_status.get("connected") is True)
+        direct = self.direct.status()
         return {"items": [
             {"id": "solstice", "name": "Solstice", "kind": "mcp",
              "description": "Your organization's content and review tools through its MCP gateway.",
              "state": connection_state, "available": configured, "connected": connected,
              "tools_count": len(tools) if connected else 0, "message": message, **common},
-            {"id": "figma", "name": "Figma", "kind": "plugin",
+            {"id": "figma", "name": "Figma via Solstice", "kind": "plugin",
              "description": "Read Figma designs through the Solstice gateway.",
              "state": "connected" if figma_connected else "disconnected" if figma_available else "unavailable",
              "available": figma_available, "connected": figma_connected,
              "tools_count": len(figma) if connected else 0,
              "message": ("Figma read tools are available through Solstice." if figma_connected else
                          "Sign in to Figma through Solstice, then refresh this connection." if figma_available else
-                         "Connect Solstice and enable its Figma gateway extension. No direct Figma connection is used."),
-             **common}], "config": config,
+                         "Connect Solstice and enable its Figma gateway extension, or choose the separate Figma direct plugin."),
+             **common}, direct["item"], self.desktop.status(), *self.remote.status()], "config": config, "direct_figma": {"config": direct["config"], "setup": direct["setup"]},
             "setup": {"issuer": ISSUER, "scopes": SCOPES, "gateway_urls": list(GATEWAYS),
                       "client_registration_required": True, "callback_path": CALLBACK_PATH}}
 
@@ -341,6 +349,12 @@ class IntegrationService:
         return tools
 
     def tools(self, query: str = "", limit: int = 30, offset: int = 0, integration: str = "solstice") -> dict:
+        if isinstance(integration, str) and integration.startswith("mcp_"):
+            return self.remote.tools(integration, query=query, limit=limit, offset=offset)
+        if integration == "figma_mcp":
+            return self.desktop.tools(query=query, limit=limit, offset=offset)
+        if integration == "figma_direct":
+            return self.direct.tools(query=query, limit=limit, offset=offset)
         if (not isinstance(query, str) or len(query) > 1000 or type(limit) is not int or not 1 <= limit <= 50
                 or type(offset) is not int or offset < 0 or integration not in ("solstice", "figma")):
             raise IntegrationError("Use a query up to 1000 characters, limit 1–50, offset >= 0 and a known integration.")
@@ -358,9 +372,15 @@ class IntegrationService:
 
     def call(self, ws, tool: str, arguments: dict) -> dict:
         """Call an approved read tool exactly once, then import bounded embedded artifacts."""
+        if isinstance(tool, str) and tool.startswith("mcp_"):
+            return self._remote_call(ws, tool, arguments, read_only=True)
         if (not isinstance(tool, str) or not TOOL_NAME.fullmatch(tool) or not isinstance(arguments, dict)
                 or len(json.dumps(arguments).encode()) > 256 * 1024):
             raise IntegrationError("Use an exact catalog tool name and an argument object up to 256 KiB.")
+        if tool.startswith("figma_direct_"):
+            return self.direct.call(ws, tool, arguments)
+        if tool.startswith("figma_mcp."):
+            return self.desktop.call(ws, tool, arguments)
         with self.store.lock:
             state = self.store.read()
             token = self._access(state)
@@ -387,3 +407,15 @@ class IntegrationService:
                 serialized = serialized.replace(value, "[redacted]")
         from .artifacts import import_result
         return import_result(ws, tool, arguments, json.loads(serialized), self._config(state)["gateway_url"])
+
+    def execute(self, ws, tool: str, arguments: dict) -> dict:
+        """Execute an explicitly enabled direct MCP tool under its separate policy capability."""
+        if not isinstance(tool, str) or not tool.startswith("mcp_"):
+            raise IntegrationError("Use integration_execute only for a discovered direct MCP tool.")
+        return self._remote_call(ws, tool, arguments, read_only=False)
+
+    def _remote_call(self, ws, tool: str, arguments: dict, *, read_only: bool) -> dict:
+        from .artifacts import import_result
+        response = self.remote.call(tool, arguments, read_only=read_only)
+        return import_result(ws, tool, arguments, response["result"], response["gateway"],
+                             provider=response["provider"])

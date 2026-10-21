@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Review variations</title>
+<style>
+*{box-sizing:border-box}body{margin:0;padding:24px;background:#f3f1ee;color:#1d1c1a;font:14px/1.5 system-ui,sans-serif}h1{font:300 32px/1.2 Georgia,serif;margin:0 0 8px}p{color:#5e5a53;margin:0 0 24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px}article{padding:12px;background:white;border-radius:16px;box-shadow:0 0 0 1px #1d1c1a10}h2{font-size:14px;margin:0 0 8px}.media{position:relative;overflow:hidden;border-radius:8px;touch-action:none}.media img,.media video{display:block;width:100%;max-height:260px;object-fit:contain;background:#faf8f5}.media img{max-height:none;cursor:crosshair}.region{position:absolute;outline:2px solid #a85600;background:#ef800618;pointer-events:none}button{font:inherit;border:1px solid #1d1c1a24;background:white;border-radius:999px;padding:8px 12px;margin-top:12px;cursor:pointer}button:focus-visible{outline:2px solid #1d1c1a;outline-offset:2px}.hint{display:block;font-size:12px;color:#5e5a53;margin-top:8px}.empty{padding:40px;background:white;border-radius:16px}
+</style>
+<h1>Review variations</h1>
+<p>Choose an item to give feedback. Drag across an image to select a region. Video feedback keeps the current playback time.</p>
+<div class="grid" id="grid"></div>
+<script>
+// Publish with any number of {id,label,asset_path} items. This is an example,
+// not a harness-enforced layout. All asset URLs are scoped to this revision.
+const grid=document.getElementById('grid');
+for(const item of VWB.artifact.items){
+  const article=document.createElement('article'), heading=document.createElement('h2');heading.textContent=item.label;article.append(heading);
+  const url=VWB.assets[item.asset_path], isVideo=/\.(mp4|mov|webm|m4v|mkv)$/i.test(item.asset_path||'');
+  const wrapper=document.createElement('div');wrapper.className='media';article.append(wrapper);
+  const media=document.createElement(isVideo?'video':'img');
+  if(url){media.src=url;media.alt=item.label;media.loading='lazy';if(isVideo){media.controls=true;media.preload='metadata';}wrapper.append(media);}
+  const send=document.createElement('button');send.textContent='Give feedback';send.addEventListener('click',()=>VWB.select({item_id:item.id,...(isVideo?{time_s:media.currentTime}:{})}));article.append(send);
+  const hint=document.createElement('span');hint.className='hint';hint.textContent=isVideo?'Review at the current time':'Drag to select an image region';article.append(hint);
+  if(!isVideo && url){
+    let start=null,box=null;
+    const point=e=>{const r=media.getBoundingClientRect();return{x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))};};
+    media.addEventListener('dragstart',e=>e.preventDefault());
+    media.addEventListener('pointerdown',e=>{if(e.button!==0)return;e.preventDefault();start=point(e);media.setPointerCapture(e.pointerId);wrapper.querySelector('.region')?.remove();box=document.createElement('div');box.className='region';wrapper.append(box);});
+    media.addEventListener('pointermove',e=>{if(!start)return;const p=point(e);Object.assign(box.style,{left:100*Math.min(start.x,p.x)+'%',top:100*Math.min(start.y,p.y)+'%',width:100*Math.abs(start.x-p.x)+'%',height:100*Math.abs(start.y-p.y)+'%'});});
+    media.addEventListener('pointerup',e=>{if(!start)return;const p=point(e),region={x:Math.min(start.x,p.x),y:Math.min(start.y,p.y),width:Math.abs(start.x-p.x),height:Math.abs(start.y-p.y)};start=null;if(region.width>.005&&region.height>.005)VWB.select({item_id:item.id,region});else{box.remove();VWB.select({item_id:item.id});}});
+    media.addEventListener('pointercancel',()=>{start=null;box?.remove();});
+  }
+  grid.append(article);
+}
+if(!VWB.artifact.items.length){grid.className='empty';grid.textContent='Publish this file with review items to create a gallery.';}
+</script>
+</html>

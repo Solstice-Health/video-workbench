@@ -1,0 +1,12 @@
+Aileron by dotcolon
+
+Upstream source: https://dotcolon.net/fonts/aileron/
+Upstream states: "Aileron is No Rights Reserved."
+
+The author permits use, modification and redistribution, including commercial
+and trademark uses, and supplies the font without warranty or support.
+See the upstream page for the author's original Japanese terms.
+
+These WOFF2 files were copied from Solstice's existing frontend assets.
+See ../PROVENANCE.md for the recorded source revision and preparation details.
+Notice checked on 2026-10-21.

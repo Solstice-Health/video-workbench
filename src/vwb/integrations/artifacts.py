@@ -7,8 +7,11 @@ import hashlib
 import io
 import json
 import os
+import re
 import secrets
+import tempfile
 import time
+from pathlib import Path
 
 from PIL import Image
 
@@ -31,7 +34,9 @@ def _raster(data: bytes, mime: str) -> None:
         raise IntegrationError("The gateway returned an invalid or oversized preview image.") from None
 
 
-def import_result(ws, tool: str, arguments: dict, result: dict, gateway: str) -> dict:
+def import_result(ws, tool: str, arguments: dict, result: dict, gateway: str, *, provider: str = "solstice") -> dict:
+    if provider not in {"solstice", "figma_direct", "figma_mcp"} and not re.fullmatch(r"mcp_[a-f0-9]{12}", provider):
+        raise IntegrationError("Unknown integration import provider.")
     content = result.get("content", [])
     if not isinstance(content, list) or len(content) > 200:
         raise IntegrationError("The gateway returned an invalid or oversized content list.")
@@ -93,7 +98,7 @@ def import_result(ws, tool: str, arguments: dict, result: dict, gateway: str) ->
         raise IntegrationError("Gateway import exceeded the 16 MiB limit; narrow the request.")
     files.append(("response.json", encoded, "application/json"))
     directory = f"{int(time.time())}-{secrets.token_hex(6)}"
-    rel = f"integrations/solstice/{directory}"
+    rel = f"integrations/{provider}/{directory}"
     artifacts = []
     # Resolve each component through directory descriptors; reject agent-created symlinks.
     ws.work.mkdir(parents=True, exist_ok=True)
@@ -101,7 +106,7 @@ def import_result(ws, tool: str, arguments: dict, result: dict, gateway: str) ->
     try:
         current = os.open(ws.work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         descriptors.append(current)
-        for part in ("integrations", "solstice", directory):
+        for part in ("integrations", provider, directory):
             try:
                 os.mkdir(part, 0o700, dir_fd=current)
             except FileExistsError:
@@ -120,9 +125,30 @@ def import_result(ws, tool: str, arguments: dict, result: dict, gateway: str) ->
     finally:
         for fd in reversed(descriptors):
             os.close(fd)
+    # Register exact imported raster pixels so every agent host can use design
+    # references in image/clip generation and canvas layers without a source video.
+    from vwb.workspace.registry import Registry
+    registry = Registry(ws.assets)
+    for index, (name, data, mime) in enumerate(files):
+        if mime not in RASTER:
+            continue
+        with Image.open(io.BytesIO(data)) as image:
+            size = list(image.size)
+        with tempfile.TemporaryDirectory(dir=ws.assets) as tmp:
+            source = Path(tmp) / name
+            source.write_bytes(data)
+            ref = registry.register(source, slot=f"import-{provider}-{directory}-{index + 1}", kind="image",
+                                    receipt="integration.import",
+                                    derived_from=[{"kind": "integration", "provider": provider, "gateway": gateway,
+                                                   "tool": tool, "arguments": arguments,
+                                                   "sha256": hashlib.sha256(data).hexdigest(),
+                                                   "response": f"{rel}/response.json"}],
+                                    fit={"native_size": size},
+                                    notes="Exact external design pixels. Imported evidence is not approved copy or a licence grant.")
+        artifacts[index]["asset_ref"] = ref
     ws.ledger.mkdir(parents=True, exist_ok=True)
     event = {
-        "integration": "figma" if tool.startswith("solstice_figma_") else "solstice",
+        "integration": provider if provider != "solstice" else "figma" if tool.startswith("solstice_figma_") else "solstice",
         "tool": tool, "artifacts": artifacts, "source_gateway": gateway, "is_error": record["isError"]}
     Ledger(ws.ledger / "ledger.jsonl").append("integration.imported", "gateway", event)
     from vwb.agents.events import emit

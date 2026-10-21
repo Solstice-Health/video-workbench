@@ -89,8 +89,9 @@ def test_missing_queued_folder_fails_before_new_chat_or_agent_call(ws, monkeypat
     assert not ws.load().chat and not called
 
 
-def test_plugins_survive_queue_restart_and_reach_agent_as_gateway_bound_context(ws, tmp_path, monkeypatch):
-    context = {"skills": [], "folders": [], "plugins": ["figma", "solstice"]}
+@pytest.mark.parametrize("plugins", [["figma", "solstice"], ["figma_direct"], ["figma_mcp"]])
+def test_plugins_survive_queue_restart_and_reach_agent_as_gateway_bound_context(ws, tmp_path, monkeypatch, plugins):
+    context = {"skills": [], "folders": [], "plugins": plugins}
     queue = TurnQueue(tmp_path)
     try:
         queue.stop(ws)
@@ -109,6 +110,7 @@ def test_plugins_survive_queue_restart_and_reach_agent_as_gateway_bound_context(
     monkeypatch.setattr(orchestrator.page, "build", lambda workspace: Path("review.html"))
     orchestrator.chat("Use this design", request_id=ws.id, skip_index=True, context=context)
     assert "integration_status" in seen[0] and "Solstice MCP gateway" in seen[0]
+    assert "integration='figma_direct'" in seen[0]
     assert ws.load().chat[-1].context == context and ws.load().chat[-1].text == "Use this design"
 
 
@@ -116,3 +118,79 @@ def test_plugins_survive_queue_restart_and_reach_agent_as_gateway_bound_context(
 def test_unknown_or_malformed_plugins_are_rejected_without_starting_a_turn(ws, plugins):
     with pytest.raises(ValueError):
         references.validate({"plugins": plugins}, ws)
+
+
+def test_bulk_folder_and_file_references_are_lazy_and_durable(ws, tmp_path, monkeypatch):
+    folder = ws.work / "Batch of 50"
+    folder.mkdir()
+    for i in range(50):
+        (folder / f"shot {i:02d}.txt").write_text("not automatically loaded into the prompt")
+    context = {"skills": [], "folders": ["Batch of 50"], "files": ["Batch of 50/shot 49.txt"]}
+    assert references.validate(context, ws) == context
+    queue = TurnQueue(tmp_path)
+    try:
+        queue.stop(ws)
+        queue.enqueue(ws, message="Reformat every input", context=context)
+    finally:
+        queue.close()
+    queue = TurnQueue(tmp_path)
+    try:
+        assert queue.snapshot(ws)["queue"][0]["context"] == context
+    finally:
+        queue.close()
+    seen = []
+    monkeypatch.setattr(orchestrator.Workspace, "open", lambda _: ws)
+    monkeypatch.setattr(orchestrator.job_lead, "run", lambda _, message, **kw: seen.append(message) or "Ready")
+    monkeypatch.setattr(orchestrator, "ensure_review", lambda _: [])
+    monkeypatch.setattr(orchestrator.page, "build", lambda _: Path("review.html"))
+    orchestrator.chat("Reformat every input", request_id=ws.id, context=context)
+    assert ws.load().chat[-1].context == context
+    assert ws.load().chat[-1].attachments == []
+    assert "Batch of 50" in seen[0] and "shot 49.txt" in seen[0]
+    assert "not automatically loaded into the prompt" not in seen[0]
+    assert "shot 00.txt" not in seen[0]
+
+
+def test_path_search_reaches_past_initial_page_and_supports_spaces(ws, monkeypatch):
+    for i in range(150):
+        (ws.work / f"item{i:03d}.txt").write_text("content")
+    deep = ws.work / "z batch" / "selected"
+    deep.mkdir(parents=True)
+    (deep / "shot 70.png").write_bytes(b"not decoded")
+    initial = references.catalog(ws)
+    assert initial["paths_truncated"]
+    assert len(initial["folders"]) + len(initial["files"]) <= references.MAX_RESULTS
+    result = references.catalog(ws, "work/z batch/selected/shot 70")
+    assert [row["id"] for row in result["files"]] == ["z batch/selected/shot 70.png"]
+    # A direct folder prefix remains useful even with a very small scan budget.
+    monkeypatch.setattr(references, "MAX_SCAN", 3)
+    result = references.catalog(ws, "z batch/selected/")
+    assert not result["paths_truncated"] and result["scanned"] == 1
+    assert result["folders"][0]["id"] == "z batch/selected"
+    assert result["files"][0]["id"] == "z batch/selected/shot 70.png"
+    exact = references.catalog(ws, "work/item149.txt")
+    assert exact["files"][0]["id"] == "item149.txt" and exact["scanned"] == 0
+
+
+def test_file_reference_scope_type_and_total_limit(ws, tmp_path):
+    (ws.work / "notes.txt").write_text("notes")
+    (ws.work / "link.txt").symlink_to(ws.work / "notes.txt")
+    (ws.work / "external").symlink_to(tmp_path, target_is_directory=True)
+    for path in ["../private", "/etc/passwd", ".", "planning", "link.txt", "external/file", ".secret"]:
+        with pytest.raises(ValueError):
+            references.validate({"files": [path]}, ws)
+    for i in range(101):
+        (ws.work / f"{i}.txt").touch()
+    refs = [f"{i}.txt" for i in range(100)]
+    assert len(references.validate({"files": refs}, ws)["files"]) == 100
+    with pytest.raises(ValueError, match="100 references"):
+        references.validate({"files": [*refs, "100.txt"]}, ws)
+    assert references.catalog(ws, str(tmp_path))["files"] == []
+    assert not any(row["id"].startswith(("external", "link.txt")) for row in references.catalog(ws)["files"])
+
+
+def test_missing_file_reference_fails_before_turn(ws, monkeypatch):
+    monkeypatch.setattr(orchestrator.Workspace, "open", lambda _: ws)
+    with pytest.raises(ValueError, match="missing"):
+        orchestrator.chat("Review", request_id=ws.id, context={"files": ["missing.txt"]})
+    assert not ws.load().chat

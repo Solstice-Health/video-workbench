@@ -18,6 +18,16 @@ and requires tool calling and a reported context limit. Custom models expose
 reasoning effort only when their catalog metadata explicitly reports it. Unknown
 or unsupported IDs fail before an agent turn starts.
 
+Anthropic models always use `https://api.anthropic.com` and the host's
+`ANTHROPIC_API_KEY`, loaded from the nearest project `.env` unless a provider
+override is explicitly saved. They never use the OpenRouter key. Curated
+Anthropic aliases entered through the custom model field (for example
+`anthropic/claude-opus-5.5`) resolve to the verified native model ID without
+contacting OpenRouter. Unsupported aliases fail before sending a generation.
+Saved OpenRouter Claude configurations and legacy Claude SDK fallback entries
+are routed to the direct Anthropic API on their next turn. Provider histories
+stay separate; the new native history receives the saved public conversation.
+
 OpenAI models run in the existing Codex Docker host. Anthropic and OpenRouter
 models use persistent host-side API tool loops, with tools routed through the
 same registry and role permissions. Each provider/model keeps its own history;
@@ -41,16 +51,32 @@ rates. Custom OpenRouter speed controls depend on its reported endpoint tags.
 Fast and Ultra fast are mutually exclusive; access remains subject to the provider
 account, and a rejected request is surfaced as an error.
 
+Context capacity and output capacity are separate. A 1M context budget does not
+allow a single call to generate 1M tokens. Direct Anthropic models allow up to
+128K output tokens per call, including thinking. The previous fixed 16K output
+setting could exhaust that allowance in the main agent at Max effort before it
+could finish its response; this was independent of subagents and context fullness.
+
 Codex receives the selected context budget and an automatic-compaction threshold
-at 85% of that budget. Direct Anthropic/OpenRouter calls perform a conservative
-history-size preflight, reserving space for output. Text is conservatively counted,
-and inline images are estimated from their dimensions rather than base64 transport
-size. Anthropic uses its visual patch formula; custom OpenRouter image accounting
-is approximate because encoders differ. These estimates are not measured usage,
-and providers may reject a request that passes preflight. If the estimate exceeds
-the budget, no model call is sent. Choose a larger
-supported budget or start a new conversation. Manual **Compact conversation** is
-currently available only for Codex threads.
+at 85% of that budget. Direct Anthropic calls enable provider-native automatic
+compaction at the configured threshold. The latest context measurement describes
+the final iteration after compaction, while conversation billing includes all
+reported iterations. The context API also reports the output allowance,
+automatic-compaction threshold/status, compaction count and last stop reason when
+the provider host has reported them. Manual **Compact conversation** is currently
+available only for Codex threads.
+
+Direct Anthropic/OpenRouter calls also perform a conservative history-size
+preflight, reserving space for output. Text is conservatively counted, and inline
+images are estimated from their dimensions rather than base64 transport size.
+Anthropic uses its visual patch formula; custom OpenRouter image accounting is
+approximate because encoders differ. These estimates are not measured usage, and
+providers may reject a request that passes preflight. If the estimate exceeds the
+budget for a supported Anthropic model with native compaction, the harness first
+uses Anthropic's token-counting endpoint. It proceeds only when the measured
+context fits, or when native compaction can reduce it at the configured trigger.
+Other oversized requests are rejected before generation. Choose a larger supported
+budget or start a new conversation when the request cannot fit.
 
 ## When selections apply
 
@@ -75,8 +101,8 @@ This is a private local JSON file, not an encrypted credential vault.
 **Disconnect** suppresses that provider's baseline key without editing `.env`.
 **Use .env key** removes the Workbench override and restores the baseline key when
 one exists. Keys remain in the control plane, outside agent containers and work
-folders. Direct Anthropic selections require an API key; the older Claude SDK
-fallback's local login is a separate path.
+folders. Direct Anthropic selections and the Claude fallback require an API key;
+an expired or rejected key is surfaced as an authentication error.
 
 Implementation: `src/vwb/models.py`, `config.py`, `agents/provider_loop.py`, and
 `web/static/model-control.js`. Model/provider controls were checked with mocked

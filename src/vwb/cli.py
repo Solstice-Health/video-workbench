@@ -35,7 +35,7 @@ def ui(port: int = typer.Option(8765, min=1, max=65535, help="Local browser port
 
 @app.command()
 def chat(message: Optional[str] = typer.Argument(None, help="What you want, in plain words."),
-         attach: list[Path] = typer.Option(None, "--attach", "-a", help="Source video(s)."),
+         attach: list[Path] = typer.Option(None, "--attach", "-a", help="Files to attach: videos, documents, images or other files."),
          request: Optional[str] = typer.Option(None, "--request", "-r", help="Continue an existing request."),
          interactive: bool = typer.Option(False, "--interactive", "-i", help="Keep chatting: one conversation, many turns."),
          skip_index: bool = typer.Option(False, help="Do not (re)build the index first.")):
@@ -252,22 +252,125 @@ def tools():
 
 
 @app.command()
-def doctor():
-    """Check the local environment: binaries, generator, keys, models."""
+def doctor(ui_only: bool = False):
+    """Check local readiness; --ui-only requires just the Python backend and bundled UI."""
+    import importlib.util
+    import json
+    import os
+    import platform
+    import re
     import shutil
+    import subprocess
+    import sys
+
+    from vwb.agents.host_codex import IMAGE
+    from vwb.browser.runtime import status as browser_status
     from vwb.config import find_env_file, secrets, slot
     from vwb.render.plates import REMOTION_DIR
-    checks = {
-        "ffmpeg": bool(shutil.which("ffmpeg")), "node": bool(shutil.which("node")),
-        "remotion generator installed": (REMOTION_DIR / "node_modules" / "remotion").exists(),
-        "fonts pinned": (REMOTION_DIR / "public" / "fonts").exists(),
-        f"env file ({find_env_file()})": find_env_file() is not None,
-        "OPENAI_API_KEY": bool(secrets().openai), "GOOGLE_API_KEY": bool(secrets().google),
-        "OPENROUTER_API_KEY (optional web tools)": bool(secrets().openrouter),
-    }
-    for k, ok in checks.items():
-        console.print(f"{'[green]ok[/]' if ok else '[red]missing[/]'}  {k}")
-    console.print(f"main slot: {slot('main')['model']} via {slot('main')['host']} (local Claude login)")
+
+    failed = False
+
+    def check(label: str, ok: bool, hint: str = "", *, required: bool = True):
+        nonlocal failed
+        failed |= required and not ok
+        state = "[green]ok[/]" if ok else "[red]missing[/]" if required else "[yellow]optional[/]"
+        console.print(f"{state}  {label}", markup=True, highlight=False)
+        if not ok and hint:
+            console.print(f"    {hint}", markup=False, highlight=False)
+
+    def probe(command: list[str], *, cwd: Path | None = None) -> str | None:
+        try:
+            options = {"cwd": cwd} if cwd is not None else {}
+            result = subprocess.run(command, capture_output=True, text=True, timeout=5, check=False, **options)
+            return result.stdout.strip() if result.returncode == 0 else None
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    check(f"Python {platform.python_version()}", (3, 12) <= sys.version_info[:2] < (3, 14),
+          "Use Python 3.12 or 3.13 and run uv sync --frozen.")
+    static = Path(__file__).parent / "web" / "static"
+    check("Bundled workbench UI", all((static / name).is_file() for name in (
+        "index.html", "app.js", "app.css", "vendor/react.production.min.js",
+        "vendor/react-dom.production.min.js", "vendor/eeva/components/bundle.js",
+    )), "Restore the repository's src/vwb/web/static files and run uv sync --frozen.")
+    for binary in ("ffmpeg", "ffprobe"):
+        check(binary, bool(shutil.which(binary)), "Install FFmpeg and ensure both ffmpeg and ffprobe are on PATH.",
+              required=not ui_only)
+    node = shutil.which("node")
+    node_version = probe([node, "--version"]) if node else None
+    match = re.fullmatch(r"v?(\d+)\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", node_version or "")
+    # The pinned Remotion 4 renderer requires Node >=16; setup recommends Node 22.
+    check(f"Node.js{f' {node_version}' if match else ''}", bool(match and int(match[1]) >= 16),
+          "Install Node.js 22 LTS (the pinned renderer requires at least Node 16).", required=not ui_only)
+    npm = shutil.which("npm")
+    npm_version = probe([npm, "--version"]) if npm else None
+    valid_npm = bool(re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", npm_version or ""))
+    check(f"npm{f' {npm_version}' if valid_npm else ''}", valid_npm, "Install npm with Node.js.", required=not ui_only)
+    check("Remotion renderer dependencies", (REMOTION_DIR / "node_modules" / "remotion" / "package.json").is_file(),
+          "Run npm ci in generators/remotion.", required=not ui_only)
+    renderer = REMOTION_DIR / "node_modules" / "@remotion" / "renderer"
+    # ensureBrowser's callback runs before any download. Refuse it here: doctor
+    # checks the pinned cached browser without installing or launching anything.
+    browser_probe = ("require(process.argv[1]).ensureBrowser({logLevel:'silent',"
+                     "onBrowserDownload:()=>{throw Error('Not installed')}})"
+                     ".then(()=>console.log('ready')).catch(()=>{process.exitCode=1})")
+    render_browser_ready = bool(node and renderer.is_dir() and probe(
+        [node, "--eval", browser_probe, str(renderer)], cwd=REMOTION_DIR))
+    check("Remotion render browser", render_browser_ready,
+          "Run npx remotion browser ensure in generators/remotion.", required=not ui_only)
+    try:
+        font_dir = REMOTION_DIR / "public" / "fonts"
+        manifest = json.loads((font_dir / "manifest.json").read_text())
+        fonts_ready = bool(manifest) and all(
+            row.get("faces") and all((font_dir / face["file"]).is_file() for face in row["faces"])
+            for row in manifest
+        )
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        fonts_ready = False
+    check("Pinned renderer fonts", fonts_ready, "Run npm run setup-fonts in generators/remotion.", required=not ui_only)
+
+    env_file = find_env_file()
+    check("Environment file", bool(env_file and env_file.is_file()),
+          "Optional when keys are supplied through environment variables or Workbench. Copy .env.example if needed.",
+          required=False)
+    provider_keys = secrets()
+    for provider, key in (("OpenAI", provider_keys.openai), ("Anthropic", provider_keys.anthropic),
+                          ("Google", provider_keys.google), ("OpenRouter", provider_keys.openrouter)):
+        check(f"{provider} API key configured", bool(key),
+              "Configure this provider in .env or Models and APIs before using its models.", required=False)
+
+    docker = shutil.which("docker")
+    daemon_ready = bool(docker and probe([docker, "info", "--format", "{{.ServerVersion}}"]))
+    check("Docker daemon (Codex agents and sandbox tools)", daemon_ready,
+          "Install/start Docker to enable Codex agents and sandbox tools; direct API chat does not require it.",
+          required=False)
+    image_ready = bool(daemon_ready and probe([docker, "image", "inspect", IMAGE, "--format", "{{.Id}}"]))
+    check(f"Agent image {IMAGE}", image_ready,
+          f"With Docker running: docker build -t {IMAGE} docker/codex-agent", required=False)
+    browser = browser_status()
+    check("Pinned shared-browser runtime", browser["installed"],
+          "Run uv run python -m vwb.browser.runtime install to enable shared browsing.", required=False)
+    remote_browser = bool(os.environ.get("VWB_BROWSER_CDP_URL"))
+    chrome = any(shutil.which(name) for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"))
+    if platform.system() == "Darwin":
+        chrome = chrome or any((base / "Google Chrome.app/Contents/MacOS/Google Chrome").is_file()
+                               for base in (Path("/Applications"), Path.home() / "Applications"))
+    check("Chrome or remote CDP configured", bool(chrome or remote_browser),
+          "Install Chrome on the control-plane host or set VWB_BROWSER_CDP_URL for a remote browser.", required=False)
+    if platform.system() == "Linux" and not remote_browser:
+        check("Linux display for headed browsing", bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")),
+              "Headed browsing needs a display server; headless browsing remains available.", required=False)
+    silicon = platform.system() == "Darwin" and platform.machine().lower() in {"arm64", "aarch64"}
+    index_ready = silicon and all(importlib.util.find_spec(name) is not None for name in ("mlx_whisper", "Vision", "Quartz"))
+    check("Full source-video indexing (Apple Silicon, MLX Whisper and Apple Vision)", index_ready,
+          "Full source-video indexing currently requires an Apple Silicon Mac. Chat, workspace previews and direct APIs can run elsewhere.",
+          required=False)
+    main = slot("main")
+    console.print(f"Main slot: {main['model']} via {main['host']}", markup=False, highlight=False)
+    console.print("Checks are local and read-only; provider keys are not validated with paid model calls.",
+                  markup=False, highlight=False)
+    if failed:
+        raise typer.Exit(code=1)
 
 
 @mcp_app.command("serve")

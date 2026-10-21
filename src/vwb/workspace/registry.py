@@ -22,6 +22,7 @@ PROV_RANK = ["master", "original_pixel", "fused", "segmented", "traced", "genera
 # which tool receipts yield which provenance class
 RECEIPT_PROV = {
     "human.upload": "master",
+    "integration.import": "original_pixel",     # exact imported design pixels, with external evidence lineage
     "asset_lab.rung0": "original_pixel",
     "asset_lab.rung1": "fused",
     "asset_lab.rung2": "segmented",

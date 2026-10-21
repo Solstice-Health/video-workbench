@@ -29,6 +29,9 @@ class QueueConflict(ValueError):
     pass
 
 
+RESUME_MESSAGE = "Resume the interrupted turn from the saved conversation and workspace."
+
+
 class TurnQueue:
     def __init__(self, runs_dir: Path, *, command: list[str] | None = None):
         self.runs_dir = runs_dir.resolve()
@@ -61,15 +64,26 @@ class TurnQueue:
         if ws.id not in self.states:
             state = read_json(self._path(ws), {"jobs": [], "paused": False})
             unfinished = False
+            recovered = False
             for job in state["jobs"]:
                 if job["status"] in {"running", "stopping"}:
+                    recovered = True
                     self._cleanup_containers(job["id"])
-                    job.update(status="stopped", finished_at=now_iso(), error="The UI server stopped during this turn.")
-                    unfinished = True
+                    result = read_json(ws.memory / "web_jobs" / f"{job['id']}.result.json", {})
+                    # The worker may have finished just before the server lost its
+                    # queue write. A durable success receipt must not offer replay.
+                    if result.get("status") == "completed":
+                        job.update(status="completed", finished_at=now_iso())
+                        job.pop("error", None)
+                    else:
+                        job.update(status="failed" if result.get("status") == "failed" else "stopped",
+                                   finished_at=now_iso(), error=result.get("error") or "The UI server stopped during this turn.")
+                        unfinished = True
                 if job["status"] == "queued":
                     unfinished = True
             if unfinished:
                 state["paused"] = True
+            if unfinished or recovered:
                 write_json(self._path(ws), state)
             self.states[ws.id] = state
             # A registered historical request can live deeper under runs/. Keep
@@ -96,30 +110,65 @@ class TurnQueue:
             done = [j for j in state["jobs"] if j["status"] not in {"queued", "running", "stopping"}]
             return {"active": dict(active) if active else None,
                     "queue": [dict(j) for j in state["jobs"] if j["status"] == "queued"],
-                    "paused": state["paused"], "last_job": dict(done[-1]) if done else None}
+                    "paused": state["paused"], "last_job": dict(done[-1]) if done else None,
+                    "resumable_job": dict(job) if not active and (job := self._resumable(state)) else None}
+
+    @staticmethod
+    def _resumable(state: dict[str, Any]) -> dict[str, Any] | None:
+        finished = [j for j in state["jobs"] if j["status"] in {"completed", "failed", "stopped"}
+                    or j["status"] == "cancelled" and j.get("resume_of")]
+        if not finished:
+            return None
+        job = max(enumerate(finished), key=lambda item: (item[1].get("finished_at") or "", item[0]))[1]
+        if job["status"] in {"failed", "stopped", "cancelled"} and job["kind"] in {"message", "compact"} and not job.get("resumed_by"):
+            return job
+        return None
 
     def enqueue(self, ws: Workspace, *, message: str = "", mode: str = "queue", kind: str = "message",
-                attachments: list[str] | None = None, skip_index: bool = True,
-                context: dict[str, list[str]] | None = None, main_config: dict[str, Any] | None = None) -> dict[str, Any]:
+                attachments: list[str] | None = None, attachment_refs: list[dict[str, Any]] | None = None,
+                skip_index: bool = True,
+                context: dict[str, list[str]] | None = None, main_config: dict[str, Any] | None = None,
+                idempotency_key: str | None = None) -> dict[str, Any]:
         from vwb.workspace.references import validate
         context = validate(context, ws)
+        from vwb.workspace.attachments import validate_refs
+        attachment_refs = validate_refs(ws, attachment_refs)
         if mode not in {"queue", "now"} or kind not in {"message", "compact"}:
             raise ValueError("Unknown message mode or operation.")
-        if kind == "message" and (not isinstance(message, str) or not message.strip()):
+        if kind == "message" and (not isinstance(message, str) or (not message.strip() and not attachment_refs and not attachments)):
             raise ValueError("Write a message first.")
         if len(message) > 100_000:
             raise ValueError("The message is too long (maximum 100,000 characters).")
+        if idempotency_key is not None and (not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 240):
+            raise ValueError("Invalid submission key.")
+        from vwb.util.hashing import sha256_text
+        from vwb.util.jsonio import canonical_json
+        signature = sha256_text(canonical_json({"message": message.strip(), "mode": mode, "kind": kind,
+                                                "attachments": attachments or [], "attachment_refs": attachment_refs, "skip_index": skip_index,
+                                                "context": context}))
         with self.lock:
             if self.closed.is_set():
                 raise QueueConflict("The UI server is shutting down.")
             state = self._state(ws)
+            if idempotency_key is not None:
+                previous = next((j for j in state["jobs"] if j.get("idempotency_key") == idempotency_key), None)
+                if previous:
+                    if previous.get("submission_digest") != signature:
+                        raise QueueConflict("This submission key already belongs to a different message.")
+                    return dict(previous)
             if mode == "now" and ws.id not in self.processes and self._external_turn(ws):
                 raise QueueConflict("This turn was started outside the UI. Stop it in its terminal, or queue your message.")
             job = {"id": uuid.uuid4().hex, "kind": kind, "message": message.strip(), "status": "queued",
-                   "created_at": now_iso(), "attachments": attachments or [], "skip_index": skip_index,
+                   "created_at": now_iso(), "attachments": attachments or [], "attachment_refs": attachment_refs, "skip_index": skip_index,
                    "context": context,
                    "can_stop": True}
-            if main_config is not None:
+            if idempotency_key is not None:
+                job.update(idempotency_key=idempotency_key, submission_digest=signature)
+            if kind == "message":
+                from vwb.config import slot
+                from vwb.prompts import with_snapshot
+                job["main_config"] = with_snapshot(main_config if main_config is not None else slot("main"), ws, self.runs_dir)
+            elif main_config is not None:
                 from copy import deepcopy
                 job["main_config"] = deepcopy(main_config)
             if mode == "now":
@@ -150,9 +199,49 @@ class TurnQueue:
             self._save(ws)
             return self.snapshot(ws)
 
-    def resume(self, ws: Workspace) -> dict[str, Any]:
+    def resume(self, ws: Workspace, *, job_id: str | None = None,
+               main_config: dict[str, Any] | None = None,
+               prompt: dict[str, str] | None = None) -> dict[str, Any]:
         with self.lock:
-            self._state(ws)["paused"] = False
+            if self.closed.is_set():
+                raise QueueConflict("The UI server is shutting down.")
+            if (main_config is not None or prompt is not None) and job_id is None:
+                raise ValueError("Choose an interrupted turn before changing its continuation model.")
+            state = self._state(ws)
+            if job_id is not None:
+                if not isinstance(job_id, str) or not re.fullmatch(r"[a-f0-9]{32}", job_id):
+                    raise ValueError("Choose a valid interrupted turn to resume.")
+                source = next((j for j in state["jobs"] if j["id"] == job_id), None)
+                if source and source.get("resumed_by"):
+                    # A retried click must not enqueue again or unpause a subsequently stopped queue.
+                    return self.snapshot(ws)
+                if (ws.id in self.processes or self._external_turn(ws)
+                        or any(j["status"] in {"running", "stopping"} for j in state["jobs"])):
+                    raise QueueConflict("Wait for the active turn to finish before resuming an interrupted turn.")
+                if source is None or source is not self._resumable(state):
+                    raise QueueConflict("That turn can no longer be resumed. Refresh the conversation.")
+                from copy import deepcopy
+                job = {"id": uuid.uuid4().hex, "kind": source["kind"],
+                       "message": RESUME_MESSAGE if source["kind"] == "message" else "",
+                       "status": "queued", "created_at": now_iso(), "can_stop": True,
+                       "resume_of": source["id"], "skip_index": source.get("skip_index", True),
+                       "attachments": deepcopy(source.get("attachments", [])),
+                       "attachment_refs": deepcopy(source.get("attachment_refs", [])),
+                       "context": deepcopy(source.get("context", {}))}
+                if source["kind"] == "message":
+                    job["resume_message"] = source.get("resume_message", source.get("message", ""))
+                if main_config is not None:
+                    job["main_config"] = deepcopy(main_config)
+                elif "main_config" in source:
+                    job["main_config"] = deepcopy(source["main_config"])
+                if prompt is not None:
+                    from vwb.config import slot
+                    from vwb.prompts import validate_snapshot
+                    job.setdefault("main_config", slot("main"))["prompt"] = validate_snapshot(prompt)
+                insert = next((i for i, j in enumerate(state["jobs"]) if j["status"] == "queued"), len(state["jobs"]))
+                state["jobs"].insert(insert, job)
+                source["resumed_by"] = job["id"]
+            state["paused"] = False
             self._save(ws)
             return self.snapshot(ws)
 
@@ -222,9 +311,13 @@ class TurnQueue:
                     stopped = rid in self.stopping
                     if stopped or proc.returncode != 0:
                         self._cleanup_containers(job["id"])
-                    job.update(status="stopped" if stopped else ("completed" if proc.returncode == 0 else "failed"),
+                    status = "completed" if result.get("status") == "completed" else (
+                        "stopped" if stopped else ("completed" if proc.returncode == 0 else "failed"))
+                    job.update(status=status,
                                finished_at=now_iso())
-                    if result.get("error"):
+                    if status == "completed":
+                        job.pop("error", None)
+                    elif result.get("error"):
                         job["error"] = result["error"]
                     elif job["status"] == "failed":
                         job["error"] = "The turn exited unexpectedly. Send a message to resume the conversation."

@@ -36,7 +36,8 @@ def platform_key() -> str:
 
 
 def runtime_dir() -> Path:
-    return Path(__file__).resolve().parents[3] / "runs" / ".browser-runtime"
+    from vwb.config import RUNS_DIR
+    return RUNS_DIR / ".browser-runtime"
 
 
 def digest(path: Path) -> str:

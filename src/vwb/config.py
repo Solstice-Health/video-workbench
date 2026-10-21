@@ -17,11 +17,21 @@ import yaml
 from dotenv import dotenv_values
 from filelock import FileLock
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-CONFIG_DIR = REPO_ROOT / "config"
-RECIPES_DIR = REPO_ROOT / "recipes"
-PROMPTS_DIR = Path(__file__).resolve().parent / "agents" / "prompts"
-GENERATORS_DIR = REPO_ROOT / "generators"
+PACKAGE_DIR = Path(__file__).resolve().parent
+_SOURCE_ROOT = PACKAGE_DIR.parents[1]
+SOURCE_CHECKOUT = ((_SOURCE_ROOT / "pyproject.toml").is_file()
+                   and (_SOURCE_ROOT / "config" / "slots.yaml").is_file()
+                   and (_SOURCE_ROOT / "src" / "vwb" / "config.py").resolve() == Path(__file__).resolve())
+# Editable checkouts keep their existing paths. Installed wheels carry immutable
+# resources beside the package, while state and .env discovery belong to the
+# directory the user launched from, never a Python installation's lib/ directory.
+REPO_ROOT = _SOURCE_ROOT if SOURCE_CHECKOUT else Path.cwd().resolve()
+RESOURCE_ROOT = _SOURCE_ROOT if SOURCE_CHECKOUT else PACKAGE_DIR / "_resources"
+CONFIG_DIR = RESOURCE_ROOT / "config"
+RECIPES_DIR = RESOURCE_ROOT / "recipes"
+DOCS_DIR = RESOURCE_ROOT / "docs"
+PROMPTS_DIR = PACKAGE_DIR / "agents" / "prompts"
+GENERATORS_DIR = RESOURCE_ROOT / "generators"
 RUNS_DIR = Path(os.environ.get("VWB_RUNS_DIR", REPO_ROOT / "runs"))
 
 _SECRET_KEYS = ("OPENAI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "EXA_API_KEY", "OPENROUTER_API_KEY")
@@ -94,7 +104,7 @@ def update_provider(provider: str, body: dict[str, Any]) -> list[dict[str, Any]]
 
 
 def find_env_file() -> Path | None:
-    """VWB_ENV_FILE wins; otherwise the nearest .env walking up from the repo root."""
+    """VWB_ENV_FILE wins; otherwise walk up from the checkout or launch directory."""
     explicit = os.environ.get("VWB_ENV_FILE")
     if explicit:
         return Path(explicit)

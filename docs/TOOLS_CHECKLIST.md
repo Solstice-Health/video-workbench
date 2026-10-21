@@ -13,7 +13,7 @@ Spec references: D = decision, X = experiment, R/S = sources (see the spec and t
 - [x] Codex worker host in Docker: one container per task, work/ mounted, model through the key-holding proxy, toolkit over MCP/HTTP (user decision 2026-10-09)
 - [x] Toolkit over MCP, stdio (`vwb mcp serve`) and streamable HTTP with bearer tokens (control-plane ToolServer)
 - [x] Swarm with a hash-chained plaintext mailbox; background dispatch and wait (`swarm_dispatch`, `swarm_wait`) (D07)
-- [x] Roles with tool allowlists: job_lead, scene_miner, planner_b, composer, critic (config/policy.yaml)
+- [x] Roles with tool allowlists and inherited permission intersections: job_lead, worker, scene_miner, planner_b, composer, critic (config/policy.yaml)
 - [x] Loop guards: notice after 25 calls with no new artifact; budget notice at 150 calls (spec "Leases, caps and loop guards")
 - [x] Result bounds at the gateway: images at most 1568 px and 600 KB, at most 8 per result; text over 60k characters saved to `work/.results/` and paged with `file_read`
 - [x] Swarm shutdown at the end of a turn: running workers are cancelled between model turns and their containers removed
@@ -21,9 +21,18 @@ Spec references: D = decision, X = experiment, R/S = sources (see the spec and t
 - [x] LIGHT wake: every chat message resumes the main agent's own thread (Codex `exec resume`, Agent SDK `resume`) with only the new message and `[harness]` notes (B31); verified 2026-10-12: 7 messages on one Codex thread recalled from history alone; the Agent SDK thread resumed live too
 - [x] A resumed thread is told what changed in the harness since its last turn: new, changed and removed tools, references to read again, updated instructions (B35)
 - [x] Delegation is the main agent's choice: no prompt or recipe requires workers; the prompt says when each role is worth it (B31). Exercised 2026-10-12: a 3 x 30 s remake ran as one 64-minute main-agent turn with no workers (235 tool calls, 3 repair rounds, request r-20261012-102618)
-- [~] swarmctl: cancel at turn end is built (stop event, container kill), and Ctrl-C interrupts the main agent's turn in `vwb chat -i`; steering or interrupting single workers and `/steer` from chat are not
-- [ ] Caps on spawning (depth 3, 24 siblings, 48 agents) and RUN-DEGRADED restart after 150 calls / 150k context
-- [ ] Peer messaging between workers (`bus.peer`) and job-lead digests
+- [x] Supervised agent trees: agent_spawn, agent_list, agent_send, agent_inbox, agent_wait, agent_interrupt, agent_followup; parent/child and peer messaging, saved worker conversations, targeted subtree interruption and activity monitoring. Native Codex interruption stops its container; API calls cancel at boundaries.
+- [x] Spawn bounds: depth 3, 6 children per parent, 24 agents total and 6 active by default. At capacity spawning refuses promptly; parents waiting on descendants cannot deadlock a fixed worker pool.
+- [x] Peer messages and child results arrive at tool/model boundaries; durable mailbox and public activity events. They convey no additional permissions.
+- [ ] Automatic RUN-DEGRADED worker restart after 150 calls / 150k context (call-budget notices exist)
+- [x] image_inspect: bounded workspace/asset image crops and zoom with exact display-to-source coordinate mappings
+- [x] sandbox_run: temporary/reusable scripts for any provider, Docker execution, shared work/ only, offline default or separately governed public HTTP(S) proxy; 30-minute deadline, resource/output bounds, background jobs and cancellation; no host execution fallback
+- [x] sandbox_environment: persistent request-local Python venvs, pip/package or Git HTTPS installs, freeze receipts; loose pip --target installs also supported
+- [x] sandbox_status: cross-turn job polling/cancellation and paged logs; four concurrent jobs/request, no automatic replay after supervisor loss
+- [x] pdf_info, pdf_read, pdf_search, pdf_render: metadata/bookmarks, bounded text/search, page/crop/zoom images with coordinate mapping, pinned attachment originals and optional local OCR; no semantic table extractor
+- [x] attachment_list, attachment_read, attachment_remember: arbitrary durable chat files, pinned original inspection, saved observations and image/reference replay strategy
+- [x] artifact_publish, artifact_list, artifact_feedback: versioned arbitrary HTML review tabs, explicit local assets, item/region/time selections and user-submitted chat feedback
+- [x] human_ask mode=blocking|non_blocking and human_wait: cancellable waits; waiting-agent replies resume the existing tool without a duplicate chat turn; stale leases expire and unanswered blocking tickets remain open
 - [ ] HostAdapter trials for other worker hosts (Gemini CLI, OpenCode, Google ADK, vk-worker) (X01)
 - [ ] microVM per request for host-side agents (today: tool-restricted hosts + Docker for Codex) (D02)
 
@@ -57,6 +66,8 @@ Spec references: D = decision, X = experiment, R/S = sources (see the spec and t
 - [x] Shared browser toolkit: `browser_open`, `browser_observe`, `browser_act`, `browser_files`, `browser_dialog`, `browser_close`; native agent-browser 0.39.1, isolated profiles, headed default or headless, policy/role gates and per-call ledger. Full snapshots plus viewport images; stale observation rejection, explicit human ownership, interrupted-operation fencing and no automatic action replay. Real headed/headless acceptance covers forms, canvas coordinates, stable tabs, iframe references, native prompts, uploads/downloads and cleanup; real Astra/Codex turn completed form + screenshot-based canvas click in five browser calls (2026-10-14). See `docs/BROWSER.md` and `scripts/browser_smoke.py`.
 - [~] Remote browser: host-configured CDP transport is implemented; hosted session provisioning, provider authentication/profile management, remote file-transfer adapters and billing shutdown have not been implemented or tested. Local client shutdown disconnects rather than destroys the remote browser.
 - [x] `vwb chat`: new request from a message (media paths found in the message) or a follow-up turn (D24 v0 desk)
+- [x] Any-file chat attachments: picker, local drop and clipboard images, attachment-only messages, queued/saved previews, immutable original downloads and workspace canvas links. Up to 12 files/message and 4 GiB/file; unsupported binaries retained for sandbox parsing.
+- [x] Uploaded-image adapters: lazy bounded pixels for Codex, Claude SDK, Responses, Anthropic and OpenRouter; durable reference-only provider histories, model-capability fallback, saved summaries and original retention across compaction. API payload/recovery tests use mocked responses. Real native Codex CLI sent and retained exact image pixels across two completed turns against a local Responses fixture, with the earlier image absent from the resumed container; no paid calls. Claude SDK input contract checked locally.
 - [x] `vwb chat -i`: one conversation over many messages in the terminal; Ctrl-C stops the running turn and keeps the conversation open; one turn at a time per request (turn lock refuses a second message) (B31); exercised 2026-10-12
 - [x] `job_spec`: the job lead records what it understood plus every assumed default (ASSUMED-DEFAULT)
 - [x] Human events from the CLI: `vwb answer`, `vwb ack`, `vwb waive` (BLOCK needs a senior pair), `vwb accept`
@@ -70,7 +81,7 @@ Spec references: D = decision, X = experiment, R/S = sources (see the spec and t
 
 ## E. Asking a person (human.ask)
 - [x] `human_ask`: typed question, 2-4 options, recommended option, kind, lane, scope, deadline (D43)
-- [x] Broker: memory-first answers by key and lane, merging of duplicates, ASK-PENDING, timeout to the recommended option (ASSUMED-DEFAULT), grants and sources never defaulted
+- [x] Broker: memory-first answers by key and lane, merging of duplicates, ASK-PENDING; only non-blocking reversible choices timeout to the recommended option (ASSUMED-DEFAULT). Blocking questions, grants and sources never default.
 - [x] `human_answers`; answers become signed human events and brand memory
 - [ ] Card budget (three top cards) ranked by severity and requests unblocked; campaign-level merging
 - [ ] Sealed lane for the judge; brief-lane amendments read by both harnesses
@@ -225,8 +236,14 @@ Spec references: D = decision, X = experiment, R/S = sources (see the spec and t
 - [ ] Known gaps: retrieval of accepted work, learned ranker, learned critic (D34)
 
 ## Integrations
+- [x] Direct MCP connection manager: multiple public, bearer-token or browser OAuth Streamable HTTP servers; persistent host-only credentials, automatic discovery and per-server tool selection, independent of Solstice.
+- [x] `integration_execute`: explicitly enabled direct MCP tools that may change remote state, gated separately by `integration.execute`; read-only dispatch stays under `integration_call` / `integration.read`.
 - [x] `integration_status`, `integration_tools`, `integration_call`: host-owned Solstice OAuth, bounded live catalog and schema-validated read tools through Registry (`integration.read`); persistent locked refresh-token rotation; embedded preview/document imports with provenance.
-- [ ] Production Workbench Auth0 registration and deployed Solstice Figma extension. Figma is unavailable until the gateway exposes it; no direct Figma connection or shared-user token fallback. See `docs/INTEGRATIONS.md`.
+- [x] Figma direct: independent host-owned OAuth/PKCE and persistent refresh, typed file/node reads and rendered preview imports through the existing `integration.read` Registry tools. Separate plugin and canvas import folder; no Solstice deployment required.
+- [x] Source video optional: chat/CLI intake accepts a brief or design reference; `canvas_new(duration_s=...)` creates an authored output timeline with silent audio. Imported raster references get reusable registry asset refs. Preview, render and review work without a video index or fake source.
+- [x] Official Figma desktop MCP: separate plugin, explicit connection to the fixed local Figma endpoint, live schema discovery and approved read-tool dispatch through `integration.read`; bounded screenshot/local asset imports with reusable image refs. Uses the Figma desktop session without copying credentials.
+- [ ] Hosted official Figma MCP: requires Workbench's own client approval from Figma; REST app credentials do not satisfy this requirement.
+- [ ] Production Workbench Auth0 registration and deployed Solstice Figma extension. The Figma via Solstice plugin is unavailable until the gateway exposes it. The separate Figma direct plugin requires its own Figma app registration and user consent. See `docs/INTEGRATIONS.md`.
 
 ## P. Bulk engine
 - [ ] Temporal durable jobs; campaigns of ~100 requests; waves; resolve board; triage ordering; bulk accept with unlock rules

@@ -225,7 +225,10 @@ class ToolServer:
         from mcp.server.transport_security import TransportSecuritySettings
 
         self.port = free_port()
-        tools = registry.for_role(role)
+        if ctx.swarm is not None and hasattr(ctx.swarm, "prepare_context"):
+            ctx.swarm.prepare_context(ctx)
+        allowed = ctx.state.get("allowed_tools")
+        tools = [t for t in registry.for_role(role) if allowed is None or t.name in allowed]
 
         async def on_list_tools(_ctx, _params) -> types.ListToolsResult:
             return types.ListToolsResult(tools=[types.Tool(name=t.name, description=t.description, input_schema=t.schema)

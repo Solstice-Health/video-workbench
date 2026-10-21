@@ -33,8 +33,15 @@ def ctx(tmp_path):
 
 def cfg(provider="anthropic", **extra):
     return {"provider": provider, "model": "test-model", "host": f"{provider}_api", "effort": "max",
+            "image_input_supported": True,
             "context_window": 300000, "native_context_window": 1000000, "max_output_tokens": 16384,
             "max_turns": 4, "service_tier": "default", "speed": "standard", **extra}
+
+
+def test_post_refuses_anthropic_router_route_before_loading_any_key(monkeypatch):
+    monkeypatch.setattr(loop, "secrets", lambda: pytest.fail("No key should be loaded for a forbidden route"))
+    with pytest.raises(loop.ProviderError, match="direct Anthropic route"):
+        loop._post("openrouter", {"model": "anthropic/claude-opus-5.5"})
 
 
 def anthropic(blocks=None, reason="end_turn", **extra):
@@ -213,6 +220,63 @@ def test_image_budget_depends_on_dimensions_and_text_still_enforces_context(ctx,
         loop.run(ctx, registry(), cfg(), "System", "Long text " * 40000, turn_id="1")
 
 
+@pytest.mark.parametrize("provider", ["anthropic", "openrouter"])
+def test_text_only_model_omits_new_tool_pixels_before_persistence(ctx, monkeypatch, provider):
+    encoded = io.BytesIO()
+    Image.new("RGB", (10, 10), "red").save(encoded, "PNG")
+    tool = {"type": "tool_use", "id": "t1", "name": "file_read", "input": {}}
+    or_tool = {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "t1", "type": "function", "function": {"name": "file_read", "arguments": "{}"}}]}
+    responses = ([anthropic([tool], "tool_use"), anthropic()] if provider == "anthropic"
+                 else [openrouter(or_tool, "tool_calls"), openrouter()])
+    calls = []
+    fake_calls(monkeypatch, responses, calls)
+    reg = registry(lambda *_: ToolResult(text="Source: source.pdf page 2", images=[encoded.getvalue()]))
+    loop.run(ctx, reg, cfg(provider, image_input_supported=False), "System", "Inspect", turn_id="1")
+    saved = loop.history_path(ctx, provider, "test-model").read_text()
+    assert "base64" not in json.dumps(calls) and "base64" not in saved
+    assert "no verified image-input support" in saved and "source.pdf page 2" in saved
+
+
+def test_text_only_replay_omits_historical_pixels_but_preserves_native_assistant_data(ctx, monkeypatch):
+    native_image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,NOT_DECODED"}}
+    signed = {"role": "assistant", "content": None, "reasoning_details": [
+        {"type": "reasoning.encrypted", "data": "SIGNED_OPAQUE", "id": "r1"}], "tool_calls": [
+        {"id": "t1", "type": "function", "function": {"name": "file_read", "arguments": json.dumps(native_image)}}]}
+    initial = [signed, {"role": "tool", "tool_call_id": "t1", "content": "Page reference: source.pdf"},
+               {"role": "user", "content": [{"type": "text", "text": "Earlier tool image"}, native_image]}]
+    before = copy.deepcopy(initial)
+    calls = []
+    fake_calls(monkeypatch, [openrouter()], calls)
+    # Unknown custom config lacks the new flag, as old queued jobs can.
+    settings = cfg("openrouter")
+    settings.pop("image_input_supported")
+    settings["selection"] = {"model_id": "custom_openrouter"}
+    loop.run(ctx, registry(), settings, "System", "Continue", turn_id="2", initial_messages=initial)
+    outgoing = calls[0]["messages"]
+    assert outgoing[1] == signed
+    assert outgoing[3]["content"][1]["type"] == "text"
+    assert "no verified image-input support" in outgoing[3]["content"][1]["text"]
+    assert initial == before
+    saved = read_json(loop.history_path(ctx, "openrouter", "test-model"))
+    assert saved["messages"][:3] == initial
+
+
+def test_historical_anthropic_tool_result_filter_only_touches_content_blocks():
+    image = {"type": "image", "source": {"type": "base64", "data": "UNCHANGED_IN_HISTORY"}}
+    signed = {"role": "assistant", "content": [{"type": "thinking", "thinking": "Thought", "signature": "SIGNATURE"},
+                                                {"type": "tool_use", "id": "t1", "input": image}]}
+    user = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "is_error": False,
+                                         "content": [{"type": "text", "text": "a.pdf page 1"}, image]}]}
+    original = copy.deepcopy([signed, user])
+    wire = loop._without_images(original)
+    assert wire[0] == signed and original == [signed, user]
+    result = wire[1]["content"][0]
+    assert result["tool_use_id"] == "t1" and not result["is_error"]
+    assert result["content"][0]["text"] == "a.pdf page 1"
+    assert result["content"][1]["type"] == "text"
+
+
 def test_role_allowlist_remains_authoritative_for_provider_calls(ctx, monkeypatch):
     ctx.role = "critic"
     executed = []
@@ -269,6 +333,39 @@ def test_openrouter_stream_reassembles_arguments_and_reasoning_details():
     assert message["reasoning_details"][0]["data"] == "ABCDEF" and not thoughts
 
 
+@pytest.mark.parametrize("fragments,expected", [
+    ([""], {}), ([], {}), (["", "{", "}"], {}),
+    (["", '{"path":', '"notes.md"}'], {"path": "notes.md"}),
+])
+def test_anthropic_tool_stream_accepts_empty_deltas_and_complete_json(fragments, expected):
+    stream = feed(loop._Stream("anthropic"), [
+        {"type": "message_start", "message": {"id": "m1", "usage": {}}},
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "tool_use", "id": "t1", "name": "memory_read", "input": {}}},
+        *[{"type": "content_block_delta", "index": 0,
+           "delta": {"type": "input_json_delta", "partial_json": fragment}} for fragment in fragments],
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+        {"type": "message_stop"},
+    ])
+    _, calls, _, _ = loop._parse_anthropic(stream.finish())
+    assert calls[0]["arguments"] == expected
+
+
+def test_anthropic_tool_stream_still_refuses_truncated_nonempty_json():
+    with pytest.raises(loop.ProviderError, match="incomplete tool arguments"):
+        feed(loop._Stream("anthropic"), [
+            {"type": "message_start", "message": {"id": "m1", "usage": {}}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "tool_use", "id": "t1", "name": "file_write", "input": {}}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "input_json_delta", "partial_json": '{"path":'}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+            {"type": "message_stop"},
+        ]).finish()
+
+
 @pytest.mark.parametrize("provider", ["anthropic", "openrouter"])
 def test_stream_without_terminal_event_is_error(provider):
     with pytest.raises(loop.ProviderError, match="before completion"):
@@ -315,6 +412,8 @@ def test_http_wrapper_uses_fixed_endpoint_fast_beta_and_redacts_metadata(monkeyp
     monkeypatch.setattr(loop.httpx, "Client", Client)
     data = loop._post("anthropic", {"speed": "fast"})
     assert captured[0][0] == ("POST", "https://api.anthropic.com/v1/messages")
+    assert captured[0][1]["headers"]["x-api-key"] == "secret-value"
+    assert "authorization" not in captured[0][1]["headers"]
     assert captured[0][1]["headers"]["anthropic-beta"] == "fast-mode-2026-02-01"
     assert data["id"] == "[redacted]"
 
@@ -346,7 +445,10 @@ def test_job_lead_receives_explicit_config_override(ctx, monkeypatch):
         return "Done."
     monkeypatch.setattr(job_lead, "_lead", lead)
     job_lead.run(ctx.ws, "Hello", False, cfg=selected)
-    assert seen == [selected]
+    assert len(seen) == 1
+    assert {key: seen[0][key] for key in selected} == selected
+    assert seen[0]["prompt"]["id"] == "descriptive"
+    assert seen[0]["prompt"]["content"] and seen[0]["prompt"]["sha256"]
 
 
 def test_api_model_switch_receives_full_chat_and_missed_turns(ctx, monkeypatch):
@@ -370,3 +472,231 @@ def test_api_model_switch_receives_full_chat_and_missed_turns(ctx, monkeypatch):
     session["threads"][session["key"]]["replies"] = 0
     job_lead._run_host(ctx.ws, registry(), None, "Latest", False, cfg(), ctx.ledger, session, [])
     assert "Reply" * 1000 in seen[-1][0][4]
+
+
+@pytest.mark.parametrize("saved", [
+    {"provider": "openrouter", "host": "openrouter_api", "model": "anthropic/claude-opus-5.5"},
+    {"provider": "openai", "host": "claude_sdk", "model": "claude-fable-5-1"},
+])
+def test_saved_anthropic_host_routes_direct_with_public_history(ctx, monkeypatch, saved):
+    req = ctx.ws.load()
+    req.chat = [ChatTurn(role="human", text="Earlier request"), ChatTurn(role="job_lead", text="Earlier reply"),
+                ChatTurn(role="human", text="Continue")]
+    ctx.ws.save(req)
+    seen = []
+    def provider(*args, **kwargs):
+        seen.append((args[2], kwargs["initial_messages"]))
+        return "Done"
+    monkeypatch.setattr(loop, "run", provider)
+    session = {}
+    job_lead._run_host(ctx.ws, registry(), None, "Continue", False, cfg(**saved), ctx.ledger, session, [])
+    routed, history = seen[0]
+    assert routed["provider"] == "anthropic" and routed["host"] == "anthropic_api"
+    assert not routed["model"].startswith("anthropic/")
+    assert history[0]["content"] == "Earlier request" and history[1]["content"] == "Earlier reply"
+    assert session["key"].startswith("anthropic_api:claude-")
+
+
+def test_output_retry_preserves_history_and_never_dispatches_truncated_tools(ctx, monkeypatch):
+    executed, calls, records = [], [], []
+    selected = cfg(model="claude-opus-5-5", context_window=1000000)
+    truncated = anthropic([
+        {"type": "text", "text": "Incomplete draft"},
+        {"type": "tool_use", "id": "unsafe", "name": "file_read", "input": {}},
+    ], "max_tokens", usage={"input_tokens": 100, "output_tokens": 16384})
+    complete = anthropic([{"type": "tool_use", "id": "safe", "name": "file_read", "input": {}}], "tool_use")
+    fake_calls(monkeypatch, [truncated, complete, anthropic()], calls)
+    monkeypatch.setattr(ctx.gateway, "record", lambda **row: records.append(row))
+    reg = registry(lambda *_: (executed.append(True), ToolResult(text="Read once"))[1])
+    assert loop.run(ctx, reg, selected, "System", "Continue", turn_id="retry") == "Done."
+    assert [body["max_tokens"] for body in calls] == [16384, 128000, 128000]
+    assert selected["max_output_tokens"] == 16384  # captured queue configuration is immutable
+    assert calls[0]["messages"] == calls[1]["messages"]
+    assert executed == [True] and [row["ok"] for row in records] == [False, True, True]
+    saved = read_json(loop.history_path(ctx, "anthropic", selected["model"]))
+    assert "unsafe" not in json.dumps(saved["messages"])
+    receipt = read_json(ctx.ws.memory / saved["last_truncation"]["path"])
+    assert receipt["response"] == truncated and receipt["max_tokens"] == 16384
+    assert read_json(ctx.ws.memory / "provider_context.json")["max_output_tokens"] == 128000
+
+
+def test_output_limit_at_verified_ceiling_stops_without_replaying_tools(ctx, monkeypatch):
+    calls, executed, records = [], [], []
+    selected = cfg(model="claude-opus-5-5", context_window=1000000, max_output_tokens=128000)
+    fake_calls(monkeypatch, [anthropic([
+        {"type": "tool_use", "id": "never", "name": "file_read", "input": {}},
+    ], "max_tokens", usage={"input_tokens": 240000, "output_tokens": 128000})], calls)
+    monkeypatch.setattr(ctx.gateway, "record", lambda **row: records.append(row))
+    with pytest.raises(loop.ProviderError, match="128,000-token output allowance.*including thinking"):
+        loop.run(ctx, registry(lambda *_: executed.append(True)), selected, "System", "Continue", turn_id="1")
+    assert len(calls) == len(records) == 1 and not executed
+    saved = read_json(loop.history_path(ctx, "anthropic", selected["model"]))
+    assert saved["messages"] == [{"role": "user", "content": "Continue"}]
+    assert (ctx.ws.memory / saved["last_truncation"]["path"]).is_file()
+    context = read_json(ctx.ws.memory / "provider_context.json")
+    assert context["used_tokens"] == 368000 and context["last_stop_reason"] == "max_tokens"
+    assert context["auto_compaction_enabled"] and context["auto_compact_tokens"] == 850000
+
+
+def test_uncertain_provider_failure_is_not_retried(ctx, monkeypatch):
+    calls = []
+    def fail(*_):
+        calls.append(True)
+        raise loop.ProviderError("Stream ended before completion")
+    monkeypatch.setattr(loop, "_post", fail)
+    with pytest.raises(loop.ProviderError, match="before completion"):
+        loop.run(ctx, registry(), cfg(model="claude-opus-5-5"), "System", "Continue", turn_id="1")
+    assert calls == [True]
+
+
+def test_max_tokens_stream_retains_partial_json_only_for_private_recovery():
+    stream = feed(loop._Stream("anthropic"), [
+        {"type": "message_start", "message": {"id": "m1", "usage": {}}},
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "tool_use", "id": "t1", "name": "file_write", "input": {}}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "input_json_delta", "partial_json": '{"path":'}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "max_tokens"}},
+        {"type": "message_stop"},
+    ])
+    data = stream.finish()
+    assert data["incomplete_tool_inputs"] == [{"index": 0, "partial_json": '{"path":'}]
+    with pytest.raises(loop.ProviderError, match="max_tokens"):
+        loop._parse_anthropic(data)
+
+
+def test_native_compaction_stream_preserves_summary_without_public_leak():
+    activity = []
+    stream = feed(loop._Stream("anthropic", lambda *args: activity.append(args)), [
+        {"type": "message_start", "message": {"id": "m1", "usage": {"input_tokens": 100}}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "compaction", "content": ""}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "compaction_delta", "content": "PRIVATE_SUMMARY: work/asset.png"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "text_delta", "text": "Done."}},
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 10}},
+        {"type": "message_stop"},
+    ])
+    assistant, calls, answer, thought = loop._parse_anthropic(stream.finish())
+    assert assistant["content"][0] == {"type": "compaction", "content": "PRIVATE_SUMMARY: work/asset.png"}
+    assert not calls and answer == "Done." and not thought
+    assert "PRIVATE_SUMMARY" not in json.dumps(activity)
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openrouter"])
+def test_stream_activity_is_rate_bounded_changed_only_and_flushes_final_text(monkeypatch, provider):
+    now = [0.0]
+    monkeypatch.setattr(loop.time, "monotonic", lambda: now[0])
+    activity = []
+    stream = loop._Stream(provider, lambda *args: activity.append(args))
+    if provider == "anthropic":
+        feed(stream, [{"type": "message_start", "message": {"id": "m1", "usage": {}}},
+                      {"type": "content_block_start", "index": 0,
+                       "content_block": {"type": "thinking", "thinking": "", "signature": ""}}])
+    for index in range(1000):
+        now[0] = index * .01
+        delta = ({"type": "content_block_delta", "index": 0,
+                  "delta": {"type": "thinking_delta", "thinking": "thought "}}
+                 if provider == "anthropic" else
+                 {"choices": [{"index": 0, "delta": {"reasoning": "thought "}}]})
+        stream.feed(json.dumps(delta))
+    before_noise = len(activity)
+    for _ in range(200):
+        stream.feed(json.dumps({"type": "ping"} if provider == "anthropic" else {"choices": []}))
+    assert len(activity) == before_noise  # unchanged snapshots never repeat
+    if provider == "anthropic":
+        feed(stream, [{"type": "content_block_stop", "index": 0},
+                      {"type": "message_delta", "delta": {"stop_reason": "max_tokens"}},
+                      {"type": "message_stop"}])
+    else:
+        stream.feed("[DONE]")
+    assert activity[-1] == ("thinking", "thought " * 1000)
+    assert len(activity) <= 22  # around two snapshots/second, independent of chunk rate
+    emitted_bytes = sum(len(value.encode()) for _, value in activity)
+    unthrottled_bytes = sum(len("thought ") * n for n in range(1, 1001))
+    assert emitted_bytes < unthrottled_bytes / 20
+
+
+@pytest.mark.parametrize("summary", [None, "", "  ", "Retain work/asset.png and next steps"])
+def test_compaction_prunes_only_outbound_view_with_valid_summary(ctx, monkeypatch, summary):
+    calls = []
+    selected = cfg(model="claude-opus-5-5", context_window=1000000, max_output_tokens=128000)
+    native = {"type": "compaction", "content": summary}
+    tool = {"type": "tool_use", "id": "t1", "name": "file_read", "input": {}}
+    fake_calls(monkeypatch, [anthropic([native, tool], "tool_use"), anthropic()], calls)
+    loop.run(ctx, registry(), selected, "System", "Original request", turn_id="1")
+    saved = read_json(loop.history_path(ctx, "anthropic", selected["model"]))
+    assert saved["messages"][0]["content"] == "Original request"
+    assert saved["messages"][1]["content"][0] == native  # no added keys
+    valid = isinstance(summary, str) and bool(summary.strip())
+    assert (calls[1]["messages"][0]["role"] == "assistant") == valid
+    assert saved.get("compaction_count", 0) == int(valid)
+    assert "Retain work" not in json.dumps(events.read_events(ctx.ws))
+
+
+def test_compaction_threshold_headers_counting_and_budget(monkeypatch):
+    selected = cfg(model="claude-opus-5-5", context_window=1000000, max_output_tokens=128000)
+    body = loop._request("anthropic", selected, "System", [{"role": "user", "content": "Hello"}], [])
+    edit = body["context_management"]["edits"][0]
+    assert edit["type"] == "compact_20260112" and edit["trigger"]["value"] == 850000
+    assert "Do not call any tools" in edit["instructions"]
+    monkeypatch.setattr(loop, "secrets", lambda: SimpleNamespace(require=lambda _: "secret-value"))
+    headers = loop._anthropic_headers({**body, "speed": "fast"})
+    assert headers["anthropic-beta"] == "fast-mode-2026-02-01,compact-2026-01-12"
+    monkeypatch.setattr(loop, "estimate_tokens", lambda *_args, **_kwargs: 2000000)
+    for actual in (240000, 900000):
+        monkeypatch.setattr(loop, "_count_anthropic_tokens", lambda _, count=actual: count)
+        assert loop._check_context(body, selected) == actual
+    monkeypatch.setattr(loop, "_count_anthropic_tokens", lambda _: 1000001)
+    with pytest.raises(loop.ProviderError, match="No model call was sent"):
+        loop._check_context(body, selected)
+
+
+def test_compaction_billing_sums_iterations_but_context_uses_final_message():
+    usage = loop._usage("anthropic", {"usage": {
+        "input_tokens": 100, "output_tokens": 10, "cache_read_input_tokens": 40,
+        "iterations": [
+            {"type": "compaction", "input_tokens": 800000, "output_tokens": 2000, "cache_read_input_tokens": 1000},
+            {"type": "message", "input_tokens": 100, "output_tokens": 10, "cache_read_input_tokens": 40},
+        ],
+    }})
+    assert usage["input_tokens"] == 140 and usage["total_tokens"] == 150
+    assert usage["billed_input_tokens"] == 801140 and usage["billed_output_tokens"] == 2010
+    assert usage["billed_cached_input_tokens"] == 1040
+
+
+def test_prompt_change_resets_old_thinking_once_without_erasing_history(ctx, monkeypatch):
+    old = {"type": "thinking", "thinking": "Prior reasoning", "signature": "OLD_SIGNED"}
+    new = {"type": "thinking", "thinking": "New reasoning", "signature": "NEW_SIGNED"}
+    calls = []
+    fake_calls(monkeypatch, [anthropic([old, {"type": "text", "text": "First reply"}])], calls)
+    loop.run(ctx, registry(), cfg(), "Original system", "First", turn_id="1")
+    fake_calls(monkeypatch, [anthropic([new, {"type": "text", "text": "Second reply"}])], calls)
+    loop.run(ctx, registry(), cfg(), "Selected new profile", "Second", turn_id="2")
+    assert "OLD_SIGNED" not in json.dumps(calls[-1])
+    assert "First reply" in json.dumps(calls[-1])
+    fake_calls(monkeypatch, [anthropic()], calls)
+    loop.run(ctx, registry(), cfg(), "Selected new profile", "Third", turn_id="3")
+    assert "OLD_SIGNED" not in json.dumps(calls[-1]) and "NEW_SIGNED" in json.dumps(calls[-1])
+    saved = read_json(loop.history_path(ctx, "anthropic", "test-model"))
+    assert "OLD_SIGNED" in json.dumps(saved) and "NEW_SIGNED" in json.dumps(saved)
+    assert len(saved["messages"]) == 6
+
+
+def test_legacy_unknown_prefix_keeps_completed_tool_exchange_and_archived_reasoning(ctx, monkeypatch):
+    signed = {"type": "thinking", "thinking": "Old reasoning", "signature": "OLD_SIGNED"}
+    tool = {"type": "tool_use", "id": "done", "name": "file_read", "input": {}}
+    path = loop.history_path(ctx, "anthropic", "test-model")
+    messages = [{"role": "user", "content": "Original request"},
+                {"role": "assistant", "content": [signed, tool]},
+                *loop._tool_result("anthropic", {"id": "done", "name": "file_read"}, ToolResult(text="Completed already"))]
+    write_json(path, {"provider": "anthropic", "model": "test-model", "messages": messages, "turn_id": "old"})
+    calls = []
+    fake_calls(monkeypatch, [anthropic()], calls)
+    loop.run(ctx, registry(lambda *_: pytest.fail("Do not repeat completed tools")), cfg(), "New system", "Continue", turn_id="new")
+    assert "OLD_SIGNED" not in json.dumps(calls[0]) and "Completed already" in json.dumps(calls[0])
+    assert calls[0]["messages"][1]["content"] == [tool]
+    assert read_json(path)["messages"][:3] == messages

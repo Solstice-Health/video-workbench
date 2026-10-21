@@ -29,9 +29,77 @@ def api(tmp_path, monkeypatch):
     (ws.memory / "private.txt").write_text("Must stay private")
     calls = []
 
+    class Direct:
+        def configure(self, body):
+            calls.append(("figma-direct/configure", body))
+            return {"item": {"id": "figma_direct"}}
+
+        def begin_auth(self, redirect_uri):
+            calls.append(("figma-direct/connect", redirect_uri))
+            return {"authorization_url": "https://www.figma.com/oauth?state=fixture"}
+
+        def verify(self):
+            calls.append(("figma-direct/refresh",))
+            return {"item": {"id": "figma_direct"}}
+
+        def disconnect(self):
+            calls.append(("figma-direct/disconnect",))
+            return {"item": {"id": "figma_direct"}}
+
+        def complete_auth(self, code, state, redirect_uri):
+            calls.append(("figma-direct/callback", code, state, redirect_uri))
+            if state != "one-use-state" or code != "good":
+                raise IntegrationError("Never render provider detail or SECRET-CODE")
+
+    class Desktop:
+        def connect(self):
+            calls.append(("figma-mcp/connect",))
+            return {"id": "figma_mcp"}
+
+        def refresh(self):
+            calls.append(("figma-mcp/refresh",))
+            return {"id": "figma_mcp"}
+
+        def disconnect(self):
+            calls.append(("figma-mcp/disconnect",))
+            return {"id": "figma_mcp"}
+
+    class Remote:
+        def add(self, body):
+            calls.append(("mcp/add", body))
+            return {"id": "mcp_012345abcdef"}
+
+        def connect(self, identifier, redirect_uri):
+            calls.append(("mcp/connect", identifier, redirect_uri))
+            return {"id": identifier, "state": "connected"}
+
+        def configure(self, identifier, body):
+            calls.append(("mcp/configure", identifier, body))
+            return {"id": identifier}
+
+        def refresh(self, identifier):
+            calls.append(("mcp/refresh", identifier))
+            return {"id": identifier}
+
+        def disconnect(self, identifier):
+            calls.append(("mcp/disconnect", identifier))
+            return {"id": identifier}
+
+        def remove(self, identifier):
+            calls.append(("mcp/remove", identifier))
+            return {"id": identifier}
+
+        def complete_auth(self, query, redirect_uri):
+            calls.append(("mcp/callback", query, redirect_uri))
+            if query.get("code") != "good" or query.get("state") != "one-use-state":
+                raise IntegrationError("Never render SECRET-CODE")
+
     class Service:
         def __init__(self, *, runs_dir):
             assert runs_dir == tmp_path
+            self.direct = Direct()
+            self.desktop = Desktop()
+            self.remote = Remote()
 
         def status(self):
             return {"items": [{"id": "solstice", "state": "unconfigured", "connected": False}]}
@@ -190,7 +258,9 @@ def test_opaque_preview_scripts_cannot_read_host_apis(api, path):
     assert api["request"](path, headers={"Origin": "null"})[0] == 403
 
 
-@pytest.mark.parametrize("action", ["configure", "connect", "refresh", "disconnect", "figma/connect"])
+@pytest.mark.parametrize("action", ["configure", "connect", "refresh", "disconnect", "figma/connect",
+                                    "figma-direct/configure", "figma-direct/connect", "figma-direct/refresh", "figma-direct/disconnect",
+                                    "figma-mcp/connect", "figma-mcp/refresh", "figma-mcp/disconnect"])
 def test_integration_mutations_require_csrf_and_use_host_owned_service(api, action):
     path = f"/api/integrations/{action}"
     assert api["request"](path, "POST", "{}")[0] == 403
@@ -199,10 +269,13 @@ def test_integration_mutations_require_csrf_and_use_host_owned_service(api, acti
     assert api["calls"][-1][0] == action
     if action == "connect":
         assert api["calls"][-1][1] == f"http://127.0.0.1:{api['port']}/api/integrations/solstice/callback"
+    if action == "figma-direct/connect":
+        assert api["calls"][-1][1] == f"http://127.0.0.1:{api['port']}/api/integrations/figma-direct/callback"
 
 
-def test_oauth_callback_allows_redirect_but_still_checks_host_and_one_use_state(api):
-    path = "/api/integrations/solstice/callback?code=good&state=one-use-state"
+@pytest.mark.parametrize("provider", ["solstice", "figma-direct", "mcp"])
+def test_oauth_callback_allows_redirect_but_still_checks_host_and_one_use_state(api, provider):
+    path = f"/api/integrations/{provider}/callback?code=good&state=one-use-state"
     status, headers, html = api["request"](path, headers={"Sec-Fetch-Site": "cross-site"})
     assert status == 200 and b'"ok": true' in html
     assert b"one-use-state" not in html and b"code=good" not in html
@@ -213,3 +286,24 @@ def test_oauth_callback_allows_redirect_but_still_checks_host_and_one_use_state(
     count = len(api["calls"])
     assert api["request"](path, headers={"Host": "attacker.invalid"})[0] == 403
     assert len(api["calls"]) == count
+
+
+@pytest.mark.parametrize("action", ["add", "connect", "configure", "refresh", "disconnect", "remove"])
+def test_direct_mcp_management_routes_require_user_origin_and_csrf(api, action):
+    identifier = "mcp_012345abcdef"
+    path = f"/api/integrations/mcp/{'add' if action == 'add' else identifier + '/' + action}"
+    assert api["request"](path, "POST", "{}")[0] == 403
+    assert api["request"](path, "POST", "{}", {**api["headers"], "Origin": "null"})[0] == 403
+    assert not api["calls"]
+    status, _, raw = api["request"](path, "POST", "{}", api["headers"])
+    assert status == (201 if action == "add" else 200), raw
+    assert api["calls"][-1][0] == f"mcp/{action}"
+    if action == "connect":
+        assert api["calls"][-1][2] == f"http://127.0.0.1:{api['port']}/api/integrations/mcp/callback"
+
+
+def test_direct_mcp_callback_rejects_duplicate_parameters(api):
+    path = "/api/integrations/mcp/callback?state=one-use-state&state=other&code=good"
+    status, _, html = api["request"](path, headers={"Sec-Fetch-Site": "cross-site"})
+    assert status == 400 and b'"ok": false' in html
+    assert not api["calls"]

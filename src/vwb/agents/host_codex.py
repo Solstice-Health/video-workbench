@@ -18,6 +18,7 @@ import os
 import secrets as pysecrets
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -70,7 +71,10 @@ def _image_ready() -> bool:
 def kill(ticket: str) -> None:
     """Stop an agent's container (no-op when it is not running)."""
     if shutil.which("docker"):
-        subprocess.run(["docker", "rm", "-f", f"vwb-{ticket}"], capture_output=True)
+        try:
+            subprocess.run(["docker", "rm", "-f", f"vwb-{ticket}"], capture_output=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            log.warning("container removal timed out for %s", ticket)
 
 
 def _ui_job_labels() -> list[str]:
@@ -83,15 +87,26 @@ def _ui_job_labels() -> list[str]:
 
 def run_agent(ws: Workspace, registry: Registry, role: str, ticket: str, prompt: str, cfg: dict[str, Any], *,
               swarm: Any = None, timeout_s: float = 3600, echo: bool = False, codex_home: Path | None = None,
-              resume: str | None = None, session: dict[str, Any] | None = None) -> str:
+              resume: str | None = None, session: dict[str, Any] | None = None,
+              stop: threading.Event | None = None, attachment_refs: list[dict[str, Any]] | None = None) -> str:
     """One Codex turn in a container; returns its final message.
 
     With codex_home, Codex keeps its threads in that host folder, so a later turn can resume the same
     conversation (resume=thread id) with its full history. The thread id is written to session["thread_id"]."""
     if not enabled():
         raise HostUnavailable("the Codex host is off (policy host.codex), or Docker or the image is missing")
+    image_mounts, image_args = _attachment_images(ws, attachment_refs or [])
+    if attachment_refs:
+        prompt += ("\n[harness] Bounded previews of recent attached images accompany this request when available. "
+                   "Use attachment_read for any missing image or an older original.")
     token = pysecrets.token_urlsafe(24)
     ctx = ToolContext(ws=ws, agent=ticket, role=role, gateway=Gateway(ws, actor=ticket), swarm=swarm)
+    if swarm is not None:
+        swarm.prepare_context(ctx)
+    cancel = threading.Event()
+    ctx.state["cancel_event"] = cancel
+    watcher_done = threading.Event()
+    timed_out = threading.Event()
     if role == "job_lead":
         emit(ws, "model.configured", {"source": "codex", "model": cfg["model"], "effort": cfg.get("effort"),
                                       "context_window": cfg.get("context_window"),
@@ -107,7 +122,7 @@ def run_agent(ws: Workspace, registry: Registry, role: str, ticket: str, prompt:
                 f'env_key="VWB_TOKEN", wire_api="responses", stream_idle_timeout_ms={STREAM_IDLE_TIMEOUT_MS}}}')
     mcp = (f'mcp_servers.vwb={{url="http://host.docker.internal:{tools.port}/mcp", bearer_token_env_var="VWB_TOKEN", '
            f'startup_timeout_sec=60, tool_timeout_sec={TOOL_TIMEOUT_S}}}')
-    mounts = ["-v", f"{ws.work.resolve()}:/workspace"]
+    mounts = ["-v", f"{ws.work.resolve()}:/workspace", *image_mounts]
     if codex_home is not None:
         codex_home.mkdir(parents=True, exist_ok=True)
         mounts += ["-v", f"{codex_home.resolve()}:/home/agent/.codex"]
@@ -122,14 +137,27 @@ def run_agent(ws: Workspace, registry: Registry, role: str, ticket: str, prompt:
         cmd += ["-c", f"model_context_window={int(cfg['context_window'])}"]
     if cfg.get("auto_compact_tokens"):
         cmd += ["-c", f"model_auto_compact_token_limit={int(cfg['auto_compact_tokens'])}"]
-    cmd += ["-o", f"/workspace/.codex/{ticket}.md", "-"]
+    cmd += [*image_args, "-o", f"/workspace/.codex/{ticket}.md", "-"]
     transcript = ws.swarm / f"{ticket}.codex.jsonl"
     t0 = time.time()
     log.info("codex %s (%s, %s) starting in docker", ticket, role, cfg["model"])
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         assert proc.stdin is not None and proc.stdout is not None
-        notes = "" if resume else "\n" + CONTAINER_NOTES + (WORKER_END if role != "job_lead" else "")
+        def watch() -> None:
+            while not watcher_done.wait(0.25):
+                if time.time() - t0 > timeout_s:
+                    timed_out.set()
+                    cancel.set()
+                if cancel.is_set() or (stop is not None and stop.is_set()) or (swarm is not None and swarm.stop.is_set()):
+                    cancel.set()
+                    kill(ticket)
+                    if proc.poll() is None:
+                        proc.kill()
+                    return
+
+        threading.Thread(target=watch, daemon=True, name=f"cancel-{ticket}").start()
+        notes = "" if resume else "\n" + CONTAINER_NOTES + (WORKER_END if role not in {"job_lead", "worker"} else "")
         proc.stdin.write(prompt + notes)
         proc.stdin.close()
         final, events, completed, failure = "", 0, False, ""
@@ -145,6 +173,17 @@ def run_agent(ws: Workspace, registry: Registry, role: str, ticket: str, prompt:
             append_jsonl(transcript, ev)
             if role == "job_lead":
                 codex_event(ws, ev, ticket)
+            elif swarm is not None and ev.get("type") == "item.started":
+                item = ev.get("item") or {}
+                if item.get("type") == "command_execution":
+                    swarm.activity(ticket, "bash")
+            if role != "job_lead" and swarm is not None and ev.get("type") == "item.completed":
+                child_item = ev.get("item") or {}
+                if child_item.get("type") in {"reasoning", "agent_message"} and child_item.get("text"):
+                    swarm.progress(ticket, child_item["text"], kind=child_item["type"])
+                elif child_item.get("type") == "command_execution":
+                    swarm.tool_event(ticket, "bash", str(child_item.get("aggregated_output") or ""),
+                                     child_item.get("exit_code", 0) != 0)
             events += 1
             kind = ev.get("type")
             if kind == "thread.started" and session is not None and ev.get("thread_id"):
@@ -167,6 +206,10 @@ def run_agent(ws: Workspace, registry: Registry, role: str, ticket: str, prompt:
                 raise TimeoutError(f"codex {ticket} ran over {timeout_s}s")
         proc.wait(timeout=60)
         err = proc.stderr.read() if proc.stderr else ""
+        if timed_out.is_set():
+            raise TimeoutError(f"codex {ticket} ran over {timeout_s}s")
+        if cancel.is_set():
+            raise InterruptedError(f"codex {ticket} interrupted")
         if not completed:          # a progress message is not a reply: only a completed turn counts
             if events == 0 and resume and "no rollout found" in err:
                 raise ThreadMissing(f"thread {resume} is not in the Codex home: {err[-300:]}")
@@ -178,24 +221,52 @@ def run_agent(ws: Workspace, registry: Registry, role: str, ticket: str, prompt:
         log.info("codex %s finished in %.0fs", ticket, time.time() - t0)
         return final
     finally:
+        watcher_done.set()
+        # Unwind blocking tool calls before shutting down their MCP server.
+        cancel.set()
         kill(ticket)
         tools.stop()
         proxy.stop()
 
 
 def run_worker(ws: Workspace, registry: Registry, role: str, ticket: str, prompt: str, cfg: dict[str, Any],
-               timeout_s: float = 3600) -> str:
-    return run_agent(ws, registry, role, ticket, prompt, cfg, timeout_s=timeout_s)
+               timeout_s: float = 3600, **kwargs: Any) -> str:
+    return run_agent(ws, registry, role, ticket, prompt, cfg, timeout_s=timeout_s, **kwargs)
+
+
+def _attachment_images(ws: Workspace, refs: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    from vwb.agents.attachment_inputs import MAX_INLINE_BYTES
+    from vwb.workspace.attachments import image_payload
+
+    mounts, args = [], []
+    size = 0
+    for ref in reversed(refs):
+        if ref.get("kind") != "image":
+            continue
+        try:
+            payload = image_payload(ws, ref)
+        except (OSError, ValueError):
+            continue  # durable path + attachment_read remain in the prompt
+        if payload:
+            added = len(payload['base64']) * 3 // 4
+            if size + added > MAX_INLINE_BYTES:
+                continue
+            size += added
+            target = f"/vwb-attachments/{ref['id']}/{Path(payload['path']).name}"
+            mounts[0:0] = ["-v", f"{payload['path']}:{target}:ro"]
+            args[0:0] = ["--image", target]
+    return mounts, args
 
 
 def run_lead(ws: Workspace, registry: Registry, swarm: Any, prompt: str, cfg: dict[str, Any],
              timeout_s: float = 6 * 3600, resume: str | None = None,
-             session: dict[str, Any] | None = None) -> str:
+             session: dict[str, Any] | None = None, attachment_refs: list[dict[str, Any]] | None = None) -> str:
     """One turn of the main agent's conversation. Its Codex home lives in the request folder, so the
     next message resumes the same thread with everything it said, called and saw."""
     ticket = f"job-lead-{pysecrets.token_hex(3)}"
     return run_agent(ws, registry, "job_lead", ticket, prompt, cfg, swarm=swarm, timeout_s=timeout_s, echo=True,
-                     codex_home=ws.root / "agent" / "codex", resume=resume, session=session)
+                     codex_home=ws.root / "agent" / "codex", resume=resume, session=session,
+                     **({"attachment_refs": attachment_refs} if attachment_refs else {}))
 
 
 def _compact_rpc(proc, thread_id: str, cfg: dict[str, Any], *, timeout_s: float = 3900) -> None:

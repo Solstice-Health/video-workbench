@@ -6,7 +6,7 @@ const {Button, Icon, Tooltip, TextField, Checkbox} = window.Eeva;
 const effortNames = {low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max', ultra: 'Ultra'};
 const contextName = value => value === 1000000 ? '1M' : value === 300000 ? '300K' : `${Math.round(value / 1000)}K`;
 const post = body => ({method: 'POST', body: JSON.stringify(body)});
-const focusable = 'button:not([disabled]), input:not([disabled]), [tabindex="0"]';
+const focusable = 'button:not([disabled]), input:not([disabled]), a[href], summary, [tabindex="0"]';
 
 function withModel(catalog, model) {
   if (!model) return catalog;
@@ -83,6 +83,33 @@ function ModelsManager({catalog, busy, onEnabledChange}) {
   </div>`;
 }
 
+export function PromptProfiles({catalog, selection, busy, loadError, onRetry, onSelect}) {
+  const profiles = catalog?.profiles || [];
+  const [viewed, setViewed] = useState(selection?.profile_id || catalog?.default_profile_id);
+  useEffect(() => setViewed(selection?.profile_id || catalog?.default_profile_id), [selection?.profile_id, catalog?.default_profile_id]);
+  const profile = profiles.find(item => item.id === viewed) || profiles.find(item => item.id === selection?.profile_id) || profiles[0];
+  const selected = selection?.profile_id || catalog?.default_profile_id;
+  const active = selection?.active_profile;
+  if (!catalog) return html`<div className="mc-loading"><p>${loadError ? 'Could not load agent prompts. Try again.' : 'Loading agent prompts…'}</p>
+    ${loadError && html`<${Button} variant="secondary" size="sm" disabled=${busy} onClick=${onRetry}>Try again<//>`}</div>`;
+  return html`<div className="mc-prompts">
+    <p className="mc-body-note">Choose the main agent’s working instructions for this conversation. Every profile includes the same tool and workspace requirements.</p>
+    ${active && active.id !== selected && html`<p className="mc-prompt-active">The current turn uses ${active.label}. Your selected prompt applies when you start or resume a turn.</p>`}
+    <div className="mc-prompt-options" role="group" aria-label="Agent prompt profiles">${profiles.map(item => html`<button type="button" key=${item.id}
+      className="mc-prompt-option" aria-pressed=${item.id === profile?.id} onClick=${() => setViewed(item.id)}>
+      <span>${item.label}</span>${item.id === selected && html`<span className="mc-prompt-selected"><${Icon} name="check" size=${12}/><span className="visually-hidden">Selected prompt</span></span>`}
+    </button>`)}</div>
+    ${profile && html`<section className="mc-prompt-detail" aria-label=${`${profile.label} prompt`}>
+      <div className="mc-prompt-heading"><h3>${profile.label}</h3><p>${profile.description}</p></div>
+      ${profile.kind === 'inspired' && html`<p className="mc-caption mc-prompt-provenance">Adapted for Workbench from public guidance. This is not the product’s private system prompt.</p>`}
+      ${profile.sources?.length > 0 && html`<div className="mc-prompt-sources">${profile.sources.filter(source => /^https:\/\//i.test(source.url)).map(source => html`<a key=${source.url} href=${source.url} target="_blank" rel="noopener noreferrer">${source.title}</a>`)}</div>`}
+      <details className="mc-prompt-preview"><summary>Preview full instructions</summary><pre tabIndex="0" aria-label=${`${profile.label} full instructions`}>${profile.content}</pre></details>
+      <div className="mc-prompt-actions">${profile.id === selected ? html`<span className="mc-caption"><${Icon} name="check" size=${12}/> Selected for the next turn</span>`
+        : html`<${Button} variant="secondary" size="sm" disabled=${busy} onClick=${() => onSelect(profile.id)}>Use ${profile.label}<//>`}</div>
+    </section>`}
+  </div>`;
+}
+
 function ProviderEditor({provider, busy, onSave, onClear, onReset}) {
   const [editing, setEditing] = useState(false), [key, setKey] = useState('');
   const input = useRef(null);
@@ -111,7 +138,8 @@ function ProviderEditor({provider, busy, onSave, onClear, onReset}) {
   </section>`;
 }
 
-function ManagerDialog({catalog, busy, onClose, onEnabledChange, onProviderSave, onProviderClear, onProviderReset, initialTab = 'models'}) {
+export function ManagerDialog({catalog, busy, onClose, onEnabledChange, onProviderSave, onProviderClear, onProviderReset,
+  promptCatalog, promptSelection, promptError, onPromptRetry, onPromptSelect, initialTab = 'models'}) {
   const [tab, setTab] = useState(initialTab), dialog = useRef(null), close = useRef(null);
   const id = useId();
   useEffect(() => {
@@ -138,36 +166,40 @@ function ManagerDialog({catalog, busy, onClose, onEnabledChange, onProviderSave,
   const tabKeys = event => {
     if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
       event.preventDefault();
-      const next = event.key === 'Home' ? 'models' : event.key === 'End' ? 'providers' : tab === 'models' ? 'providers' : 'models';
+      const tabs = ['models', 'providers', 'prompts'];
+      const next = event.key === 'Home' ? tabs[0] : event.key === 'End' ? tabs.at(-1) : tabs[(tabs.indexOf(tab) + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length];
       setTab(next); dialog.current?.querySelector(`[data-manager-tab="${next}"]`)?.focus();
     }
   };
   return window.ReactDOM.createPortal(html`<div className="mc-modal-overlay" onPointerDown=${event => {if (event.target === event.currentTarget) onClose();}}>
     <section className="mc-manager" role="dialog" aria-modal="true" aria-labelledby=${`${id}-title`} aria-describedby=${`${id}-description`} ref=${dialog}>
-      <div className="mc-manager-heading"><div><h2 id=${`${id}-title`}>Models and APIs</h2><p id=${`${id}-description`}>Set up the models available to your agent.</p></div>
+      <div className="mc-manager-heading"><div><h2 id=${`${id}-title`}>Models and APIs</h2><p id=${`${id}-description`}>Choose models, provider connections and main agent instructions.</p></div>
         <${Tooltip} content="Close model settings"><${Button} ref=${close} variant="text" iconOnly aria-label="Close model settings" onClick=${onClose}><${Icon} name="x" size=${16}/><//><//></div>
       <div className="mc-manager-tabs" role="tablist" aria-label="Model settings" onKeyDown=${tabKeys}>
         <button type="button" role="tab" id=${`${id}-models-tab`} aria-selected=${tab === 'models'} aria-controls=${`${id}-models`} tabIndex=${tab === 'models' ? 0 : -1} data-manager-tab="models" onClick=${() => setTab('models')}>Models</button>
         <button type="button" role="tab" id=${`${id}-providers-tab`} aria-selected=${tab === 'providers'} aria-controls=${`${id}-providers`} tabIndex=${tab === 'providers' ? 0 : -1} data-manager-tab="providers" onClick=${() => setTab('providers')}>Provider APIs</button>
+        <button type="button" role="tab" id=${`${id}-prompts-tab`} aria-selected=${tab === 'prompts'} aria-controls=${`${id}-prompts`} tabIndex=${tab === 'prompts' ? 0 : -1} data-manager-tab="prompts" onClick=${() => setTab('prompts')}>Agent prompt</button>
       </div>
       <div className="mc-manager-body">
         ${tab === 'models' ? html`<div role="tabpanel" id=${`${id}-models`} aria-labelledby=${`${id}-models-tab`}><${ModelsManager} catalog=${catalog} busy=${busy} onEnabledChange=${onEnabledChange}/></div>`
-          : html`<div role="tabpanel" id=${`${id}-providers`} aria-labelledby=${`${id}-providers-tab`}><p className="mc-body-note">Keys stay on the host and are never shown again after you save them.</p>
+          : tab === 'providers' ? html`<div role="tabpanel" id=${`${id}-providers`} aria-labelledby=${`${id}-providers-tab`}><p className="mc-body-note">Keys stay on the host and are never shown again after you save them.</p>
             <div className="mc-provider-list">${catalog.providers.map(provider => html`<${ProviderEditor} key=${provider.id} provider=${provider} busy=${busy} onSave=${onProviderSave} onClear=${onProviderClear} onReset=${onProviderReset}/>`)}
-            </div></div>`}
+            </div></div>` : html`<div role="tabpanel" id=${`${id}-prompts`} aria-labelledby=${`${id}-prompts-tab`}><${PromptProfiles} catalog=${promptCatalog} selection=${promptSelection} busy=${busy} loadError=${promptError} onRetry=${onPromptRetry} onSelect=${onPromptSelect}/></div>`}
       </div>
-      <div className="mc-manager-footer"><span className="mc-caption">Changes apply to the next agent turn.</span><${Button} variant="secondary" size="sm" onClick=${onClose}>Done<//></div>
+      <div className="mc-manager-footer"><span className="mc-caption">${tab === 'prompts' ? promptCatalog?.selection_note || 'Applies to new and resumed turns. Active turns and queued messages keep their captured prompt.' : 'Changes apply to the next agent turn.'}</span><${Button} variant="secondary" size="sm" onClick=${onClose}>Done<//></div>
     </section></div>`, document.body);
 }
 
 export function ModelControl({api, requestId, onNotice}) {
   const [catalog, setCatalog] = useState(null), [selection, setSelection] = useState(null);
+  const [promptCatalog, setPromptCatalog] = useState(null), [promptSelection, setPromptSelection] = useState(null);
+  const [promptError, setPromptError] = useState(false), [promptBusy, setPromptBusy] = useState(false);
   const [open, setOpen] = useState(false), [subview, setSubview] = useState(null), [manager, setManager] = useState(null);
   const [busy, setBusy] = useState(false), [loadError, setLoadError] = useState(false);
   const [customText, setCustomText] = useState('openrouter/'), [customError, setCustomError] = useState('');
   const [position, setPosition] = useState({left: 16, bottom: 40, maxHeight: 480});
   const trigger = useRef(null), menu = useRef(null), submenu = useRef(null), subTrigger = useRef(null), customInput = useRef(null);
-  const scope = useRef(requestId), serial = useRef(0); scope.current = requestId;
+  const scope = useRef(requestId), serial = useRef(0), promptSerial = useRef(0); scope.current = requestId;
   const id = useId();
   const report = error => onNotice?.({tone: 'error', text: error.message || 'Model settings could not be saved. Try again.'});
   useEffect(() => {
@@ -185,6 +217,41 @@ export function ModelControl({api, requestId, onNotice}) {
     };
     fetch(); return () => {active = false;};
   }, [api, requestId]);
+
+  const loadPrompts = async currentScope => {
+    const [nextCatalog, current] = await Promise.all([api('/api/prompts'), currentScope ? api(`/api/requests/${encodeURIComponent(currentScope)}/prompt`) : Promise.resolve(null)]);
+    return {catalog: nextCatalog, selection: current || {profile_id: nextCatalog.default_profile_id}};
+  };
+  useEffect(() => {
+    const token = ++promptSerial.current;
+    setPromptCatalog(null); setPromptSelection(null); setPromptError(false); setPromptBusy(false);
+    loadPrompts(requestId).then(result => {
+      if (promptSerial.current === token && scope.current === requestId) {setPromptCatalog(result.catalog); setPromptSelection(result.selection);}
+    }).catch(() => {if (promptSerial.current === token && scope.current === requestId) setPromptError(true);});
+    return () => {if (promptSerial.current === token) promptSerial.current++;};
+  }, [api, requestId]);
+  const retryPrompts = async () => {
+    if (promptBusy) return;
+    const token = ++promptSerial.current, currentScope = scope.current; setPromptBusy(true); setPromptError(false);
+    try {
+      const result = await loadPrompts(currentScope);
+      if (promptSerial.current === token && scope.current === currentScope) {setPromptCatalog(result.catalog); setPromptSelection(result.selection);}
+    } catch (error) {if (promptSerial.current === token) {setPromptError(true); report(error);}}
+    finally {if (promptSerial.current === token) setPromptBusy(false);}
+  };
+  const savePrompt = async profileId => {
+    if (busy || promptBusy) return;
+    const token = ++promptSerial.current, currentScope = scope.current; setPromptBusy(true);
+    try {
+      const result = currentScope ? await api(`/api/requests/${encodeURIComponent(currentScope)}/prompt`, post({profile_id: profileId}))
+        : await api('/api/prompts/preferences', post({default_profile_id: profileId}));
+      if (promptSerial.current === token && scope.current === currentScope) {
+        setPromptSelection(currentScope ? result : {profile_id: result.default_profile_id || profileId});
+        if (!currentScope) setPromptCatalog(previous => ({...previous, ...result}));
+      }
+    } catch (error) {if (promptSerial.current === token) report(error);}
+    finally {if (promptSerial.current === token) setPromptBusy(false);}
+  };
 
   const updatePosition = () => {
     const rect = trigger.current?.getBoundingClientRect();
@@ -288,6 +355,7 @@ export function ModelControl({api, requestId, onNotice}) {
   };
 
   const selected = catalog?.models.find(model => model.id === selection?.model_id);
+  const selectedPrompt = promptCatalog?.profiles.find(profile => profile.id === (promptSelection?.profile_id || promptCatalog.default_profile_id));
   const enabled = new Set(catalog?.enabled_model_ids || catalog?.models.filter(model => model.enabled).map(model => model.id) || []);
   const models = catalog?.models.filter(model => model.id !== 'custom_openrouter' && (enabled.has(model.id) || model.id === selection?.model_id)) || [];
   const label = selection?.model_id === 'custom_openrouter' ? selection.custom_model || selected?.label || 'OpenRouter model' : selected?.label || (loadError ? 'Model unavailable' : 'Models');
@@ -324,6 +392,7 @@ export function ModelControl({api, requestId, onNotice}) {
       ${selected && selection && html`<div className="mc-configuration">
         <button type="button" className="mc-setting-row" disabled=${busy} aria-expanded=${subview === 'context'} onClick=${event => openSubview('context', event)}><span>Context</span><span className="mc-setting-value">${selection.context_tokens ? contextName(selection.context_tokens) : 'Provider default'}</span><${Icon} name="chevron-right" size=${13}/></button>
         <button type="button" className="mc-setting-row" disabled=${busy} aria-expanded=${subview === 'effort'} onClick=${event => openSubview('effort', event)}><span>Effort</span><span className="mc-setting-value">${effortNames[selection.effort] || 'Automatic'}${selection.ultra_fast ? ' · Ultra fast' : selection.fast ? ' · Fast' : ''}</span><${Icon} name="chevron-right" size=${13}/></button>
+        <button type="button" className="mc-setting-row" disabled=${busy || promptBusy} onClick=${() => openManager('prompts')}><span>Agent prompt</span><span className="mc-setting-value">${selectedPrompt?.label || (promptError ? 'Try again' : 'Loading…')}</span><${Icon} name="chevron-right" size=${13}/></button>
       </div>`}
       <div className="mc-picker-footer"><button type="button" className="mc-manage-link" onClick=${() => openManager('models')}>Models and APIs<${Icon} name="chevron-right" size=${13}/></button><p className="mc-caption">Changes apply to the next turn.</p></div>
     </section>`, document.body)}
@@ -344,7 +413,8 @@ export function ModelControl({api, requestId, onNotice}) {
           <${Button} type="submit" variant="secondary" size="sm" disabled=${busy || !customText.trim()}>${busy ? 'Checking model…' : 'Use model'}<//>
         </form>`}
     </section>`, document.body)}
-    ${manager && catalog && html`<${ManagerDialog} key=${manager} catalog=${catalog} busy=${busy} initialTab=${manager} onClose=${() => {setManager(null); trigger.current?.focus();}} onEnabledChange=${changeEnabled}
+    ${manager && catalog && html`<${ManagerDialog} key=${manager} catalog=${catalog} busy=${busy || promptBusy} initialTab=${manager} onClose=${() => {setManager(null); trigger.current?.focus();}} onEnabledChange=${changeEnabled}
+      promptCatalog=${promptCatalog} promptSelection=${promptSelection} promptError=${promptError} onPromptRetry=${retryPrompts} onPromptSelect=${savePrompt}
       onProviderSave=${saveProvider} onProviderClear=${provider => saveProvider(provider, null, 'clear')} onProviderReset=${provider => saveProvider(provider, null, 'reset')}/>`}
   </div>`;
 }

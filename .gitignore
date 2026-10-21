@@ -5,6 +5,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
+dist/
+build/
+reports/
 
 # secrets: keys live in a .env outside the repo (see .env.example)
 .env

@@ -48,7 +48,7 @@ def description(ws: Workspace, store: IndexStore, canvas: Canvas) -> str:
             if t["text"] not in refs:
                 refs.append(t["text"])
     shown_refs = [c.text for c in canvas.copy_deck if c.role == "reference"]
-    lines = ["<!-- Draft description for review. Source text only; confirm before publishing. -->", ""]
+    lines = ["<!-- Draft description for review. Recorded copy only; confirm before publishing. -->", ""]
     if titles:
         lines += [titles[0].replace("^{", "").replace("}", ""), ""]
     if shown_refs or refs:
@@ -57,7 +57,10 @@ def description(ws: Workspace, store: IndexStore, canvas: Canvas) -> str:
             lines.append(f"- {r.replace('^{', '').replace('}', '')}")
         lines.append("")
     req = ws.load()
-    lines.append(f"Derived from {req.source().original_path.split('/')[-1]} ({req.source().ref}).")
+    if canvas.time_map and req.sources:
+        lines.append(f"Derived from {req.source().original_path.split('/')[-1]} ({req.source().ref}).")
+    else:
+        lines.append("Created from the brief and design references, without a source-video timeline. Review imported evidence and asset provenance before publishing.")
     return "\n".join(lines) + "\n"
 
 

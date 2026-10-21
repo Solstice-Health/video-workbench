@@ -12,8 +12,9 @@ import json
 import threading
 import time
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from vwb.config import load_config
 from vwb.gateway import Gateway
@@ -38,11 +39,11 @@ class ToolResult:
     artifacts: list[str] = field(default_factory=list)       # content hashes of things the call created
 
     @staticmethod
-    def json(obj: Any, images: list[bytes] | None = None, artifacts: list[str] | None = None) -> "ToolResult":
+    def json(obj: Any, images: list[bytes] | None = None, artifacts: list[str] | None = None) -> ToolResult:
         return ToolResult(text=dumps_compact(obj), images=images or [], data=obj, artifacts=artifacts or [])
 
     @staticmethod
-    def error(message: str) -> "ToolResult":
+    def error(message: str) -> ToolResult:
         return ToolResult(text=f"ERROR: {message}", is_error=True)
 
 
@@ -101,6 +102,14 @@ class Registry:
             return ToolResult.error(f"unknown tool {name!r}")
         if not self.allowed_for_role(ctx.role, name):
             return ToolResult.error(f"role {ctx.role} may not call {name} (config/policy.yaml roles)")
+        if ctx.swarm is not None and hasattr(ctx.swarm, "prepare_context"):
+            ctx.swarm.prepare_context(ctx)
+        inherited = ctx.state.get("allowed_tools")
+        if inherited is not None and name not in inherited:
+            return ToolResult.error(f"{name} is outside this agent's inherited tool permissions")
+        cancel = ctx.state.get("cancel_event")
+        if cancel is not None and cancel.is_set():
+            return ToolResult.error("agent interrupted; this tool call was not executed")
         mode = self.mode(tool.capability)
         if mode == "block":
             return ToolResult.error(f"{name} is blocked by the policy dial ({tool.capability}: block)")
@@ -110,15 +119,30 @@ class Registry:
                                         options=[{"id": "grant", "label": "Allow"}, {"id": "deny", "label": "Do not allow"}],
                                         recommended="deny", kind="allow", lane="editor", scope="request",
                                         key=f"allow:{tool.capability}", on_timeout="keep_parked")
-            return ToolResult.json({"parked": True, "ticket": ticket["id"],
-                                    "note": "A person must grant this capability; the call is parked, the request continues."})
+            answer = ticket.get("answer") or {}
+            if ticket.get("status") == "answered_from_memory" and answer.get("option") == "grant":
+                pass  # A signed answer remembered for this request grants this capability.
+            elif ticket.get("status") == "answered_from_memory" and answer.get("option") == "deny":
+                return ToolResult.error(f"{tool.capability} was denied by the person for this request")
+            else:
+                return ToolResult.json({"parked": True, "ticket": ticket["id"],
+                                        "note": "A person must grant this capability; the call is parked, the request continues."})
         t0 = time.time()
         try:
+            if ctx.swarm is not None and hasattr(ctx.swarm, "activity"):
+                ctx.swarm.activity(ctx.agent, name)
             result = tool.handler(ctx, args)
         except Exception as exc:  # a tool failure is data for the agent, never a crash of the harness
             result = ToolResult.error(f"{type(exc).__name__}: {exc}")
             result.data = {"traceback": traceback.format_exc()[-2000:]}
         seconds = time.time() - t0
+        if ctx.swarm is not None and hasattr(ctx.swarm, "tool_event"):
+            ctx.swarm.tool_event(ctx.agent, name, result.text, result.is_error)
+        if ctx.swarm is not None and name != "agent_inbox" and hasattr(ctx.swarm, "take_messages"):
+            from vwb.agents.swarm import message_text
+            mailbox = message_text(ctx.swarm.take_messages(ctx.agent))
+            if mailbox:
+                result.text += "\n\n" + mailbox
         self._bound(ctx, name, result)
         if mode == "flag":
             from vwb.workspace import flags

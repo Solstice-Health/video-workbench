@@ -27,19 +27,25 @@ MAX_TOOL_TEXT = 64000      # the gateway already spills longer results to work/.
 
 def _log(ctx: ToolContext, **row: Any) -> None:
     append_jsonl(ctx.ws.swarm / f"{ctx.agent}.transcript.jsonl", {"ts": time.time(), **row})
+    if ctx.swarm is not None and ctx.role != "job_lead" and row.get("final"):
+        ctx.swarm.progress(ctx.agent, row["final"])
 
 
 def openai_loop(gw: Gateway, cfg: dict[str, Any], instructions: str, user_parts: list[dict[str, Any]],
                 tools: list[Tool], registry: Registry, ctx: ToolContext, max_steps: int = 60,
-                stop: threading.Event | None = None) -> str:
+                stop: threading.Event | None = None, history: list[dict[str, Any]] | None = None) -> str:
     """Stateless Responses API loop: the client holds the whole conversation (see oai.replay_items)."""
     client = gw.openai()
     defs = [{"type": "function", "name": t.name, "description": t.description, "parameters": t.schema, "strict": False}
             for t in tools]
-    history: list[dict[str, Any]] = [oai.user_message(*user_parts)]
+    history = history if history is not None else []
+    history.append(oai.user_message(*user_parts))
     for step in range(max_steps):
         if stop is not None and stop.is_set():
             return "ERROR: cancelled by the orchestrator"
+        pending = _mailbox(ctx)
+        if pending:
+            history.append(oai.user_message(oai.text_input(pending)))
         kwargs: dict[str, Any] = {"model": cfg["model"], "input": history, "instructions": instructions,
                                   "store": False, "include": ["reasoning.encrypted_content"]}
         if defs:
@@ -49,7 +55,7 @@ def openai_loop(gw: Gateway, cfg: dict[str, Any], instructions: str, user_parts:
         if cfg.get("service_tier"):
             kwargs["service_tier"] = cfg["service_tier"]
         t0 = time.time()
-        resp = _retry(lambda kw=kwargs: client.responses.create(**kw))
+        resp = _retry(lambda kw=kwargs: client.responses.create(**kw), stop=stop)
         gw.record(slot_name=ctx.role, provider="openai", model=cfg["model"], purpose=f"agent:{ctx.agent}",
                   request={"step": step, "n_items": len(history)}, response_text=resp.output_text or "",
                   usage=resp.usage.model_dump() if resp.usage else {}, seconds=time.time() - t0, ok=True)
@@ -69,6 +75,10 @@ def openai_loop(gw: Gateway, cfg: dict[str, Any], instructions: str, user_parts:
         calls = [it for it in resp.output if getattr(it, "type", "") == "function_call"]
         if not calls:
             _log(ctx, step=step, final=(resp.output_text or "")[:4000])
+            pending = _mailbox(ctx)
+            if pending:
+                history.append(oai.user_message(oai.text_input(pending)))
+                continue
             return resp.output_text or ""
         images: list[bytes] = []
         for c in calls:
@@ -106,20 +116,25 @@ def _schema_for_gemini(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 def gemini_loop(gw: Gateway, cfg: dict[str, Any], system: str, parts: list[Any], tools: list[Tool],
-                registry: Registry, ctx: ToolContext, max_steps: int = 60, stop: threading.Event | None = None) -> str:
+                registry: Registry, ctx: ToolContext, max_steps: int = 60, stop: threading.Event | None = None,
+                history: list[Any] | None = None) -> str:
     from google.genai import types
 
     client = gw.google()
     decls = [types.FunctionDeclaration(name=t.name, description=t.description,
                                        parameters_json_schema=_schema_for_gemini(t.schema)) for t in tools]
     tool_cfg = [types.Tool(function_declarations=decls)] if decls else None
-    history: list[Any] = [types.Content(role="user", parts=[p if isinstance(p, types.Part) else types.Part(text=p) for p in parts])]
+    history = history if history is not None else []
+    history.append(types.Content(role="user", parts=[p if isinstance(p, types.Part) else types.Part(text=p) for p in parts]))
     for step in range(max_steps):
         if stop is not None and stop.is_set():
             return "ERROR: cancelled by the orchestrator"
+        pending = _mailbox(ctx)
+        if pending:
+            history.append(types.Content(role="user", parts=[types.Part(text=pending)]))
         t0 = time.time()
         resp = _retry(lambda: client.models.generate_content(
-            model=cfg["model"], contents=history, config=gem.gen_config(cfg, system=system, tools=tool_cfg)))
+            model=cfg["model"], contents=history, config=gem.gen_config(cfg, system=system, tools=tool_cfg)), stop=stop)
         cand = resp.candidates[0].content if resp.candidates else None
         gw.record(slot_name=ctx.role, provider="google", model=cfg["model"], purpose=f"agent:{ctx.agent}",
                   request={"step": step, "turns": len(history)}, response_text=resp.text or "",
@@ -131,6 +146,10 @@ def gemini_loop(gw: Gateway, cfg: dict[str, Any], system: str, parts: list[Any],
         calls = [p.function_call for p in (cand.parts or []) if p.function_call]
         if not calls:
             _log(ctx, step=step, final=(resp.text or "")[:4000])
+            pending = _mailbox(ctx)
+            if pending:
+                history.append(types.Content(role="user", parts=[types.Part(text=pending)]))
+                continue
             return resp.text or ""
         reply_parts: list[Any] = []
         for fc in calls:
@@ -144,8 +163,17 @@ def gemini_loop(gw: Gateway, cfg: dict[str, Any], system: str, parts: list[Any],
     return "ERROR: step budget exhausted without a final answer"
 
 
-def _retry(fn, attempts: int = 5):
+def _mailbox(ctx: ToolContext) -> str:
+    if ctx.swarm is None or not hasattr(ctx.swarm, "take_messages"):
+        return ""
+    from vwb.agents.swarm import message_text
+    return message_text(ctx.swarm.take_messages(ctx.agent))
+
+
+def _retry(fn, attempts: int = 5, stop: threading.Event | None = None):
     for i in range(attempts):
+        if stop is not None and stop.is_set():
+            raise InterruptedError("agent stopped before model call")
         try:
             return fn()
         except Exception as exc:  # noqa: BLE001
@@ -155,7 +183,10 @@ def _retry(fn, attempts: int = 5):
                 raise
             wait = min(60, 5 * 2 ** i)
             log.warning("model call failed (%s); retrying in %ss", msg[:120], wait)
-            time.sleep(wait)
+            if stop is None:
+                time.sleep(wait)
+            else:
+                stop.wait(wait)
 
 
 def run_digest(text: str) -> str:

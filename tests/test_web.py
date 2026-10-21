@@ -148,6 +148,7 @@ def app(tmp_path, worker):
     try:
         yield app, ws
     finally:
+        app.local_imports.close()
         queue.close()
 
 
@@ -354,6 +355,86 @@ def test_model_settings_routes_freeze_queue_and_never_return_keys(http, monkeypa
         config.secrets.cache_clear()
 
 
+def test_prompt_routes_select_preview_and_freeze_next_messages(http):
+    request, app, ws, _ = http
+    headers = {"X-CSRF-Token": app.csrf_token, "Content-Type": "application/json"}
+    def post(path, body):
+        status, _, content = request("POST", path, json.dumps(body), headers)
+        return status, json.loads(content)
+    catalog = json.loads(request("GET", "/api/prompts")[2])
+    assert len(catalog["profiles"]) == 6 and catalog["default_profile_id"] == "descriptive"
+    assert all(row["content"] and row["sha256"] for row in catalog["profiles"])
+    route = f"/api/requests/{ws.id}/prompt"
+    assert post(route, {"profile_id": "minimal"})[0] == 200
+    assert post(f"/api/requests/{ws.id}/messages", {"message": "Use minimal"})[0] == 202
+    assert post(route, {"profile_id": "loose"})[0] == 200
+    assert app.queue.snapshot(ws)["queue"][0]["main_config"]["prompt"]["id"] == "minimal"
+    selected = json.loads(request("GET", route)[2])
+    assert selected["profile_id"] == "loose" and selected["active_profile_id"] is None
+    assert post("/api/prompts/preferences", {"default_profile_id": "cursor_inspired"})[0] == 200
+    assert json.loads(request("GET", "/api/prompts")[2])["default_profile_id"] == "cursor_inspired"
+    assert json.loads(request("GET", route)[2])["profile_id"] == "loose"
+    assert post(route, {"profile_id": "../secret"})[0] == 400
+    assert request("POST", route, '{"profile_id":"minimal"}')[0] == 403
+
+
+def test_resume_api_can_replace_prompt_independently_from_model(http, monkeypatch):
+    from vwb import prompts
+    request, app, ws, _ = http
+    headers = {"X-CSRF-Token": app.csrf_token, "Content-Type": "application/json"}
+    original = prompts.snapshot_profile("minimal")
+    source = {"id": "a" * 32, "kind": "message", "status": "failed", "message": "Original",
+              "main_config": {"model": "original-model", "prompt": original}}
+    with app.queue.lock:
+        app.queue.states[ws.id]["jobs"].append(source)
+    prompts.set_selection(ws, "loose")
+    calls = []
+    monkeypatch.setattr(app.queue, "resume", lambda _ws, **kwargs: calls.append(kwargs) or {"queue": []})
+    monkeypatch.setattr("vwb.web.server.models.explicit_runtime", lambda *args: {
+        "model": "selected-model", "prompt": prompts.snapshot_profile("loose")})
+    route = f"/api/requests/{ws.id}/resume"
+    def post(body):
+        return request("POST", route, json.dumps({"job_id": source["id"], **body}), headers)[0]
+    assert post({"use_current_model": True}) == 200
+    assert calls[-1]["main_config"]["model"] == "selected-model"
+    assert calls[-1]["main_config"]["prompt"] == original and calls[-1]["prompt"] is None
+    assert post({"use_current_prompt": True}) == 200
+    assert calls[-1]["main_config"] is None and calls[-1]["prompt"]["id"] == "loose"
+    assert post({"use_current_model": True, "use_current_prompt": True}) == 200
+    assert calls[-1]["main_config"]["model"] == "selected-model" and calls[-1]["prompt"]["id"] == "loose"
+    assert post({"use_current_prompt": "yes"}) == 400
+    assert source["main_config"]["prompt"] == original
+
+
+def test_activity_http_pages_bound_initial_payload_and_preserve_live_cursor(http):
+    from vwb.agents import events
+    request, app, ws, _ = http
+    path = ws.memory / events.EVENT_FILE
+    with path.open("w") as handle:
+        for seq in range(1, 351):
+            handle.write(json.dumps({"seq": seq, "ts": "2026-10-21T12:00:00Z", "kind": "tool", "actor": "job_lead",
+                                     "data": {"id": f"tool-{seq}", "status": "completed", "output": f"Result {seq}"}}) + "\n")
+    snapshot = json.loads(request("GET", f"/api/requests/{ws.id}")[2])
+    assert len(snapshot["events"]) == 300 and snapshot["events"][0]["seq"] == 51
+    assert snapshot["cursor"] == 350 and snapshot["events_has_more"] and snapshot["events_before"] == 51
+    older = json.loads(request("GET", f"/api/requests/{ws.id}/events?before=51&limit=50")[2])
+    assert [row["seq"] for row in older["events"]] == list(range(1, 51))
+    assert older["cursor"] == 350 and not older["events_has_more"]
+    incremental = json.loads(request("GET", f"/api/requests/{ws.id}/events?after=340")[2])
+    assert [row["seq"] for row in incremental["events"]] == list(range(341, 351))
+    assert incremental["cursor"] == 350 and not incremental["events_after_has_more"]
+    assert "events_has_more" not in incremental and "events_before" not in incremental
+    assert request("GET", f"/api/requests/{ws.id}/events?before=51&after=1")[0] == 400
+
+
+def test_metadata_only_snapshot_does_not_read_or_replace_activity(http, monkeypatch):
+    request, app, ws, _ = http
+    monkeypatch.setattr("vwb.web.server.event_page", lambda *args, **kwargs: pytest.fail("Metadata refresh must not read activity"))
+    result = json.loads(request("GET", f"/api/requests/{ws.id}?events=0")[2])
+    assert all(key not in result for key in ("events", "cursor", "events_before", "events_has_more", "events_after_has_more"))
+    assert all(key in result for key in ("request", "outputs", "asks", "usage", "queue"))
+
+
 def test_http_range_and_no_private_files(http):
     request, _, ws, _ = http
     video = ws.media / "source.mp4"
@@ -367,21 +448,22 @@ def test_http_range_and_no_private_files(http):
     assert request("GET", f"/files/{ws.id}/media/%2e%2e/memory/web_queue.json")[0] == 400
 
 
-def test_upload_preserves_name_and_rejects_nonvideo(http):
+def test_upload_preserves_name_and_accepts_any_file(http):
     request, app, _, _ = http
     headers = {"X-CSRF-Token": app.csrf_token, "X-Filename": "My%20source.mp4"}
-    status, _, body = request("POST", "/api/uploads", b"video-bytes", headers)
+    status, _, body = request("POST", "/api/uploads", b"\x00\x00\x00\x18ftypisom-video-bytes", headers)
     upload = json.loads(body)["upload"]
     assert status == 201 and upload["name"] == "My source.mp4"
     assert app.attachment_paths([upload["id"]])[0].name == "My source.mp4"
     headers["X-Filename"] = "secret.py"
-    assert request("POST", "/api/uploads", b"bad", headers)[0] == 400
+    status, _, body = request("POST", "/api/uploads", b"print(42)", headers)
+    assert status == 201 and json.loads(body)["upload"]["kind"] == "text"
 
 
 def test_upload_and_create_do_not_attach_source_twice(http):
     request, app, _, _ = http
     headers = {"X-CSRF-Token": app.csrf_token, "X-Filename": "source.mp4"}
-    _, _, data = request("POST", "/api/uploads", b"video-bytes", headers)
+    _, _, data = request("POST", "/api/uploads", b"\x00\x00\x00\x18ftypisom-video-bytes", headers)
     upload = json.loads(data)["upload"]
     status, _, data = request("POST", "/api/requests", json.dumps({
         "message": "Make a short", "attachments": [upload["id"]]}), headers)
@@ -389,9 +471,25 @@ def test_upload_and_create_do_not_attach_source_twice(http):
     assert status == 201 and result["request"]["id"] == result["request_id"]
     ws = app.workspace(result["request_id"])
     assert len(ws.load().sources) == 1
-    assert Path(ws.load().sources[0].path).read_bytes() == b"video-bytes"
+    assert Path(ws.load().sources[0].path).read_bytes() == b"\x00\x00\x00\x18ftypisom-video-bytes"
     assert result["job"]["attachments"] == []  # already staged at intake, not reattached by worker
     assert not result["job"]["skip_index"]
+
+
+def test_create_from_design_without_video_preserves_plugin_and_skips_video_index(http):
+    request, app, _, _ = http
+    headers = {"X-CSRF-Token": app.csrf_token, "Content-Type": "application/json"}
+    body = {"message": "Make a 30 second video from https://www.figma.com/design/design123?node-id=1-2",
+            "context": {"plugins": ["figma_direct"]}}
+    status, _, raw = request("POST", "/api/requests", json.dumps(body), headers)
+    result = json.loads(raw)
+    assert status == 201
+    ws = app.workspace(result["request_id"])
+    assert ws.load().sources == [] and not list(ws.media.iterdir())
+    assert result["job"]["attachments"] == [] and result["job"]["skip_index"]
+    assert result["job"]["context"]["plugins"] == ["figma_direct"]
+    assert request("GET", f"/api/requests/{ws.id}")[0] == 200
+    assert request("POST", "/api/requests", '{"message":"  "}', headers)[0] == 400
 
 
 def test_http_feature_catalog_and_context_submission(http):
@@ -412,3 +510,102 @@ def test_http_feature_catalog_and_context_submission(http):
                             json.dumps({'message': 'Review', 'context': {'folders': ['../media']}}), headers)
     assert status == 400
     assert len(app.queue.snapshot(ws)['queue']) == 1
+
+
+def test_local_import_batch_and_path_message_end_to_end(http, tmp_path):
+    from urllib.parse import quote
+
+    request, app, ws, _ = http
+    source = tmp_path / "Campaign 50"
+    source.mkdir()
+    (source / "nested").mkdir()
+    for i in range(50):
+        (source / "nested" / f"shot {i:02d}.txt").write_text(f"file {i}")
+    headers = {"Content-Type": "application/json", "X-CSRF-Token": app.csrf_token}
+    endpoint = f"/api/requests/{ws.id}/imports"
+    assert request("POST", endpoint, json.dumps({"path": str(source)}))[0] == 403
+    status, _, body = request("POST", endpoint, json.dumps({"path": str(source)}), headers)
+    assert status == 202
+    job = json.loads(body)["import"]
+
+    def completed():
+        result = json.loads(request("GET", f"{endpoint}/{job['id']}")[2])["import"]
+        return result if result["status"] not in {"queued", "running"} else None
+
+    result = until(completed)
+    assert result["status"] == "ready", result
+    ref = result["reference"]
+    assert result["files"] == 50 and ref["kind"] == "folder"
+    work = ws.work / ref["id"]
+    assert (work / "nested" / "shot 49.txt").read_text() == "file 49"
+    (work / "nested" / "shot 49.txt").write_text("edited copy")
+    assert (source / "nested" / "shot 49.txt").read_text() == "file 49"
+    query = quote("work/" + ref["id"] + "/nested/shot 49")
+    result = json.loads(request("GET", f"/api/requests/{ws.id}/features?q={query}")[2])
+    assert result["files"][0]["id"] == ref["id"] + "/nested/shot 49.txt"
+    context = {"skills": [], "folders": [ref["id"]], "files": [result["files"][0]["id"]]}
+    status, _, body = request("POST", f"/api/requests/{ws.id}/messages",
+                             json.dumps({"message": "Reformat all 50 files", "context": context}), headers)
+    assert status == 202, body
+    job = json.loads(body)["job"]
+    assert job["context"] == context and job["attachment_refs"] == [] and job["skip_index"]
+    assert len(app.queue.snapshot(ws)["queue"]) == 1
+    assert not ws.load().chat and not ws.load().sources
+    assert len(json.loads(request("GET", endpoint)[2])["jobs"]) == 1
+
+
+def test_draft_workspace_creates_no_agent_turn(http):
+    request, app, _, _ = http
+    headers = {"Content-Type": "application/json", "X-CSRF-Token": app.csrf_token}
+    status, _, body = request("POST", "/api/workspaces", "{}", headers)
+    assert status == 201
+    ws = app.workspace(json.loads(body)["request_id"])
+    assert ws.work.is_dir() and ws.load().message == "" and ws.load().chat == []
+    state = app.queue.snapshot(ws)
+    assert not state["active"] and not state["queue"]
+
+
+def test_arbitrary_file_attachment_only_queue_and_immutable_download(http):
+    request, app, ws, _ = http
+    headers = {"X-CSRF-Token": app.csrf_token, "X-Filename": "data.custom"}
+    status, _, raw = request("POST", "/api/uploads", b"\0\xffpayload", headers)
+    uploaded = json.loads(raw)["upload"]
+    assert status == 201 and uploaded["kind"] == "download"
+    status, _, raw = request("POST", f"/api/requests/{ws.id}/messages", json.dumps({
+        "message": "", "attachments": [uploaded["id"]]}), headers)
+    result = json.loads(raw)
+    assert status == 202
+    ref, = result["job"]["attachment_refs"]
+    assert result["job"]["skip_index"]
+    working = ws.work / ref["path"]
+    working.write_bytes(b"edited")
+    url = f"/api/requests/{ws.id}/attachments/{ref['id']}"
+    status, response_headers, raw = request("GET", url)
+    assert status == 200 and raw == b"\0\xffpayload"
+    assert response_headers["Content-Type"] == "application/octet-stream"
+    assert response_headers["Content-Disposition"].startswith("attachment;")
+    state = json.loads(request("GET", f"/api/requests/{ws.id}")[2])
+    assert state["queue"][0]["attachment_refs"][0]["url"] == url
+    assert not state["queue"][0]["attachment_refs"][0]["path"].startswith("/")
+
+
+def test_attachment_only_new_request_and_count_bound(http):
+    request, app, _, _ = http
+    headers = {"X-CSRF-Token": app.csrf_token, "X-Filename": "notes.txt"}
+    uploaded = json.loads(request("POST", "/api/uploads", b"notes", headers)[2])["upload"]
+    status, _, raw = request("POST", "/api/requests", json.dumps({"attachments": [uploaded["id"]]}), headers)
+    assert status == 201
+    result = json.loads(raw)
+    assert result["job"]["message"] == "" and len(result["job"]["attachment_refs"]) == 1
+    assert app.workspace(result["request_id"]).load().sources == []
+    assert request("POST", "/api/requests", json.dumps({"attachments": [uploaded["id"]] * 13}), headers)[0] == 400
+
+
+def test_staged_upload_is_hash_pinned_before_queue(http):
+    request, app, ws, _ = http
+    headers = {"X-CSRF-Token": app.csrf_token, "X-Filename": "notes.txt"}
+    uploaded = json.loads(request("POST", "/api/uploads", b"notes", headers)[2])["upload"]
+    app.attachment_paths([uploaded["id"]])[0].write_text("changed")
+    status, _, _ = request("POST", f"/api/requests/{ws.id}/messages", json.dumps({
+        "message": "Read", "attachments": [uploaded["id"]]}), headers)
+    assert status == 400 and not app.queue.snapshot(ws)["queue"]

@@ -85,6 +85,24 @@ assert.equal(integrationState({}),'Not reported');
 """)
 
 
+def test_import_events_scan_long_history_without_spreading_function_arguments():
+    run_js(r"""
+import assert from 'node:assert/strict';
+globalThis.window = {React:{createElement(){}}, Eeva:{}};
+const {importedTabs} = await import('../../src/vwb/web/static/workspace-canvas.js');
+const events = Array.from({length:150000}, (_,i) => ({seq:i+1,kind:'tool.called'}));
+events[149999] = {seq:150000,kind:'integration.imported',data:{artifacts:[
+ {kind:'image',workspace_path:'work/integrations/latest.png'}]}};
+// Initial snapshots remain history even when they exceed an engine's argument cap.
+assert.deepEqual(importedTabs(events,undefined),{cursor:150000,tabs:[]});
+const fresh=importedTabs(events,149999);
+assert.equal(fresh.cursor,150000);
+assert.deepEqual(fresh.tabs.map(tab=>tab.path),['work/integrations/latest.png']);
+assert.equal(importedTabs(events,fresh.cursor).tabs.length,0);
+assert.equal(events.length,150000);
+""")
+
+
 def test_pane_resizing_fits_the_available_space_and_releases_hidden_panes():
     run_js(r"""
 import assert from 'node:assert/strict';

@@ -7,9 +7,12 @@ from cumulative gateway usage; semantic token categories are not inferred.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -21,8 +24,14 @@ from vwb.workspace import Workspace
 
 EVENT_FILE = "chat_events.jsonl"
 MAX_TOOL_CHARS = 24000
+EVENT_PAGE_LIMIT = 300
+EVENT_PAGE_BYTES = 1024 * 1024
 _context_cache: dict[str, dict[str, Any]] = {}
 _context_lock = threading.Lock()
+_event_locks: dict[str, threading.Lock] = {}
+_event_locks_guard = threading.Lock()
+_billing_cache: dict[str, dict[str, Any]] = {}
+_billing_lock = threading.Lock()
 
 
 def _now() -> str:
@@ -75,8 +84,141 @@ def emit(ws: Workspace, kind: str, data: dict[str, Any] | None = None, *, actor:
 
 
 def read_events(ws: Workspace, after: int = 0) -> list[dict[str, Any]]:
+    """Raw snapshots for offline readers; live HTTP uses bounded event_page.
+
+    Byte offsets avoid parsing the entire preceding transcript on incremental
+    reads. The append-only JSONL remains canonical; the index is disposable.
+    """
+    with _event_index(ws) as (db, path, _last):
+        return _event_rows(path, db.execute("SELECT offset, length FROM raw_events WHERE seq > ? ORDER BY seq", (after,)))
+
+
+def _event_identity(row: dict[str, Any]) -> str:
+    data = row.get("data")
+    ident = data.get("id") if isinstance(data, dict) else None
+    if isinstance(ident, (str, int)) and ident != "":
+        return json.dumps([row.get("kind"), row.get("actor"), ident], separators=(",", ":"))
+    return "seq:" + str(row["seq"])
+
+
+@contextmanager
+def _event_index(ws: Workspace):
+    """Incrementally index complete lines, keeping only offsets and identity.
+
+    SQLite bounds process memory and survives server restarts. The source may be
+    appended by an independent worker; an incomplete final line is retried later.
+    Each process serializes its readers, and SQLite serializes index rebuilds
+    across processes without locking or rewriting the agent's activity log.
+    """
     _ensure_history(ws)
-    return [r for r in _rows(ws.memory / EVENT_FILE) if int(r.get("seq", 0)) > after]
+    path = ws.memory / EVENT_FILE
+    with _event_locks_guard:
+        lock = _event_locks.setdefault(str(path.resolve()), threading.Lock())
+    with lock:
+        db = sqlite3.connect(path.with_suffix(".index.sqlite3"), timeout=30)
+        try:
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA synchronous=NORMAL")
+            db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS raw_events (seq INTEGER PRIMARY KEY, offset INTEGER NOT NULL, length INTEGER NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS items (identity TEXT PRIMARY KEY, seq INTEGER NOT NULL)")
+            db.execute("CREATE INDEX IF NOT EXISTS items_seq ON items(seq)")
+            db.execute("BEGIN IMMEDIATE")
+            metadata = dict(db.execute("SELECT key, value FROM meta"))
+            stat = path.stat()
+            offset = int(metadata.get("offset", 0))
+            last = int(metadata.get("last_seq", 0))
+            head_size = int(metadata.get("head_size", 0)) or min(stat.st_size, 256)
+            with path.open("rb") as handle:
+                head = handle.read(head_size)
+                head_hash = hashlib.sha256(head).hexdigest()
+                reset = (metadata.get("identity") != f"{stat.st_dev}:{stat.st_ino}"
+                         or stat.st_size < offset or (int(metadata.get("head_size", 0))
+                                                     and metadata.get("head_hash") != head_hash))
+                if reset:
+                    db.execute("DELETE FROM raw_events")
+                    db.execute("DELETE FROM items")
+                    offset, last = 0, 0
+                    head_size = min(stat.st_size, 256)
+                    handle.seek(0)
+                    head_hash = hashlib.sha256(handle.read(head_size)).hexdigest()
+                handle.seek(offset)
+                end = stat.st_size
+                while handle.tell() < end:
+                    start = handle.tell()
+                    line = handle.readline(end - start)
+                    if not line.endswith(b"\n"):
+                        break
+                    offset = handle.tell()
+                    try:
+                        row = json.loads(line)
+                    except (ValueError, UnicodeDecodeError):
+                        continue
+                    if not isinstance(row, dict) or type(row.get("seq")) is not int or row["seq"] <= last:
+                        continue
+                    last = row["seq"]
+                    db.execute("INSERT OR REPLACE INTO raw_events VALUES (?, ?, ?)", (last, start, len(line)))
+                    db.execute("INSERT INTO items VALUES (?, ?) ON CONFLICT(identity) DO UPDATE SET seq=excluded.seq",
+                               (_event_identity(row), last))
+            values = {"identity": f"{stat.st_dev}:{stat.st_ino}", "offset": str(offset), "last_seq": str(last),
+                      "head_size": str(head_size), "head_hash": head_hash}
+            db.executemany("INSERT OR REPLACE INTO meta VALUES (?, ?)", values.items())
+            db.commit()
+            yield db, path, last
+        finally:
+            db.close()
+
+
+def _event_rows(path: Path, positions) -> list[dict[str, Any]]:
+    rows = []
+    with path.open("rb") as handle:
+        for offset, length in positions:
+            handle.seek(offset)
+            try:
+                row = json.loads(handle.read(length))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
+    return rows
+
+
+def event_page(ws: Workspace, *, after: int | None = None, before: int | None = None,
+               limit: int = EVENT_PAGE_LIMIT, byte_limit: int = EVENT_PAGE_BYTES) -> dict[str, Any]:
+    """Coalesced public snapshots, with independent live and older-page cursors.
+
+    Superseded snapshots are retained in JSONL but never sent repeatedly to the
+    browser. Each page is chronological. A forward cursor advances only through
+    the delivered range, so bounded catch-up never skips a final tool result.
+    """
+    if type(limit) is not int or not 1 <= limit <= EVENT_PAGE_LIMIT:
+        raise ValueError(f"Choose an activity page size from 1 to {EVENT_PAGE_LIMIT}.")
+    if (after is not None and (type(after) is not int or after < 0)
+            or before is not None and (type(before) is not int or before < 1)
+            or after is not None and before is not None):
+        raise ValueError("Choose either a valid newer or older activity cursor.")
+    forward = after is not None
+    predicate, cursor = ("i.seq > ?", after) if forward else ("i.seq < ?", before if before is not None else 2**63 - 1)
+    direction = "ASC" if forward else "DESC"
+    with _event_index(ws) as (db, path, last):
+        positions = db.execute(f"SELECT i.seq, r.offset, r.length FROM items i JOIN raw_events r ON r.seq=i.seq "
+                               f"WHERE {predicate} ORDER BY i.seq {direction} LIMIT ?", (cursor, limit + 1)).fetchall()
+        selected, size = [], 0
+        for seq, offset, length in positions[:limit]:
+            # A single final snapshot is indivisible. Ordinarily tool output is
+            # <=24K and reasoning is smaller than the 1MiB page allowance.
+            if selected and size + length > byte_limit:
+                break
+            selected.append((seq, offset, length))
+            size += length
+        more = len(positions) > len(selected)
+        rows = _event_rows(path, ((offset, length) for _, offset, length in selected))
+        rows.sort(key=lambda row: row["seq"])
+        if forward:
+            next_cursor = rows[-1]["seq"] if more and rows else max(last, after)
+            return {"events": rows, "cursor": next_cursor, "events_after_has_more": more}
+        return {"events": rows, "cursor": last, "events_before": rows[0]["seq"] if rows else before,
+                "events_has_more": more}
 
 
 def _public_text(content: Any) -> str:
@@ -227,6 +369,61 @@ def _latest_context(ws: Workspace, thread_id: str | None) -> tuple[dict[str, Any
     return None, None
 
 
+def _reasoning_output(usage: dict[str, Any]) -> int | None:
+    details = usage.get("output_tokens_details") or {}
+    for value in (details.get("reasoning_tokens"), details.get("thinking_tokens"), usage.get("thoughts_token_count")):
+        if value is not None:
+            return value
+    return None
+
+
+def _billing_usage(ws: Workspace) -> dict[str, Any]:
+    path = ws.ledger / "tools.jsonl"
+    empty = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0,
+             "reasoning_output_tokens": 0, "total_tokens": 0, "calls": 0, "source": "gateway_call_log"}
+    if not path.exists():
+        return empty
+    with _billing_lock:
+        stat = path.stat()
+        cache = _billing_cache.get(str(path))
+        if not cache or cache["identity"] != (stat.st_dev, stat.st_ino) or stat.st_size < cache["offset"]:
+            cache = {"identity": (stat.st_dev, stat.st_ino), "offset": 0, "billing": empty}
+        billing = cache["billing"]
+        with path.open("rb") as handle:
+            handle.seek(cache["offset"])
+            while line := handle.readline():
+                if not line.endswith(b"\n"):
+                    break
+                cache["offset"] = handle.tell()
+                if b'"usage"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                u = row.get("usage") or {}
+                if not isinstance(u, dict) or not any(k in u for k in ("input_tokens", "output_tokens", "prompt_token_count", "candidates_token_count")):
+                    continue
+                inp = u.get("billed_input_tokens", u.get("input_tokens", u.get("prompt_token_count", 0))) or 0
+                out = u.get("billed_output_tokens", u.get("output_tokens", u.get("candidates_token_count", 0))) or 0
+                billing["calls"] += 1
+                billing["input_tokens"] += inp
+                billing["output_tokens"] += out
+                cached = (u.get("input_tokens_details") or {}).get("cached_tokens", u.get("cached_content_token_count", 0))
+                billing["cached_input_tokens"] += u.get("billed_cached_input_tokens", cached) or 0
+                billing["reasoning_output_tokens"] += u.get("billed_reasoning_output_tokens", _reasoning_output(u)) or 0
+                if "billed_input_tokens" in u or "billed_output_tokens" in u:
+                    billing["total_tokens"] += inp + out
+                else:
+                    billing["total_tokens"] += u.get("total_tokens", u.get("total_token_count", inp + out)) or 0
+        if len(_billing_cache) >= 32 and str(path) not in _billing_cache:
+            _billing_cache.pop(next(iter(_billing_cache)))
+        _billing_cache[str(path)] = cache
+        return dict(billing)
+
+
 def context_usage(ws: Workspace) -> dict[str, Any]:
     session = read_json(ws.memory / "lead_session.json", {}) or {}
     active = read_json(ws.memory / "active_host.json", {}) or {}
@@ -239,6 +436,8 @@ def context_usage(ws: Workspace) -> dict[str, Any]:
     limit = (info or {}).get("model_context_window")
     source = "codex_token_count" if last else "unavailable"
     estimated = None
+    limits = {field: None for field in ("max_output_tokens", "auto_compaction_enabled", "auto_compact_tokens",
+                                      "compaction_count", "last_stop_reason")}
     if not is_codex:
         direct = read_json(ws.memory / "provider_context.json", {}) or {}
         # A measurement belongs to one provider/model, never the last provider
@@ -246,29 +445,17 @@ def context_usage(ws: Workspace) -> dict[str, Any]:
         if key and direct.get("key") == key:
             used, limit = direct.get("used_tokens"), direct.get("limit_tokens")
             measured_at, estimated = direct.get("measured_at"), direct.get("estimated_tokens")
+            limits.update({field: direct.get(field) for field in limits})
             usage = direct.get("breakdown") or {}
             last = {"input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens"),
                     "cached_input_tokens": (usage.get("input_tokens_details") or {}).get("cached_tokens"),
-                    "reasoning_output_tokens": (usage.get("output_tokens_details") or {}).get("reasoning_tokens")}
+                    "reasoning_output_tokens": _reasoning_output(usage)}
             source = "provider_usage" if used is not None else "unavailable"
-    billing = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0,
-               "reasoning_output_tokens": 0, "total_tokens": 0, "calls": 0, "source": "gateway_call_log"}
-    for row in _rows(ws.ledger / "tools.jsonl"):
-        u = row.get("usage") or {}
-        if not any(k in u for k in ("input_tokens", "output_tokens", "prompt_token_count", "candidates_token_count")):
-            continue
-        inp = u.get("input_tokens", u.get("prompt_token_count", 0)) or 0
-        out = u.get("output_tokens", u.get("candidates_token_count", 0)) or 0
-        billing["calls"] += 1
-        billing["input_tokens"] += inp
-        billing["output_tokens"] += out
-        billing["cached_input_tokens"] += (u.get("input_tokens_details") or {}).get("cached_tokens", u.get("cached_content_token_count", 0)) or 0
-        billing["reasoning_output_tokens"] += (u.get("output_tokens_details") or {}).get("reasoning_tokens", u.get("thoughts_token_count", 0)) or 0
-        billing["total_tokens"] += u.get("total_tokens", u.get("total_token_count", inp + out)) or 0
+    billing = _billing_usage(ws)
     return {"context": {"used_tokens": used, "limit_tokens": limit,
                          "remaining_tokens": max(0, limit - used) if used is not None and limit else None,
                          "percent": round(100 * used / limit, 2) if used is not None and limit else None,
                          "source": source, "measured_at": measured_at, "estimated_tokens": estimated,
-                         "label": "Last reported context", "breakdown": last},
+                         "label": "Last reported context", "breakdown": last, **limits},
             "billing": billing, "model": key.split(":", 1)[1] if key and ":" in key else None,
             "thread_id": thread_id, "compact_available": bool(is_codex and thread_id)}

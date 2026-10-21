@@ -86,6 +86,42 @@ def test_selection_caps_and_runtime(settings):
     assert cfg["host"] == "anthropic_api" and cfg["model"] == "claude-opus-5-5"
     assert cfg["context_window"] == 300000 and cfg["auto_compact_tokens"] == 255000
     assert cfg["service_tier"] == "fast" and cfg["speed"] == "fast" and cfg["fallbacks"] == []
+    assert cfg["image_input_supported"] is True
+
+
+def test_router_anthropic_alias_uses_native_key_and_never_queries_router(settings, monkeypatch):
+    def forbidden_client(**kwargs):
+        raise AssertionError("Anthropic selection must not contact OpenRouter")
+    monkeypatch.setattr(models.httpx, "Client", forbidden_client)
+    config.update_provider("openrouter", {"action": "clear"})
+    row = models.resolve("openrouter/anthropic/claude-opus-5.5", settings)
+    assert row["provider"] == "anthropic" and row["host"] == "anthropic_api" and row["available"]
+    assert row["model"] == "claude-opus-5-5" and row["image_input_supported"]
+    selected = {"model_id": "custom_openrouter", "custom_model": "anthropic/claude-opus-5.5", "context_tokens": 300000}
+    runtime = models.runtime(selected, settings)
+    assert runtime["provider"] == "anthropic" and runtime["host"] == "anthropic_api"
+    assert runtime["model"] == "claude-opus-5-5"
+    config.update_provider("anthropic", {"action": "clear"})
+    with pytest.raises(ValueError, match="anthropic API key"):
+        models.validate(selected, settings)
+    with pytest.raises(ValueError, match="no verified native mapping"):
+        models.resolve("anthropic/unknown-claude", settings)
+
+
+def test_frozen_router_configs_and_claude_sdk_fallback_use_anthropic_direct(settings):
+    frozen = {"model": "anthropic/claude-fable-5.1", "provider": "openrouter", "host": "openrouter_api",
+              "context_window": 300000, "effort": "max"}
+    routed = models.direct_anthropic_route(frozen)
+    assert routed["provider"] == "anthropic" and routed["host"] == "anthropic_api"
+    assert routed["model"] == "claude-fable-5-1" and routed["context_window"] == 300000
+    assert frozen["provider"] == "openrouter"
+    old_fallback = models.direct_anthropic_route({"host": "claude_sdk", "model": "claude-fable-5-1"})
+    assert old_fallback["provider"] == "anthropic" and old_fallback["host"] == "anthropic_api"
+    fallback = config.slot("main")["fallbacks"][-1]
+    assert fallback["provider"] == "anthropic" and fallback["host"] == "anthropic_api"
+    assert fallback["context_window"] == 1000000
+    with pytest.raises(ValueError, match="context budget"):
+        models.direct_anthropic_route({**frozen, "context_window": 2000000})
 
 
 def test_custom_resolution_exact_id_caps_and_reload(settings, monkeypatch):
@@ -104,6 +140,8 @@ def test_custom_resolution_exact_id_caps_and_reload(settings, monkeypatch):
     models.preferences({"default_selection": selected}, settings)
     assert models.catalog(settings)["selected_model"]["model"] == "example/small-model"
     assert models.runtime(selected, settings)["max_output_tokens"] == 8192
+    assert descriptor["input_modalities"] is None and descriptor["image_input_supported"] is False
+    assert models.runtime(selected, settings)["image_input_supported"] is False
     with pytest.raises(ValueError, match="context budget"):
         models.validate({**selected, "context_tokens": 300000}, settings)
     with pytest.raises(ValueError, match="exact model ID"):
@@ -112,6 +150,39 @@ def test_custom_resolution_exact_id_caps_and_reload(settings, monkeypatch):
         with pytest.raises(ValueError):
             models.canonical_openrouter(value)
     assert all(url.startswith("https://openrouter.ai/api/v1/models") for url in calls)
+
+
+@pytest.mark.parametrize(("modalities", "supported"), [
+    (["text"], False), (["text", "image"], True), ([], False),
+    (None, False), ("text,image", False), (["text", None], False),
+])
+def test_custom_model_modalities_survive_catalog_reload_and_runtime(settings, monkeypatch, modalities, supported):
+    def response(req):
+        if req.url.path.endswith("endpoints"):
+            return httpx.Response(200, json={"data": {"endpoints": []}})
+        return httpx.Response(200, json={"data": [{"id": "example/capability-model", "context_length": 128000,
+            "supported_parameters": ["tools"], "architecture": {"input_modalities": modalities}}]})
+    real_client = httpx.Client
+    monkeypatch.setattr(models.httpx, "Client", lambda **kw: real_client(transport=httpx.MockTransport(response), **kw))
+    descriptor = models.resolve("example/capability-model", settings)
+    expected = modalities if isinstance(modalities, list) and all(isinstance(value, str) for value in modalities) else None
+    assert descriptor["input_modalities"] == expected
+    assert descriptor["image_input_supported"] is supported
+    selected = {"model_id": "custom_openrouter", "custom_model": "example/capability-model", "context_tokens": 128000,
+                "effort": None}
+    runtime = models.runtime(selected, settings)
+    assert runtime["input_modalities"] == expected and runtime["image_input_supported"] is supported
+    assert models.describe(selected, settings)["image_input_supported"] is supported
+
+
+def test_legacy_custom_configs_are_conservative_and_known_native_models_keep_images():
+    assert not models.image_input_supported({"id": "custom_openrouter", "provider": "openrouter"})
+    assert not models.image_input_supported({"selection": {"model_id": "custom_openrouter"}, "provider": "openrouter"})
+    assert not models.image_input_supported({"provider": "openrouter", "model": "unknown/model"})
+    assert models.image_input_supported({"provider": "openrouter", "model": "meta/muse-wonder"})
+    assert models.image_input_supported({"provider": "anthropic", "model": "claude-opus-5-5"})
+    assert models.image_input_supported({"provider": "openai", "model": "gpt-6-astra"})
+    assert not models.image_input_supported({"provider": "anthropic", "image_input_supported": False})
 
 
 def test_selection_persistence_legacy_and_queue_freeze(settings):

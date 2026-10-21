@@ -36,6 +36,13 @@ def _graph(canvas: Canvas, media_index: dict[str, int]) -> tuple[str, str]:
 
 
 def mix(ws: Workspace, canvas: Canvas, out_path: Path) -> dict:
+    if not canvas.time_map:
+        duration = canvas.length / canvas.fps
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        run([which("ffmpeg"), "-hide_banner", "-nostdin", "-y", "-f", "lavfi", "-i",
+             "anullsrc=r=48000:cl=stereo", "-t", f"{duration:.9f}", "-c:a", "aac", "-b:a", "256k",
+             str(out_path)], expect_files=[out_path])
+        return {"mode": "silent", "seconds": duration, "note": "Authored timeline without source narration; silence is intentional."}
     req = ws.load()
     media_paths = {s.ref: s.path for s in req.sources}
     used = sorted({s.media for s in canvas.time_map})

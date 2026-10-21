@@ -564,6 +564,9 @@ def force_fresh() -> bool:
 def build_index(ws: Workspace, media_id: str | None = None, force: bool = False,
                 progress: Callable[[str], None] | None = None) -> dict[str, Any]:
     req = ws.load()
+    if not req.sources:
+        return {"status": "not_applicable", "sources": [],
+                "notice": "No source video is attached. Use the brief and imported design references; there is no video index to build."}
     src = req.source(media_id)
     if not force:
         reuse_index(ws, src, progress)

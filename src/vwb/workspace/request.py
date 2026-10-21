@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +28,7 @@ SUBDIRS = ("media", "index", "assets", "canvas", "plates", "renders", "qc", "led
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 class SourceRef(BaseModel):
@@ -67,6 +67,7 @@ class ChatTurn(BaseModel):
     role: str                     # human | job_lead
     text: str
     context: dict[str, list[str]] = Field(default_factory=dict)
+    attachments: list[dict[str, Any]] = Field(default_factory=list)
     ts: str = Field(default_factory=now_iso)
 
 
@@ -117,7 +118,7 @@ class Workspace:
 
     # ---- lifecycle ----
     @classmethod
-    def create(cls, message: str, sources: list[Path], request_id: str | None = None) -> "Workspace":
+    def create(cls, message: str, sources: list[Path], request_id: str | None = None) -> Workspace:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         name_hint = sources[0].stem if sources else message
         rid = request_id or f"r-{stamp}-{_slug(name_hint)}"
@@ -133,7 +134,7 @@ class Workspace:
         return ws
 
     @classmethod
-    def open(cls, request_id: str) -> "Workspace":
+    def open(cls, request_id: str) -> Workspace:
         root = Path(request_id)
         if not root.is_absolute():
             root = RUNS_DIR / request_id
@@ -142,7 +143,7 @@ class Workspace:
         return cls(root)
 
     @classmethod
-    def latest(cls) -> "Workspace":
+    def latest(cls) -> Workspace:
         candidates = sorted((p for p in RUNS_DIR.glob("r-*") if (p / "request.json").is_file()),
                             key=lambda p: p.stat().st_mtime)
         if not candidates:
@@ -176,9 +177,10 @@ class Workspace:
         self.save(req)
         return req
 
-    def add_chat(self, role: str, text: str, *, context: dict[str, list[str]] | None = None) -> None:
+    def add_chat(self, role: str, text: str, *, context: dict[str, list[str]] | None = None,
+                 attachments: list[dict[str, Any]] | None = None) -> None:
         req = self.load()
-        req.chat.append(ChatTurn(role=role, text=text, context=context or {}))
+        req.chat.append(ChatTurn(role=role, text=text, context=context or {}, attachments=attachments or []))
         self.save(req)
 
     def rel(self, path: Path | str) -> str:

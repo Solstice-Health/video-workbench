@@ -16,6 +16,27 @@ Work on `outputs/<id>/canvas.json` in the work folder, check it with `canvas_che
   Several spans are joined in order. The audio (the narration) follows the time map, and it is the clock of
   every layer, whatever the layer shows.
 
+## New videos without a source video
+
+A source recording is optional. Use `canvas_new(output="short-01", duration_s=30)`
+to start an original video from a brief or design references. Its timeline is:
+
+```json
+{"time_map": [], "duration_frames": 900}
+```
+
+At 30 fps this is 30 seconds. `duration_frames` must be a positive integer and
+cannot be combined with nonempty `time_map`. Layer spans and keyframes use the
+same output frame numbers as source edits. Image, clip, shape and text layers
+work normally; source video layers and transcript captions need a source map.
+The current audio renderer supplies silence when there is no source narration.
+
+Figma raster imports expose an `asset_ref` on each image artifact. Use that ref in
+an image layer or as an image/video-generation reference. These pixels retain
+external-source lineage and are not approved copy or a licence grant. Mint Figma
+text with `copy_add(source="authored", text=..., note="file/node URL and import path")`;
+it remains unverified until confirmed. No fabricated video or source ID is needed.
+
 ## Animated values
 `box`, `crop`, `opacity`, `rotate`, a shape's `fill` and `draw`, a stroke's `color` and a text `color` are
 either static or a list of keyframes:

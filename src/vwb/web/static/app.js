@@ -1,12 +1,14 @@
 import htm from './vendor/htm.mjs';
-import {triggerAt, matchingOptions, toContext} from './composer-picker.js';
+import {triggerAt, matchingOptions, toContext, workspaceReference, displayPath} from './composer-picker.js';
 import {ModelControl} from './model-control.js';
-import {WorkspaceExplorer, WorkspaceCanvas, initialCanvas, canvasReducer, importedTabs, studioTab} from './workspace-canvas.js';
+import {WorkspaceExplorer, WorkspaceCanvas, initialCanvas, canvasReducer, importedTabs, studioTab, fileTab, formatBytes} from './workspace-canvas.js';
 import {IntegrationsControl} from './integrations-control.js';
 import {COMPACT_WIDTH, paneLayout, panePreferences} from './pane-layout.js';
+import {LocalImportDialog, localPath} from './local-import-control.js';
 
 // Eeva and React are local, versioned assets. No network service is needed to open the UI.
-const {createElement, useState, useEffect, useRef, useCallback} = window.React;
+const {createElement, useState, useEffect, useRef, useCallback, useMemo} = window.React;
+const memo = window.React.memo || (component => component);
 const html = htm.bind(createElement);
 const {Surface, Button, Icon, Tooltip, SolsticeMark, UserMessage, AgentMessage,
   Composer, MessageBar, Tabs, TabList, Tab, TabPanel} = window.Eeva;
@@ -18,14 +20,44 @@ const stamp = value => typeof value === 'number' ? value * 1000 : Date.parse(val
 const plain = value => typeof value === 'string' ? value : JSON.stringify(value, null, 2);
 const title = value => (value || 'Untitled conversation').replace(/_/g, ' ').replace(/\.mp4$/i, '').replace(/\bFinal Video.*$/i, '').trim();
 
+export function turnRecovery(snapshot) {
+  if (!snapshot || snapshot.active) return {job: null, queueCount: 0};
+  const candidate = snapshot.resumable_job;
+  const interrupted = ['failed', 'stopped'].includes(candidate?.status) || (candidate?.status === 'cancelled' && !!candidate.resume_of);
+  const job = candidate?.id && ['message', 'compact'].includes(candidate.kind) && interrupted ? candidate : null;
+  const queueCount = snapshot.paused ? (snapshot.queue || []).filter(job => ['queued', 'pending'].includes(job.status)).length : 0;
+  return {job, queueCount};
+}
+
+export function RecoveryActions({recovery, busy, onResume}) {
+  return html`<span className="recovery-actions">
+    ${recovery.job && html`<button className="text-action" disabled=${busy} onClick=${() => onResume({job_id: recovery.job.id, use_current_model: true, use_current_prompt: true})}
+      title="Continue using the selected model and prompt">Resume turn</button>`}
+    ${recovery.queueCount > 0 && html`<button className="text-action" disabled=${busy} onClick=${() => onResume({})}>Resume queued messages</button>`}
+  </span>`;
+}
+
 function IconButton({name, label, onClick, disabled, ...rest}) {
   return html`<${Tooltip} content=${label}><${Button} variant="text" iconOnly aria-label=${label}
     onClick=${onClick} disabled=${disabled} ...${rest}><${Icon} name=${name} size=${16}/><//><//>`;
 }
 
 function ReferenceTags({context}) {
-  const labels = [...(context?.skills || []).map(id => `/features ${id}`), ...(context?.folders || []).map(id => `@work/${id === '.' ? '' : `${id}/`}`), ...(context?.plugins || []).map(id => `Plugin: ${id}`)];
-  return labels.length ? html`<div className="message-references" aria-label="Message references">${labels.map(label => html`<span key=${label}>${label}</span>`)}</div>` : null;
+  const pathLabel = path => ({label: `@${displayPath(path)}`, full: `@${path}`});
+  const labels = [...(context?.skills || []).map(id => ({label: `/features ${id}`, full: `/features ${id}`})),
+    ...(context?.folders || []).map(id => pathLabel(`work/${id === '.' ? '' : `${id}/`}`)),
+    ...(context?.files || []).map(id => pathLabel(`work/${id}`)),
+    ...(context?.plugins || []).map(id => ({label: `Plugin: ${id}`, full: `Plugin: ${id}`}))];
+  return labels.length ? html`<div className="message-references" aria-label="Message references">${labels.map(item => html`<${Tooltip} key=${item.full} content=${item.full}><span title=${item.full} aria-label=${item.full}>${item.label}</span><//>`)}</div>` : null;
+}
+
+function ChatAttachments({items = [], onOpen}) {
+  return items.length ? html`<div className="chat-attachments" aria-label="Attached files">${items.map(item => html`<div className="chat-attachment" key=${item.id}>
+    <button className="attachment-open" onClick=${() => onOpen(fileTab({path: item.workspace_path || `work/${item.path}`, name: item.name}))} aria-label=${`Open ${item.name} in canvas`}>
+      ${item.kind === 'image' && item.url ? html`<img src=${item.url} alt="" loading="lazy"/>` : html`<${Icon} name="file" size=${18}/>`}
+      <span><strong>${item.name}</strong><small>${formatBytes(item.bytes)} · ${item.kind === 'download' ? 'File' : item.kind}</small></span>
+    </button><a className="attachment-download" href=${item.url} download=${item.name} aria-label=${`Download original ${item.name}`}>Original</a>
+  </div>`)}</div>` : null;
 }
 
 function blocks(markdown) {
@@ -58,36 +90,75 @@ function blocks(markdown) {
   return out;
 }
 
-function uniqueEvents(events) {
+export function coalesceEvents(...batches) {
   const map = new Map();
-  for (const event of events || []) map.set(event.data?.id || `seq-${event.seq}`, event);
+  for (const events of batches) for (const event of events || []) {
+    const key = event.data?.id ? JSON.stringify([event.kind, event.actor || '', event.data.id]) : `seq-${event.seq}`;
+    const previous = map.get(key);
+    if (!previous || Number(event.seq) > Number(previous.seq)) map.set(key, event);
+  }
   return [...map.values()].sort((a, b) => a.seq - b.seq);
 }
 
-function ToolCall({event, settledState}) {
+export function mergeEventPage(before, page, {older = false, snapshot = false} = {}) {
+  const events = page.events?.length ? coalesceEvents(before?.events, page.events) : before?.events || [];
+  if (older) return {...before, events, events_before: page.events_before,
+    events_has_more: !!page.events_has_more};
+  const merged = {...before, ...page, events};
+  if (before && !snapshot) {
+    merged.events_before = before.events_before;
+    merged.events_has_more = before.events_has_more;
+  } else if (before?.events_before && before.events_before < (page.events_before || Infinity)) {
+    merged.events_before = before.events_before;
+    merged.events_has_more = before.events_has_more;
+  }
+  merged.cursor = Math.max(Number(before?.cursor) || 0, Number(page.cursor) || 0);
+  return merged;
+}
+
+export function activityIndex(events) {
+  const rows = (events || []).filter(e => ['thinking', 'tool', 'message'].includes(e.kind) || e.kind?.startsWith('agent.'))
+    .map(event => ({event, at: stamp(event.ts)})).sort((a, b) => a.at - b.at || a.event.seq - b.event.seq);
+  const cached = new Map();
+  const bound = (at, upper) => {
+    let low = 0, high = rows.length;
+    while (low < high) {const mid = (low + high) >>> 1; if (rows[mid].at < at || (upper && rows[mid].at === at)) low = mid + 1; else high = mid;}
+    return low;
+  };
+  return (start, end) => {
+    const from = stamp(start), to = end ? stamp(end) : Infinity, key = `${from}:${to}`;
+    if (!cached.has(key)) cached.set(key, rows.slice(bound(from, false), bound(to, true)).map(row => row.event));
+    return cached.get(key);
+  };
+}
+
+export const ToolCall = memo(function ToolCall({event, settledState}) {
+  const [expanded, setExpanded] = useState(false);
   const d = event.data || {}, done = d.status === 'completed', failed = d.status === 'failed' || (!done && settledState === 'failed');
   const stopped = !done && !failed && settledState === 'stopped';
   const command = d.arguments?.command || d.arguments?.cmd || d.command;
   const label = d.name || (command ? 'Bash' : 'Tool');
-  return html`<details className="tool-call">
+  const preview = String(command || d.text || (d.arguments ? plain(d.arguments) : '')).replace(/\s+/g, ' ').slice(0, 160);
+  return html`<details className="tool-call" open=${expanded} onToggle=${event => {if (event.target === event.currentTarget) setExpanded(event.currentTarget.open);}}>
     <summary><${Icon} name=${failed ? 'circle-alert' : done ? 'check' : 'square'} size=${13}/>
       <span className="tool-name">${label.replace(/^mcp__vwb__/, '')}</span>
-      <span className="tool-preview">${command || d.text || (d.arguments ? plain(d.arguments).replace(/\s+/g, ' ') : '')}</span>
+      <span className="tool-preview">${preview}</span>
       <span className="tool-state">${failed ? 'Failed' : done ? 'Done' : stopped ? 'Stopped' : 'Running'}</span><${Icon} name="chevron-down" size=${13}/>
     </summary>
-    <div className="tool-detail">${d.arguments && html`<div className="section-label">Input</div><pre>${plain(d.arguments)}</pre>`}
+    ${expanded && html`<div className="tool-detail">${d.arguments && html`<div className="section-label">Input</div><pre>${plain(d.arguments)}</pre>`}
       ${(d.output || d.text) && html`<div className="section-label">Output</div><pre>${d.output || d.text}</pre>`}
-      ${d.exit_code != null && html`<p className="caption">Exit code ${d.exit_code}</p>`}</div>
+      ${d.exit_code != null && html`<p className="caption">Exit code ${d.exit_code}</p>`}</div>`}
   </details>`;
-}
+});
 
-function Activity({events, working = false, started, state = 'done'}) {
+export const Activity = memo(function Activity({events, working = false, started, state = 'done'}) {
   const [expanded, setExpanded] = useState(false), [allTools, setAllTools] = useState(false);
-  const visible = uniqueEvents(events);
+  const visible = events || [];
   const thoughts = visible.filter(e => e.kind === 'thinking' && e.data?.text);
   const tools = visible.filter(e => e.kind === 'tool');
   const messages = visible.filter(e => e.kind === 'message' && e.data?.text);
-  if (!thoughts.length && !tools.length && !working && !messages.length) return null;
+  const agentEvents = visible.filter(e => e.kind.startsWith('agent.'));
+  if (!thoughts.length && !tools.length && !working && !messages.length && !agentEvents.length) return null;
   const last = thoughts.at(-1)?.data.text || (tools.at(-1)?.data.name ? `Using ${tools.at(-1).data.name}` : 'Working on your request');
   return html`<div className="activity">
     <button className="thinking-toggle" aria-expanded=${expanded} onClick=${() => setExpanded(!expanded)}>
@@ -99,11 +170,50 @@ function Activity({events, working = false, started, state = 'done'}) {
       ${messages.map(e => html`<p key=${e.data.id || e.seq}>${e.data.text}</p>`)}</div>`}
     <div className="tools">${(allTools ? tools : tools.slice(-3)).map(e => html`<${ToolCall} key=${e.data.id || e.seq} event=${e} settledState=${working ? null : state}/>`)}
       ${tools.length > 3 && html`<button className="text-action tool-more" onClick=${() => setAllTools(!allTools)}>${allTools ? 'Show fewer tools' : `Show all ${tools.length} tool calls`}</button>`}</div>
+    <${AgentActivity} events=${agentEvents} working=${working}/>
     ${working && messages.at(-1) && html`<${AgentMessage} blocks=${blocks(messages.at(-1).data.text)}/>`}
   </div>`;
+}, (before, after) => before.working === after.working && before.started === after.started && before.state === after.state
+  && before.events?.length === after.events?.length && (before.events || []).every((event, index) => event === after.events[index]));
+
+function AgentToolDetail({tool}) {
+  const [expanded, setExpanded] = useState(false);
+  return html`<details className="agent-tool-detail" open=${expanded} onToggle=${event => {if (event.target === event.currentTarget) setExpanded(event.currentTarget.open);}}>
+    <summary>${tool.tool} · ${tool.status}</summary>${expanded && html`<pre>${tool.output}</pre>`}</details>`;
 }
 
-function ContextUsage({usage, active, pending, compact, busy}) {
+function AgentActivity({events, working}) {
+  const [expanded, setExpanded] = useState(false);
+  const agents = new Map();
+  for (const event of events) {
+    const d = event.data || {};
+    let id = d.ticket || (event.kind === 'agent.result' ? event.actor : null);
+    if (!id || id === 'job_lead') continue;
+    const row = agents.get(id) || {id, status: 'running', history: []};
+    if (event.kind === 'agent.assign') Object.assign(row, {parent: d.parent, role: d.role, task: d.gist, depth: d.depth});
+    if (event.kind === 'agent.activity') Object.assign(row, {tool: d.tool, calls: d.tool_calls});
+    if (event.kind === 'agent.progress') row.progress = d.text;
+    if (event.kind === 'agent.followup') row.status = 'running';
+    if (event.kind === 'agent.interrupt' || event.kind === 'agent.cancel') row.status = 'stopping';
+    if (event.kind === 'agent.result') {
+      try {const result = JSON.parse(d.text); row.status = result.status; row.result = plain(result.result);} catch (_) {row.status = d.status || 'done';}
+    }
+    if (event.kind === 'agent.tool') row.history.push(d);
+    agents.set(id, row);
+  }
+  if (!agents.size) return null;
+  return html`<details className="agent-monitor" open=${expanded} onToggle=${event => {if (event.target === event.currentTarget) setExpanded(event.currentTarget.open);}}><summary>${agents.size} ${agents.size === 1 ? 'helper' : 'helpers'} · task and activity</summary>
+    ${expanded && [...agents.values()].map(row => html`<details key=${row.id} className="agent-monitor-row"><summary><span>${row.role || row.id}</span><span className="caption">${!working && ['running','stopping'].includes(row.status) ? 'Stopped' : row.status} ${row.calls ? `· ${row.calls} tool calls` : ''}</span></summary>
+      <p>${row.task || row.id}</p>${row.parent && html`<p className="caption">Parent: ${row.parent}</p>`}
+      ${row.tool && html`<p className="caption">Latest tool: ${row.tool}</p>`}
+      ${row.progress && html`<p>${row.progress}</p>`}
+      ${row.history.slice(-5).map((tool,i) => html`<${AgentToolDetail} key=${i} tool=${tool}/>`)}
+      ${row.result && html`<p>${row.result}</p>`}
+    </details>`)}
+  </details>`;
+}
+
+export function ContextUsage({usage, active, pending, compact, busy}) {
   const [open, setOpen] = useState(false), ref = useRef(null), trigger = useRef(null);
   useEffect(() => {
     if (!open) return;
@@ -131,6 +241,8 @@ function ContextUsage({usage, active, pending, compact, busy}) {
         <div><dt>Output</dt><dd>${number(ctx.breakdown.output_tokens)}</dd></div>
         <div><dt>Reasoning <span className="caption">(included in output)</span></dt><dd>${number(ctx.breakdown.reasoning_output_tokens)}</dd></div>
       </dl>`}
+      ${ctx.max_output_tokens != null && html`<dl className="usage-rows"><div><dt>Output limit per call</dt><dd>${number(ctx.max_output_tokens)}</dd></div></dl><p className="caption">Includes reasoning when the provider counts it toward output. This limit is separate from the context window.</p>`}
+      ${ctx.auto_compaction_enabled && html`<dl className="usage-rows"><div><dt>Automatic compactions</dt><dd>${number(ctx.compaction_count)}</dd></div></dl>`}
       <div className="usage-billing"><h4>Conversation totals</h4><dl className="usage-rows">
         <div><dt>Input tokens</dt><dd>${number(bill.input_tokens)}</dd></div>
         <div><dt>Output tokens</dt><dd>${number(bill.output_tokens)}</dd></div>
@@ -138,7 +250,7 @@ function ContextUsage({usage, active, pending, compact, busy}) {
         <p className="caption">Cumulative usage, including helpers. This is separate from the current context.</p></div>
       <${Button} variant="secondary" size="sm" className="compact-button" disabled=${!!active || pending || busy || !usage?.compact_available} onClick=${compact}>
         <${Icon} name="refresh" size=${14}/> ${busy ? 'Compacting…' : 'Compact conversation'}<//>
-      <p className="caption">${active || pending ? 'Available after the current turn and queued messages finish.' : usage?.compact_available ? 'Keeps your thread, decisions and files. Earlier context is summarized.' : 'Available after a Codex conversation has started.'}</p>
+      <p className="caption">${ctx.auto_compaction_enabled ? `Automatic compaction runs at ${number(ctx.auto_compact_tokens)} input tokens. Files and full history remain saved.` : active || pending ? 'Available after the current turn and queued messages finish.' : usage?.compact_available ? 'Keeps your thread, decisions and files. Earlier context is summarized.' : 'Manual compaction is available for Codex conversations.'}</p>
     </section>`}
   </div>`;
 }
@@ -148,12 +260,13 @@ function QuestionQueue({questions, index, setIndex, answer, setAnswer, hidden, s
   const q = questions[Math.min(index, questions.length - 1)];
   return html`<section className="question-queue" aria-label="Questions from the agent">
     <div className="question-heading"><button className="question-toggle" onClick=${() => setHidden(!hidden)} aria-expanded=${!hidden}>
-      <${Icon} name="circle-alert" size=${14}/><span>${q.status === 'defaulted' ? 'Review an earlier choice' : 'Your input'}</span><${Icon} name=${hidden ? 'chevron-right' : 'chevron-down'} size=${13}/></button>
+      <${Icon} name="circle-alert" size=${14}/><span>${q.status === 'defaulted' ? 'Review an earlier choice' : questionWaiting(q) ? 'Agent waiting for you' : 'Your input'}</span><${Icon} name=${hidden ? 'chevron-right' : 'chevron-down'} size=${13}/></button>
       <div className="question-navigation"><span className="caption">${index + 1} of ${questions.length}</span>
         <${IconButton} name="chevron-left" label="Previous question" disabled=${index === 0} onClick=${() => setIndex(index - 1)}/>
         <${IconButton} name="chevron-right" label="Next question" disabled=${index >= questions.length - 1} onClick=${() => setIndex(index + 1)}/></div></div>
     ${!hidden && html`<h3>${q.question}</h3>${q.why && html`<p className="question-why">${q.why}</p>`}
       ${q.status === 'defaulted' && html`<p className="caption">The agent used its recommended option while waiting. You can change it.</p>`}
+      ${questionWaiting(q) && html`<p className="caption">Your answer resumes the waiting agent. Other helpers can keep working.</p>`}
       <div role="group" aria-label=${q.question} className="question-options">
         ${(q.options || []).map((o, i) => html`<button key=${o.id} aria-pressed=${answer === o.id} className=${`question-option ${answer === o.id ? 'selected' : ''}`} onClick=${() => setAnswer(answer === o.id ? null : o.id)}>
           <span className="option-key">${i + 1}</span><span className="option-content"><span>${o.label || o.text || o.id}</span>
@@ -161,6 +274,10 @@ function QuestionQueue({questions, index, setIndex, answer, setAnswer, hidden, s
           ${answer === o.id && html`<${Icon} name="check" size=${14}/>`}</button>`)}
       </div>`}
   </section>`;
+}
+
+function questionWaiting(q) {
+  return q?.status === 'open' && Object.values(q.waiters || {}).some(w => w.expires_at * 1000 > Date.now());
 }
 
 function OutputPanel({data, outputId, setOutputId, notice, onClose}) {
@@ -181,7 +298,7 @@ function OutputPanel({data, outputId, setOutputId, notice, onClose}) {
           <div className="output-links">${output.review_url && html`<a className="secondary-link" href=${output.review_url} target="_blank" rel="noreferrer">Open full review <${Icon} name="arrow-up" size=${14}/></a>`}
             ${output.video_url && html`<a className="text-link" href=${output.video_url} download>Download video</a>`}</div>` : html`<div className="panel-empty"><${Icon} name="file" size=${18}/><h3>Your videos appear here</h3><p>As the agent works, you can preview each output and review its changes.</p></div>`}
       <//>
-      <${TabPanel} value="details" className="request-content"><h3>What we’re making</h3><p>${req?.spec?.summary || req?.message || 'Start with a source video and tell the agent what you want to make.'}</p>
+      <${TabPanel} value="details" className="request-content"><h3>What we’re making</h3><p>${req?.spec?.summary || req?.message || 'Describe the video you want to make, share a design link, or attach a source video.'}</p>
         ${req?.spec?.constraints?.length > 0 && html`<h3>Constraints</h3><ul>${req.spec.constraints.map(c => html`<li key=${c}>${c}</li>`)}</ul>`}
         <h3>Source files</h3>${req?.sources?.length ? req.sources.map(s => html`<div className="source-file" key=${s.media_id}><${Icon} name="file" size=${16}/><span>${s.name || s.original_path?.split('/').at(-1) || s.media_id}</span></div>`) : html`<p>No source attached yet.</p>`}
       <//>
@@ -192,9 +309,11 @@ function OutputPanel({data, outputId, setOutputId, notice, onClose}) {
 function App() {
   const [requests, setRequests] = useState([]), [selected, setSelected] = useState(null), [data, setData] = useState(null);
   const [text, setText] = useState(''), [drafts, setDrafts] = useState({}), [uploads, setUploads] = useState([]);
-  const [references, setReferences] = useState([]), [features, setFeatures] = useState({skills: [], folders: []});
+  const [references, setReferences] = useState([]), [features, setFeatures] = useState({skills: [], folders: [], files: []});
   const [picker, setPicker] = useState(null), [pickIndex, setPickIndex] = useState(0), [featuresLoading, setFeaturesLoading] = useState(false);
   const [featuresError, setFeaturesError] = useState('');
+  const [localImport, setLocalImport] = useState(null), [importPending, setImportPending] = useState(false), [featuresVersion, setFeaturesVersion] = useState(0);
+  const localImportRef = useRef(localImport); localImportRef.current = localImport;
   const pickerShell = useRef(null);
   const [error, setError] = useState(''), [info, setInfo] = useState(''), [loading, setLoading] = useState(true), [busy, setBusy] = useState(false);
   const [sidebar, setSidebar] = useState(false), [outputId, setOutputId] = useState(null);
@@ -229,8 +348,10 @@ function App() {
   useEffect(() => {try {localStorage.setItem('vwb-pane-sizes', JSON.stringify(paneSizes));} catch (_) {}}, [paneSizes]);
   const [qIndex, setQIndex] = useState(0), [answers, setAnswers] = useState({}), [questionDrafts, setQuestionDrafts] = useState({}), [questionsHidden, setQuestionsHidden] = useState(false);
   const [query, setQuery] = useState(''), [compactBusy, setCompactBusy] = useState(false), [isNearBottom, setIsNearBottom] = useState(true);
+  const [historyBusy, setHistoryBusy] = useState(false), [visibleMessages, setVisibleMessages] = useState(40);
   const csrf = useRef(''), selection = useRef(null), feed = useRef(null), fileInput = useRef(null), composer = useRef(null);
-  const snapshot = useRef(null), pollCount = useRef(0);
+  const snapshot = useRef(null), pollCount = useRef(0), historyPending = useRef(false);
+  const resumePending = useRef(false);
   const [narrow, setNarrow] = useState(() => window.innerWidth < COMPACT_WIDTH);
   const [mobile, setMobile] = useState(() => window.innerWidth < 640);
   useEffect(() => {
@@ -254,29 +375,39 @@ function App() {
   }, []);
   const refresh = useCallback(async id => {
     if (!id) return;
-    const result = await api(`/api/requests/${encodeURIComponent(id)}`);
-    if (selection.current === id) {snapshot.current = result; setData(result);}
+    const metadataOnly = selection.current === id && !!snapshot.current;
+    const result = await api(`/api/requests/${encodeURIComponent(id)}${metadataOnly ? '?events=0' : ''}`);
+    if (selection.current === id) {
+      const merged = mergeEventPage(snapshot.current, result, {snapshot: !metadataOnly});
+      snapshot.current = merged; setData(merged);
+    }
     return result;
   }, [api]);
   const choose = useCallback(id => {
-    if (busy || (id && id === selection.current)) return;
+    if (busy || importPending || (id && id === selection.current)) return;
     setDrafts(prev => ({...prev, [selection.current || 'new']: {text, uploads, references}}));
     setReferences(drafts[id || 'new']?.references || []); setPicker(null);
     setText(drafts[id || 'new']?.text || ''); setUploads(drafts[id || 'new']?.uploads || []); selection.current = id;
     setSelected(id); setMobileView('chat'); setChatShown(true); setData(null); setError(''); setInfo(''); setQIndex(0); setOutputId(null); setSidebar(false);
     snapshot.current = null; setIsNearBottom(true);
+    setVisibleMessages(40); setHistoryBusy(false); historyPending.current = false;
     if (id) {location.hash = id; setLoading(true); refresh(id).catch(e => setError(e.message)).finally(() => setLoading(false));}
     else {history.replaceState(null, '', location.pathname); setLoading(false); composer.current?.focus();}
-  }, [text, uploads, references, drafts, refresh, busy]);
+  }, [text, uploads, references, drafts, refresh, busy, importPending]);
+  const featureQuery = picker?.kind === 'path' ? picker.query : '';
   useEffect(() => {
     let live = true;
-    setFeatures({skills: [], folders: []}); setFeaturesLoading(true); setFeaturesError('');
-    api(selected ? `/api/requests/${encodeURIComponent(selected)}/features` : '/api/features')
-      .then(result => {if (live) setFeatures(result);})
-      .catch(e => {if (live) setFeaturesError(e.message);})
-      .finally(() => {if (live) setFeaturesLoading(false);});
-    return () => {live = false;};
-  }, [selected, api, picker?.kind]);
+    const controller = new AbortController();
+    setFeatures({skills: [], folders: [], files: []}); setFeaturesLoading(true); setFeaturesError('');
+    const timer = setTimeout(() => {
+      const base = selected ? `/api/requests/${encodeURIComponent(selected)}/features` : '/api/features';
+      api(`${base}${featureQuery ? `?q=${encodeURIComponent(featureQuery)}` : ''}`, {signal: controller.signal})
+        .then(result => {if (live) setFeatures(result);})
+        .catch(e => {if (live && e.name !== 'AbortError') setFeaturesError(e.message);})
+        .finally(() => {if (live) setFeaturesLoading(false);});
+    }, featureQuery ? 180 : 0);
+    return () => {live = false; clearTimeout(timer); controller.abort();};
+  }, [selected, api, picker?.kind, featureQuery, featuresVersion]);
   useEffect(() => {
     let live = true;
     (async () => {
@@ -291,29 +422,56 @@ function App() {
     return () => {live = false;};
   }, [api, refresh]);
   useEffect(() => {
-    let live = true, timer;
+    let live = true, timer, catchingUp = false;
+    const controller = new AbortController();
     const poll = async () => {
       try {
         if (!document.hidden) {
           pollCount.current++;
-          if (selected && selection.current === selected) {
+          if (selected && selection.current === selected && snapshot.current) {
             const before = snapshot.current;
-            const next = await api(`/api/requests/${encodeURIComponent(selected)}/events?after=${before?.cursor || 0}`);
+            const next = await api(`/api/requests/${encodeURIComponent(selected)}/events?after=${before.cursor || 0}`, {signal: controller.signal});
             if (live && selection.current === selected) {
-              const merged = {...before, ...next, events: [...(before?.events || []), ...(next.events || [])]};
+              const merged = mergeEventPage(snapshot.current, next);
               snapshot.current = merged; setData(merged);
+              catchingUp = !!next.events_after_has_more;
               if (before?.active?.id !== next.active?.id || before?.last_job?.id !== next.last_job?.id || pollCount.current % 8 === 0) await refresh(selected);
             }
           }
-          if (pollCount.current % 4 === 0) {const result = await api('/api/requests'); if (live) setRequests(result.requests || []);}
+          if (pollCount.current % 4 === 0) {const result = await api('/api/requests', {signal: controller.signal}); if (live) setRequests(result.requests || []);}
           if (live) setError(previous => previous.startsWith('Connection interrupted.') ? '' : previous);
-        }
+        } else catchingUp = false;
       } catch (e) {if (live) setError(`Connection interrupted. Retrying automatically. ${e.message}`);}
-      if (live) timer = setTimeout(poll, 1800);
+      if (live) timer = setTimeout(poll, catchingUp ? 200 : 1800);
     };
     timer = setTimeout(poll, 1800);
-    return () => {live = false; clearTimeout(timer);};
+    return () => {live = false; clearTimeout(timer); controller.abort();};
   }, [selected, api, refresh]);
+  const loadEarlierActivity = async () => {
+    const id = selection.current, before = snapshot.current?.events_before;
+    if (!id || !before || historyPending.current) return;
+    historyPending.current = true; setHistoryBusy(true); setIsNearBottom(false);
+    const height = feed.current?.scrollHeight || 0, top = feed.current?.scrollTop || 0;
+    try {
+      const page = await api(`/api/requests/${encodeURIComponent(id)}/events?before=${before}&limit=300`);
+      if (selection.current !== id) return;
+      const merged = mergeEventPage(snapshot.current, page, {older: true});
+      snapshot.current = merged; setData(merged);
+      requestAnimationFrame(() => {if (selection.current === id && feed.current) feed.current.scrollTop = top + feed.current.scrollHeight - height;});
+    } catch (error) {if (selection.current === id) setError(`Earlier activity could not be loaded. ${error.message}`);}
+    finally {if (selection.current === id) {historyPending.current = false; setHistoryBusy(false);}}
+  };
+  useEffect(() => {
+    if (!selected) return;
+    let live = true;
+    const controller = new AbortController();
+    api(`/api/requests/${encodeURIComponent(selected)}/imports`, {signal: controller.signal}).then(result => {
+      if (!live || selection.current !== selected) return;
+      const row = (result.jobs || []).find(item => ['queued', 'running'].includes(item.status));
+      if (row && !localImportRef.current) {setImportPending(true); setLocalImport({path: row.path || row.name || '', job: {requestId: selected, row}});}
+    }).catch(error => {if (live && error.name !== 'AbortError') setError(`Local import status could not be checked. ${error.message}`);});
+    return () => {live = false; controller.abort();};
+  }, [selected, api]);
   useEffect(() => {
     if (!selected || !data || loading) return;
     const result = importedTabs(data.events || [], seenImports.current.get(selected));
@@ -338,7 +496,13 @@ function App() {
     document.addEventListener('keydown', trap);
     return () => {document.removeEventListener('keydown', trap); prior?.isConnected && prior.focus();};
   }, [narrow, sidebar, navigator]);
-  const chat = data?.request?.chat || [], active = data?.active, queue = (data?.queue || []).filter(j => ['queued', 'pending'].includes(j.status));
+  const inlineAnswers = (data?.asks || []).filter(q => q.answer?.delivery === 'waiting_tool').map(q => {
+    const label = (q.options || []).find(o => o.id === q.answer.option)?.label || q.answer.option || '';
+    return {role: 'human', ts: q.answer.at, text: `Answer to: ${q.question}\n${label}${q.answer.text ? '\n' + q.answer.text : ''}`};
+  });
+  const chat = [...(data?.request?.chat || []), ...inlineAnswers].sort((a, b) => a.ts.localeCompare(b.ts)), active = data?.active, queue = (data?.queue || []).filter(j => ['queued', 'pending'].includes(j.status));
+  const chatBlocks = useMemo(() => new Map((data?.request?.chat || []).filter(message => message.role !== 'human')
+    .map(message => [message, blocks(message.text)])), [data?.request?.chat]);
   const questions = (data?.asks || []).filter(q => ['open', 'defaulted'].includes(q.status));
   const question = questions[Math.min(qIndex, questions.length - 1)];
   const answer = question && !questionsHidden ? answers[question.id] : null;
@@ -351,14 +515,60 @@ function App() {
     if (answering) {setQuestionDrafts(prev => ({...prev, [question.id]: value})); setPicker(null);}
     else {setText(value); syncPicker(value);}
   };
-  const options = matchingOptions(features, picker, references);
+  const referenceOptions = matchingOptions(features, picker, references);
+  const options = picker?.kind === 'path' ? [...referenceOptions, {kind: 'local_import', id: 'local', name: localPath(picker.query) ? 'Import this local path…' : 'Import a local path…', description: 'Copy a folder or file from your Mac into this workspace'}] : referenceOptions;
+  const referenceLimit = features.max_references || 100;
+  const addReference = option => {
+    if (references.some(r => r.kind === option.kind && r.id === option.id)) return true;
+    if (references.length >= referenceLimit) {setError(`Choose up to ${referenceLimit} references. Select a folder to include its files as one reference.`); return false;}
+    setReferences(prev => prev.some(r => r.kind === option.kind && r.id === option.id) ? prev : [...prev, option]);
+    return true;
+  };
   const pick = option => {
     if (!picker || !option) return;
-    if (references.length >= 12) {setError('Choose at most 12 references per message.'); return;}
+    if (option.kind === 'local_import') {openLocalImport(); return;}
+    if (!addReference(option)) return;
     const next = composerText.slice(0, picker.start) + composerText.slice(picker.end);
-    setText(next); setReferences(prev => prev.some(r => r.kind === option.kind && r.id === option.id) ? prev : [...prev, option]);
+    setText(next);
     setPicker(null);
     requestAnimationFrame(() => {composer.current?.focus(); composer.current?.setSelectionRange(picker.start, picker.start);});
+  };
+  const dropReference = event => {
+    const raw = event.dataTransfer.getData('application/x-vwb-workspace-file');
+    if (!raw) return false;
+    event.preventDefault();
+    if (answering) {setError('Collapse the question to reference workspace files in a message.'); return true;}
+    const option = workspaceReference(raw, selected);
+    if (!option) {setError('Choose a file or folder inside this conversation’s work/ workspace.'); return true;}
+    if (addReference(option)) {setPicker(null); composer.current?.focus();}
+    return true;
+  };
+  const openLocalImport = () => {
+    if (importPending) return;
+    if (references.length >= referenceLimit) {setError(`Remove a reference before importing another path. You can select up to ${referenceLimit}.`); return;}
+    setError(''); setInfo('');
+    setLocalImport({path: localPath(picker?.query), trigger: picker?.kind === 'path' ? {...picker, text: text.slice(picker.start, picker.end)} : null});
+    setPicker(null);
+  };
+  const ensureImportWorkspace = async () => {
+    if (selection.current) return selection.current;
+    const result = await api('/api/workspaces', {method: 'POST', body: '{}'});
+    const id = result.request_id;
+    if (!id) throw new Error('The workspace could not be prepared. Try importing again.');
+    selection.current = id; setSelected(id); setData(null); snapshot.current = null;
+    location.hash = id; await refresh(id);
+    const list = await api('/api/requests'); setRequests(list.requests || []);
+    return id;
+  };
+  const importedReference = (reference, requestId, row) => {
+    if (selection.current !== requestId) return;
+    const added = addReference(reference);
+    const trigger = localImport?.trigger;
+    if (trigger) setText(previous => previous.slice(trigger.start, trigger.end) === trigger.text ? previous.slice(0, trigger.start) + previous.slice(trigger.end) : previous);
+    setFeaturesVersion(version => version + 1);
+    window.dispatchEvent(new CustomEvent('vwb-workspace-changed', {detail: {requestId}}));
+    setInfo(`Imported ${number(row.files || 0)} files${row.skipped ? `; ${number(row.skipped)} skipped` : ''}. ${added ? 'The path is selected for your next message.' : 'Select the imported path with @ after removing another reference.'}`);
+    setLocalImport(null); setImportPending(false); composer.current?.focus();
   };
   const pickerKeys = e => {
     if (!picker || answering || e.target !== composer.current || e.nativeEvent.isComposing) return;
@@ -392,18 +602,23 @@ function App() {
     document.getElementById(`reference-option-${pickIndex}`)?.scrollIntoView({block: 'nearest'});
   }, [picker, pickIndex, options.length, answering]);
   useEffect(() => {if (qIndex >= questions.length) setQIndex(Math.max(0, questions.length - 1));}, [questions.length, qIndex]);
-  useEffect(() => {if (isNearBottom && feed.current) feed.current.scrollTop = feed.current.scrollHeight;}, [chat.length, data?.events?.length, queue.length, selected, loading]);
+  useEffect(() => {if (isNearBottom && feed.current) feed.current.scrollTop = feed.current.scrollHeight;}, [chat.length, data?.cursor, queue.length, selected, loading]);
   const mutate = async (path, body, method = 'POST') => {
     setBusy(true); setError(''); setInfo('');
     try {const result = await api(`/api/requests/${encodeURIComponent(selected)}${path}`, {method, body: JSON.stringify(body || {})}); await refresh(selected); return result;}
     catch (e) {setError(e.message); return null;}
     finally {setBusy(false);}
   };
+  const resume = async body => {
+    if (busy || resumePending.current || active) return;
+    resumePending.current = true;
+    try {await mutate('/resume', body);}
+    finally {resumePending.current = false;}
+  };
   const send = async (value = composerText, mode = 'queue') => {
     if (picker && !answering) return;
-    if (busy || (!value.trim() && !answer)) return;
+    if (busy || importPending || (!value.trim() && !answer && (!uploads.length || answering))) return;
     if (!selected) {
-      if (!uploads.length) {setError('Attach a source video to start your conversation.'); fileInput.current?.click(); return;}
       setBusy(true); setError('');
       try {
         const result = await api('/api/requests', {method: 'POST', body: JSON.stringify({message: value.trim(), attachments: uploads.map(u => u.id), context: toContext(references)})});
@@ -420,11 +635,14 @@ function App() {
     if (result) {if (isAnswer) setQuestionDrafts(prev => ({...prev, [question.id]: (prev[question.id] || '').trim() === value.trim() ? '' : prev[question.id]})); else {setText(previous => previous.trim() === value.trim() ? '' : previous); setUploads(previous => previous.filter(item => !uploads.some(sent => sent.id === item.id)));} setIsNearBottom(true); if (question) setAnswers(prev => ({...prev, [question.id]: prev[question.id] === answer ? null : prev[question.id]}));}
   };
   const upload = async files => {
+    if (busy || importPending || !files.length) return;
+    if (uploads.length + files.length > 12) {setError('Upload up to 12 files per message. For bulk work, type @ and choose Import a local path to bring in a whole folder as one reference.'); return;}
+    if (files.some(file => file.size > 4 * 1024 ** 3)) {setError('Each attachment must be no larger than 4 GB.'); return;}
     setBusy(true); setError('');
     try {
       for (const file of files) {
         const result = await api('/api/uploads', {method: 'POST', raw: true, headers: {'Content-Type': 'application/octet-stream', 'X-Filename': encodeURIComponent(file.name)}, body: file});
-        setUploads(prev => [...prev, {id: result.id || result.upload?.id, name: file.name}]);
+        setUploads(prev => [...prev, {...result.upload, id: result.id || result.upload?.id, name: file.name}]);
       }
     } catch (e) {setError(e.message);} finally {setBusy(false);}
   };
@@ -434,9 +652,12 @@ function App() {
   };
   const current = requests.find(r => r.id === selected);
   const name = selected ? title(data?.request?.sources?.[0]?.name || current?.title || 'Conversation') : 'New conversation';
+  const recovery = turnRecovery(data);
+  const interrupted = recovery.job ? `${recovery.job.status === 'cancelled' ? 'The continuation was cancelled.' : `${recovery.job.kind === 'compact' ? 'Compaction' : 'The last turn'} ${recovery.job.status === 'failed' ? 'was interrupted by an error.' : 'stopped before it finished.'}`} Your conversation and saved work are kept.${recovery.job.error ? ` ${recovery.job.error}` : ''}` : '';
   const failure = !active && data?.last_job?.status === 'failed' ? (data.last_job.error || 'The last turn failed. Send a message to try again.') : '';
-  const notice = error || failure ? {tone: 'error', text: html`<span>${error || failure}${data?.paused && queue.length > 0 && html` <button className="text-action" onClick=${() => mutate('/resume')}>Resume queued messages</button>`}</span>`} : data?.paused && queue.length ? {tone: 'info', text: html`<span>Queue paused. <button className="text-action" onClick=${() => mutate('/resume')}>Resume ${queue.length} queued ${queue.length === 1 ? 'message' : 'messages'}</button></span>`} : info ? {tone: 'info', text: info} : active ? {tone: 'progress', text: active.kind === 'compact' ? 'Compacting your conversation…' : 'The agent is working. You can keep writing.'} : questions.length ? {tone: 'info', text: `${questions.length} ${questions.length === 1 ? 'choice is' : 'choices are'} ready for your input.`} : null;
-  const messageEvents = (start, end) => (data?.events || []).filter(e => stamp(e.ts) >= stamp(start) && (!end || stamp(e.ts) <= stamp(end)));
+  const recoveryActions = html`<${RecoveryActions} recovery=${recovery} busy=${busy} onResume=${resume}/>`;
+  const notice = error || interrupted || failure ? {tone: error || recovery.job?.status === 'failed' || failure ? 'error' : 'info', text: html`<span>${error || interrupted || failure}${recoveryActions}</span>`} : recovery.queueCount ? {tone: 'info', text: html`<span>Queue paused.${recoveryActions}</span>`} : info ? {tone: 'info', text: info} : active ? {tone: 'progress', text: active.kind === 'compact' ? 'Compacting your conversation…' : questions.some(questionWaiting) ? 'An agent is waiting for your answer. Other work can continue.' : 'The agent is working. You can keep writing.'} : questions.length ? {tone: 'info', text: `${questions.length} ${questions.length === 1 ? 'choice is' : 'choices are'} ready for your input.`} : null;
+  const messageEvents = useMemo(() => activityIndex(data?.events), [data?.events]);
   const latestHuman = [...chat].reverse().find(m => m.role === 'human');
   const rows = requests.filter(r => `${r.title} ${r.id}`.toLowerCase().includes(query.toLowerCase()));
   // Eeva Surface does not forward style, so pane variables belong on a native element.
@@ -477,45 +698,53 @@ function App() {
         <div className="chat-pane-heading"><h2>Conversation</h2><span>${active ? 'Working' : current?.output_count ? `${current.output_count} outputs` : 'Ready'}</span><${IconButton} name="chevron-left" label="Collapse chat" onClick=${() => narrow ? setMobileView('canvas') : setChatShown(false)}/></div>
         ${notice && html`<div className="chat-panel-status"><${MessageBar} tone=${notice.tone}>${notice.text}<//></div>`}
         <div id="conversation-feed" className="conversation-feed" ref=${feed} tabIndex="0" onScroll=${e => setIsNearBottom(e.currentTarget.scrollHeight - e.currentTarget.scrollTop - e.currentTarget.clientHeight < 100)}>
-          <div className="feed-inner">${loading ? html`<p className="loading-copy">Opening your conversation…</p>` : !chat.length ? html`<div className="welcome"><${SolsticeMark} size=${28}/><h2>Good work starts<br/>with a conversation.</h2><p>Bring a video. Tell me what you want to make.<br/>We’ll shape it together, one edit at a time.</p><div className="welcome-hint"><${Icon} name="file" size=${16}/><span>Attach your source video to get started</span></div></div>` : html`
+          <div className="feed-inner">${loading ? html`<p className="loading-copy">Opening your conversation…</p>` : !chat.length ? html`<div className="welcome"><${SolsticeMark} size=${28}/><h2>Good work starts<br/>with a conversation.</h2><p>Start with an idea, a design, or any file.<br/>Tell me what you want to make.</p><div className="welcome-hint"><${Icon} name="file" size=${16}/><span>Describe your video or paste a Figma link to get started</span></div></div>` : html`
             <div className="conversation-start"><span>${date(data.request.created)}</span><span>One continuing conversation</span></div>
-            ${chat.map((m, i) => m.role === 'human' ? html`<div key=${`chat-${i}`}><${ReferenceTags} context=${m.context}/><${UserMessage} time=${time(m.ts)}>${m.text}<//>${((chat[i + 1] && chat[i + 1].role === 'human') || (!chat[i + 1] && !active)) && html`<${Activity} events=${messageEvents(m.ts, chat[i + 1]?.ts)} state=${data?.last_job?.status === 'failed' ? 'failed' : 'stopped'}/>`}</div>` : html`<div className="agent-turn" key=${`chat-${i}`}>
-              <${Activity} events=${messageEvents(chat[i - 1]?.ts, m.ts)}/><${AgentMessage} blocks=${blocks(m.text)} time=${time(m.ts)}/></div>`)}
+            ${(chat.length > visibleMessages || data?.events_has_more) && html`<div className="earlier-history"><p className="caption">Earlier messages and activity stay saved.</p><div>
+              ${chat.length > visibleMessages && html`<button className="text-action" onClick=${() => {setIsNearBottom(false); setVisibleMessages(count => count + 40);}}>Show earlier messages</button>`}
+              ${data?.events_has_more && html`<button className="text-action" disabled=${historyBusy} onClick=${loadEarlierActivity}>${historyBusy ? 'Loading earlier activity…' : 'Load earlier activity'}</button>`}
+            </div></div>`}
+            ${chat.slice(-visibleMessages).map((m, index) => {const i = Math.max(0, chat.length - visibleMessages) + index; return m.role === 'human' ? html`<div key=${`chat-${i}`}><${ReferenceTags} context=${m.context}/><${ChatAttachments} items=${m.attachments} onOpen=${openCanvas}/><${UserMessage} time=${time(m.ts)}>${m.text}<//>${((chat[i + 1] && chat[i + 1].role === 'human') || (!chat[i + 1] && !active)) && html`<${Activity} events=${messageEvents(m.ts, chat[i + 1]?.ts)} state=${data?.last_job?.status === 'failed' ? 'failed' : 'stopped'}/>`}</div>` : html`<div className="agent-turn" key=${`chat-${i}`}>
+              <${Activity} events=${messageEvents(chat[i - 1]?.ts, m.ts)}/><${AgentMessage} blocks=${chatBlocks.get(m) || []} time=${time(m.ts)}/></div>`;})}
             ${active && html`<${Activity} events=${messageEvents(latestHuman?.ts)} working started=${active.started_at || active.created_at}/>`}
-            ${queue.map(j => html`<div key=${j.id}><${ReferenceTags} context=${j.context}/><${UserMessage} queued onRemoveQueued=${() => mutate(`/queue/${j.id}`, {}, 'DELETE')}>${j.message || j.text}<//></div>`)}
+            ${queue.map(j => html`<div key=${j.id}><${ReferenceTags} context=${j.context}/><${ChatAttachments} items=${j.attachment_refs} onOpen=${openCanvas}/><${UserMessage} queued onRemoveQueued=${() => mutate(`/queue/${j.id}`, {}, 'DELETE')}>${j.message || j.text}<//></div>`)}
           `}</div>
         </div>
         ${!isNearBottom && html`<div className="jump-row"><${Button} variant="secondary" size="sm" onClick=${() => {feed.current.scrollTo({top: feed.current.scrollHeight, behavior: 'smooth'}); setIsNearBottom(true);}}>Jump to latest <${Icon} name="chevron-down" size=${14}/><//></div>`}
         <div className="composer-dock"><div className="composer-width"><div className="composer-shell" ref=${pickerShell} onKeyDownCapture=${pickerKeys}
+          onDragOver=${e => {if (Array.from(e.dataTransfer.types || []).some(type => ['Files', 'application/x-vwb-workspace-file'].includes(type))) {e.preventDefault(); e.dataTransfer.dropEffect = 'copy';}}}
+          onDrop=${e => {if (!dropReference(e) && e.dataTransfer.files.length) {e.preventDefault(); upload([...e.dataTransfer.files]);}}}
+          onPaste=${e => {const files = [...(e.clipboardData?.files || [])].filter(file => file.type.startsWith('image/')); if (files.length) {e.preventDefault(); upload(files);}}}
           onKeyUp=${e => {if (e.target === composer.current && !['Escape', 'Enter', 'Tab', 'ArrowUp', 'ArrowDown'].includes(e.key)) syncPicker();}}
           onClick=${e => {if (e.target === composer.current) syncPicker();}}>
-          ${picker && !answering && html`<div className="reference-dropup" aria-label=${picker.kind === 'skill' ? 'Available skills' : 'Workspace folders'}>
-            <div className="reference-heading"><span>${picker.kind === 'skill' ? 'Features · Skills' : 'Workspace folders'}</span><span className="caption">↑ ↓ to choose · Enter to add</span></div>
-            <div id="composer-reference-options" role="listbox" aria-label=${picker.kind === 'skill' ? 'Choose a skill' : 'Choose a folder'}>
+          ${picker && !answering && html`<div className="reference-dropup" aria-label=${picker.kind === 'skill' ? 'Available skills' : 'Workspace paths'}>
+            <div className="reference-heading"><span>${picker.kind === 'skill' ? 'Features · Skills' : 'Files and folders'}</span><span className="caption">↑ ↓ to choose · Enter to add</span></div>
+            <div id="composer-reference-options" role="listbox" aria-label=${picker.kind === 'skill' ? 'Choose a skill' : 'Choose a file or folder'} aria-busy=${featuresLoading}>
               ${options.map((option, i) => html`<button key=${`${option.kind}:${option.id}`} id=${`reference-option-${i}`} role="option" tabIndex="-1" aria-selected=${i === Math.min(pickIndex, options.length - 1)}
                 className=${`reference-option ${i === Math.min(pickIndex, options.length - 1) ? 'highlighted' : ''}`} onMouseDown=${e => e.preventDefault()} onClick=${() => pick(option)}>
-                <${Icon} name=${option.kind === 'skill' ? 'sparkles' : 'folder'} size=${16}/><span><strong>${option.name}</strong><span>${option.description}</span></span><//>`)}
-              ${!options.length && html`<p className="reference-empty" role="status">${featuresLoading ? 'Loading available references…' : featuresError || (picker.kind === 'folder' && !selected ? 'Choose a conversation to see its folders.' : 'No matching references. Try another search.')}</p>`}
-            </div><div className="reference-footer">${picker.kind === 'skill' ? 'Choose a skill, then describe what you want to do.' : 'Folders are indexed from this conversation’s work/ workspace.'}${features.folders_truncated && picker.kind === 'folder' ? ' Showing the first 500 folders.' : ''}</div>
+                <${Icon} name=${option.kind === 'skill' ? 'sparkles' : option.kind === 'file' ? 'file' : 'folder'} size=${16}/><span><strong title=${option.name}>${['file', 'folder'].includes(option.kind) ? displayPath(option.name) : option.name}</strong><span>${option.description}</span></span><//>`)}
+              ${!referenceOptions.length && html`<p className="reference-empty" role="status">${featuresLoading ? 'Finding references…' : featuresError || (picker.kind === 'path' && !selected ? 'Import a local path to start a workspace, or choose an existing conversation.' : 'No matching references. Try a more specific path.')}</p>`}
+            </div><div className="reference-footer">${picker.kind === 'skill' ? 'Choose a skill, then describe what you want to do.' : 'A folder includes all its files as one reference. The agent reads them as needed. Use @"work/folder name" for spaces.'}${features.paths_truncated && picker.kind === 'path' ? ' More paths available; refine your search.' : ''}
+            </div>
           </div>`}
           ${!answering && references.length > 0 && html`<div className="reference-chips" role="group" aria-label="Selected references">${references.map(r => html`<span className="reference-chip" key=${`${r.kind}:${r.id}`}>
-            <${Icon} name=${r.kind === 'skill' ? 'sparkles' : r.kind === 'plugin' ? 'library' : 'folder'} size=${13}/><span>${r.kind === 'skill' ? `/features ${r.name}` : r.kind === 'plugin' ? r.name : `@${r.name}`}</span>
+            <${Icon} name=${r.kind === 'skill' ? 'sparkles' : r.kind === 'plugin' ? 'library' : r.kind === 'file' ? 'file' : 'folder'} size=${13}/><${Tooltip} content=${r.name}><span title=${r.name}>${r.kind === 'skill' ? `/features ${r.name}` : r.kind === 'plugin' ? r.name : `@${displayPath(r.name)}`}</span><//>
             <${IconButton} name="x" label=${`Remove ${r.name}`} onClick=${() => setReferences(prev => prev.filter(x => x.kind !== r.kind || x.id !== r.id))}/></span>`)}</div>`}
           <${Composer} ref=${composer} value=${composerText} onValueChange=${setComposerText} onSend=${value => send(value)} working=${!!active}
-            canSend=${!busy && (!picker || answering) && (!!composerText.trim() || !!answer)} onStop=${active?.can_stop === false ? undefined : () => mutate('/stop')} onAttach=${answering || busy ? undefined : () => fileInput.current?.click()}
+            canSend=${!busy && !importPending && (!picker || answering) && (!!composerText.trim() || !!answer || (!answering && uploads.length > 0))} onStop=${active?.can_stop === false ? undefined : () => mutate('/stop')} onAttach=${answering || busy || importPending ? undefined : () => fileInput.current?.click()}
             label=${answering ? 'Your answer to the selected question' : 'Message the agent'}
-            placeholder=${question && !questionsHidden ? 'Choose an option, or write your answer…' : active ? 'Add a message to the queue…' : 'What would you like to change?'}
+            placeholder=${question && !questionsHidden ? 'Choose an option, or write your answer…' : active ? 'Add a message to the queue…' : selected ? 'What would you like to change?' : 'Describe a video or paste a Figma link…'}
             question=${questions.length ? html`<${QuestionQueue} questions=${questions} index=${qIndex} setIndex=${setQIndex} answer=${answer} setAnswer=${value => setAnswers(prev => ({...prev, [question.id]: value}))} hidden=${questionsHidden} setHidden=${setQuestionsHidden}/>` : undefined}
-            attachments=${uploads.length ? html`<div className="staged-files">${uploads.map(u => html`<span className="staged-file" key=${u.id}><${Icon} name="file" size=${14}/>${u.name}<${IconButton} name="x" label=${`Remove ${u.name}`} onClick=${() => setUploads(prev => prev.filter(x => x.id !== u.id))}/></span>`)}</div>` : answer ? html`<span className="selected-answer"><${Icon} name="check" size=${12}/> Answer selected. Send to confirm.</span>` : undefined}
+            attachments=${uploads.length ? html`<div className="staged-files">${uploads.map(u => html`<span className="staged-file" key=${u.id}>${u.kind === 'image' && u.url ? html`<img className="staged-image" src=${u.url} alt=""/>` : html`<${Icon} name="file" size=${14}/>`}${u.name}<${IconButton} name="x" label=${`Remove ${u.name}`} onClick=${() => setUploads(prev => prev.filter(x => x.id !== u.id))}/></span>`)}</div>` : answer ? html`<span className="selected-answer"><${Icon} name="check" size=${12}/> Answer selected. Send to confirm.</span>` : undefined}
             className="workbench-composer"/>
           <div className="composer-footer"><div className="composer-model"><${ModelControl} api=${api} requestId=${selected} onNotice=${notice => {if (notice.tone === 'error') setError(notice.text); else setInfo(notice.text);}}/><${IntegrationsControl} api=${api} disabled=${answering || busy} selected=${references.filter(r => r.kind === 'plugin')} onToggle=${item => {
-              if (!references.some(r => r.kind === 'plugin' && r.id === item.id) && references.length >= 12) {setError('Choose at most 12 references per message.'); return;}
+              if (!references.some(r => r.kind === 'plugin' && r.id === item.id) && references.length >= referenceLimit) {setError(`Choose up to ${referenceLimit} references. Select a folder to include its files as one reference.`); return;}
               setReferences(previous => previous.some(r => r.kind === 'plugin' && r.id === item.id) ? previous.filter(r => r.kind !== 'plugin' || r.id !== item.id) : [...previous,item]);
             }}/>${active && html`<span className="queue-label">Send queues</span>`}</div>
-            <div className="composer-footer-actions">${active && active.can_stop !== false && html`<button className="send-now" disabled=${busy || (picker && !answering) || (!composerText.trim() && !answer)} onClick=${() => send(composerText, 'now')}>Send now <${Icon} name="arrow-up" size=${12}/></button>`}
+            <div className="composer-footer-actions">${active && active.can_stop !== false && !(answering && questionWaiting(question)) && html`<button className="send-now" disabled=${busy || importPending || (picker && !answering) || (!composerText.trim() && !answer && (!uploads.length || answering))} onClick=${() => send(composerText, 'now')}>Send now <${Icon} name="arrow-up" size=${12}/></button>`}
               <${ContextUsage} usage=${data?.usage} active=${active} pending=${queue.length > 0} compact=${compact} busy=${compactBusy}/></div></div>
-        </div><div className="composer-help"><span>${busy ? 'Saving…' : answering ? (uploads.length ? 'Your attached videos are kept for your next general message.' : 'Answering this question. Collapse it to write another message.') : active ? (active.can_stop === false ? 'This turn is running in a terminal. Your message will queue.' : 'Send now stops the current turn and continues with your message.') : 'Enter to send · Shift + Enter for a new line'}</span><span>${selected ? 'Changes stay in this conversation' : 'MP4, MOV, MKV or WebM'}</span></div></div></div>
-        <input ref=${fileInput} className="visually-hidden" type="file" multiple accept="video/*,.mkv" onChange=${e => {upload([...e.target.files]); e.target.value = '';}} aria-label="Attach source videos"/>
+        </div><div className="composer-help"><span>${busy ? 'Saving…' : answering ? (uploads.length ? 'Your attached files are kept for your next general message.' : 'Answering this question. Collapse it to write another message.') : active ? (active.can_stop === false ? 'This turn is running in a terminal. Your message will queue.' : 'Send now stops the current turn and continues with your message.') : 'Enter to send · Shift + Enter for a new line'}</span><span>${selected ? 'Changes stay in this conversation' : 'Source video optional'}</span></div></div></div>
+        <input ref=${fileInput} className="visually-hidden" type="file" multiple onChange=${e => {upload([...e.target.files]); e.target.value = '';}} aria-label="Attach files"/>
       </section>
       ${divider('chat')}
       <${WorkspaceCanvas} visible=${!narrow || mobileView === 'canvas'} api=${api} requestId=${selected} state=${canvas} dispatch=${dispatchCanvas} onExplore=${explore}
@@ -523,6 +752,7 @@ function App() {
 
       </div>
     </main>
+    <${LocalImportDialog} open=${!!localImport} initialPath=${localImport?.path || ''} initialJob=${localImport?.job || null} api=${api} ensureWorkspace=${ensureImportWorkspace} onReady=${importedReference} onPending=${setImportPending} onClose=${() => setLocalImport(null)}/>
     </div>
   <//>`;
 }

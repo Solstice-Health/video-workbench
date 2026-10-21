@@ -147,8 +147,8 @@ def declared(canvas: Canvas, store: IndexStore, profile: dict[str, Any], step: i
     out: list[Finding] = []
     layers = content_layers(canvas)
     tm = TimeMap([(s.src_in, s.src_out) for s in canvas.time_map])
-    m = store.media()
-    sw, sh = float(m["width"]), float(m["height"])
+    m = store.media() if canvas.time_map else None
+    sw, sh = (float(m["width"]), float(m["height"])) if m else (0.0, 0.0)
     tracks = [t for t in store.all("SELECT * FROM text_tracks") if t["role"] != "logo_text"]
     faces = store.all("SELECT * FROM faces ORDER BY f")
     seen: dict[int, int] = {}
@@ -407,6 +407,8 @@ def attest(comp_factory, render: Path, length: int, n: int = 24) -> Finding:
 
 def audio_readback(canvas: Canvas, store: IndexStore, render: Path) -> list[Finding]:
     """Transcribe the output's audio and compare with the words the plan keeps."""
+    if not canvas.time_map:
+        return [Finding("t1.audio_readback", "info", summary="No source narration on this authored timeline; source speech comparison does not apply.", tier="T1")]
     from vwb.index.asr import transcribe_reader1
     fps = canvas.fps
     with tempfile.TemporaryDirectory() as tmp:

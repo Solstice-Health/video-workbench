@@ -23,8 +23,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-from vwb import models
-from vwb.agents.events import context_usage, read_events
+from vwb import models, prompts
+from vwb.agents.events import context_usage, event_page
+from vwb.artifacts import service as artifacts
 from vwb.browser.service import BrowserConflict, BrowserSession
 from vwb.config import RUNS_DIR
 from vwb.integrations import IntegrationError, IntegrationService
@@ -36,6 +37,8 @@ from vwb.web import pdf_preview, workspace_files
 from vwb.web.history import request_ids, resolve_request
 from vwb.web.queue import QueueConflict, TurnQueue
 from vwb.workspace import Workspace, references
+from vwb.workspace import attachments as chat_attachments
+from vwb.workspace.local_imports import LocalImports
 from vwb.workspace.request import SUBDIRS, Request, now_iso
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -83,6 +86,7 @@ class Workbench:
         self.upload_dir = self.runs_dir / ".ui" / "uploads"
         self.mutation_lock = threading.RLock()
         self.studio = StudioJobs()
+        self.local_imports = LocalImports()
 
     def studio_entry(self, ws: Workspace, row: dict) -> dict:
         """Public studio records use the same capability-scoped file previews."""
@@ -111,6 +115,13 @@ class Workbench:
         # Opaque HTML previews have Origin:null. A request-scoped capability
         # permits their local assets without admitting arbitrary cross-site reads.
         return hmac.new(self.csrf_token.encode(), f"preview:{request_id}".encode(), "sha256").hexdigest()
+
+    def artifact_key(self, request_id: str, artifact_id: str, revision: int) -> str:
+        return hmac.new(self.csrf_token.encode(), f"artifact:{request_id}:{artifact_id}:{revision}".encode(), "sha256").hexdigest()
+
+    def artifact_entry(self, ws: Workspace, row: dict) -> dict:
+        key = self.artifact_key(ws.id, row["id"], row["revision"])
+        return {**artifacts.public(row), "url": f"/artifact-preview/{quote(ws.id)}/{key}/{row['id']}/{row['revision']}/index.html"}
 
     def preview_entry(self, request_id: str, entry: dict) -> dict:
         if entry.get("kind") != "file":
@@ -207,10 +218,11 @@ class Workbench:
                          "review_url": self.file_url(ws, review_path)})
         return rows
 
-    def snapshot(self, ws: Workspace, *, after: int = 0, full: bool = True) -> dict[str, Any]:
-        events = read_events(ws, after=after)
-        payload = {"events": events, "cursor": events[-1]["seq"] if events else after,
-                   "asks": self.asks(ws), "usage": context_usage(ws), **self.queue.snapshot(ws)}
+    def snapshot(self, ws: Workspace, *, after: int | None = None, full: bool = True,
+                 include_events: bool = True) -> dict[str, Any]:
+        payload = {"asks": self.asks(ws), "usage": context_usage(ws), **self.queue.snapshot(ws)}
+        if include_events:
+            payload.update(event_page(ws, after=after))
         if full:
             req = ws.load().model_dump(mode="json")
             for source in req["sources"]:
@@ -218,12 +230,22 @@ class Workbench:
                 source["url"] = self.file_url(ws, Path(source["path"]))
                 source.pop("original_path", None)
                 source.pop("path", None)
+            for turn in req["chat"]:
+                turn["attachments"] = [self.attachment_entry(ws, ref) for ref in turn.get("attachments", [])]
             payload.update(request=req, outputs=self.outputs(ws))
+        for job in [*payload.get("queue", []), *([payload["active"]] if payload.get("active") else [])]:
+            job["attachment_refs"] = [self.attachment_entry(ws, ref) for ref in job.get("attachment_refs", [])]
         return payload
 
+    @staticmethod
+    def attachment_entry(ws: Workspace, ref: dict) -> dict:
+        return {**ref, "url": f"/api/requests/{quote(ws.id)}/attachments/{ref['id']}",
+                "workspace_path": f"work/{ref['path']}"}
+
     def attachment_paths(self, ids: Any) -> list[Path]:
-        if not isinstance(ids, list) or len(ids) > 12:
-            raise ValueError("Attach up to 12 source videos.")
+        if not isinstance(ids, list) or len(ids) > chat_attachments.MAX_FILES:
+            raise ValueError(f"Attach up to {chat_attachments.MAX_FILES} files per message, or use @ to reference "
+                             "a workspace folder or import a local folder for a larger batch.")
         paths = []
         for upload_id in ids:
             if not isinstance(upload_id, str) or not re.fullmatch(r"[a-f0-9]{32}", upload_id):
@@ -232,16 +254,20 @@ class Workbench:
             if not metadata:
                 raise ValueError("An attachment has expired. Attach it again.")
             path = safe_child(self.upload_dir, metadata["file"])
-            if not path.is_file():
+            if not path.is_file() or path.is_symlink():
                 raise ValueError("An attachment is missing. Attach it again.")
+            if metadata.get("sha256"):
+                from vwb.util.hashing import sha256_file
+                if sha256_file(path) != metadata["sha256"]:
+                    raise ValueError("The upload changed after it was attached. Attach it again.")
             paths.append(path)
         return paths
 
     @staticmethod
     def message(body: dict[str, Any]) -> str:
         text = body.get("message", "")
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("Write a message first.")
+        if not isinstance(text, str) or (not text.strip() and not body.get("attachments")):
+            raise ValueError("Write a message or attach a file first.")
         if len(text) > 100_000:
             raise ValueError("The message is too long (maximum 100,000 characters).")
         return text.strip()
@@ -251,24 +277,39 @@ class Workbench:
         context = references.validate(body.get("context"))
         main_config = models.explicit_runtime(runs_dir=self.runs_dir)
         paths = self.attachment_paths(body.get("attachments", []))
-        if not paths:
-            raise ValueError("Attach a source video to start your conversation.")
         rid = f"r-{uuid.uuid4().hex[:16]}"
         ws = Workspace(self.runs_dir / rid)
         ws.root.mkdir()
         try:
             for sub in SUBDIRS:
                 (ws.root / sub).mkdir()
-            sources = [ws.add_source(path, f"src{i}") for i, path in enumerate(paths, 1)]
+            refs = chat_attachments.ingest(ws, paths)
+            sources = [ws.add_source(path, f"src{i}") for i, (_, path) in enumerate(chat_attachments.source_paths(ws, refs), 1)]
             # The worker adds the first chat message under the turn lock.
             ws.save(Request(id=rid, message=message, sources=sources))
             if main_config:
                 models.set_selection(ws, main_config["selection"], self.runs_dir)
-            job = self.queue.enqueue(ws, message=message, skip_index=False, context=context, main_config=main_config)
+            prompts.set_selection(ws, prompts.selection(runs_dir=self.runs_dir))
+            job = self.queue.enqueue(ws, message=message, attachment_refs=refs, skip_index=not sources, context=context, main_config=main_config)
         except BaseException:
             shutil.rmtree(ws.root)
             raise
         return {"request": {"id": rid}, "request_id": rid, "job": job}
+
+    def draft_workspace(self) -> dict[str, Any]:
+        """Create a place for imported files without submitting a model turn."""
+        rid = f"r-{uuid.uuid4().hex[:16]}"
+        ws = Workspace(self.runs_dir / rid)
+        ws.root.mkdir()
+        try:
+            for sub in SUBDIRS:
+                (ws.root / sub).mkdir()
+            ws.save(Request(id=rid, message=""))
+            prompts.set_selection(ws, prompts.selection(runs_dir=self.runs_dir))
+        except BaseException:
+            shutil.rmtree(ws.root)
+            raise
+        return {"request": {"id": rid}, "request_id": rid}
 
     def answer(self, ws: Workspace, body: dict[str, Any]) -> dict[str, Any]:
         from vwb.ask.broker import Broker
@@ -293,17 +334,23 @@ class Workbench:
                 raise QueueConflict("The UI server is shutting down.")
             # Verify a steer can be accepted before signing the answer.
             active = self.queue.snapshot(ws)["active"]
-            if mode == "now" and active and active.get("kind") == "external":
+            waiting = bool(active and broker.active_waiters(ticket))
+            if mode == "now" and active and active.get("kind") == "external" and not waiting:
                 raise QueueConflict("This turn was started outside the UI. Queue the answer, or stop it in its terminal.")
             # Check the selected provider before signing a human answer. Queue jobs
             # retain these settings even if the person changes the menu afterward.
-            main_config = models.explicit_runtime(ws, self.runs_dir)
+            main_config = None if waiting else models.explicit_runtime(ws, self.runs_dir)
             label = next((str(o.get("label") or o.get("text") or o["id"]) for o in ticket.get("options", []) if o["id"] == option), option or "")
             message = f"Answer to: {ticket['question']}\n{label}"
             if text.strip():
                 message += f"\n{text.strip()}"
             self.message({"message": message})
-            answered = broker.answer(tid, option, text=text.strip(), by="local-ui")
+            answered = broker.answer(tid, option, text=text.strip(), by="local-ui",
+                                     delivery="waiting_tool" if waiting else None)
+            if waiting:
+                # The blocked tool consumes this signed answer in its existing turn.
+                # Preserve it in the ticket/ledger; do not race request.json writers.
+                return {"ticket": answered, "job": None, "delivery": "waiting_tool"}
             job = self.queue.enqueue(ws, message=message.strip(), mode=mode, main_config=main_config)
             return {"ticket": answered, "job": job}
 
@@ -408,6 +455,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.command == "GET" and parts == ["api", "integrations", "solstice", "callback"]:
             self._check_host()
             return self._integration_callback(query)
+        if self.command == "GET" and parts == ["api", "integrations", "figma-direct", "callback"]:
+            self._check_host()
+            return self._integration_callback(query, direct=True)
+        if self.command == "GET" and parts == ["api", "integrations", "mcp", "callback"]:
+            self._check_host()
+            return self._integration_callback(query, remote=True)
         if self.command in {"GET", "HEAD"} and len(parts) >= 4 and parts[0] == "preview":
             self._check_host()
             if not hmac.compare_digest(parts[2], self.app.preview_key(parts[1])):
@@ -421,18 +474,59 @@ class Handler(BaseHTTPRequestHandler):
             relative = "/".join(parts[3:])
             with workspace_files.open_file(ws, relative) as handle:
                 return self._file(Path(relative), preview=True, handle=handle)
+        if self.command in {"GET", "HEAD"} and len(parts) >= 6 and parts[0] == "artifact-preview":
+            self._check_host()
+            ws = self.app.workspace(parts[1])
+            row = artifacts.get(ws, parts[3], int(parts[4]))
+            if not hmac.compare_digest(parts[2], self.app.artifact_key(ws.id, row["id"], row["revision"])):
+                raise PermissionError("Reopen this artifact to refresh its preview link.")
+            if self.headers.get("Origin") not in {None, "null"}:
+                self._check_origin()
+            base = f"/artifact-preview/{quote(ws.id)}/{parts[2]}/{row['id']}/{row['revision']}"
+            if len(parts) == 6 and parts[5] == "index.html":
+                urls = {item["path"]: f"{base}/asset/{i}" for i, item in enumerate(row["assets"])}
+                return self._artifact_html(artifacts.render_html(ws, row, urls))
+            if len(parts) == 7 and parts[5] == "asset" and parts[6].isdigit():
+                index = int(parts[6])
+                if index >= len(row["assets"]):
+                    raise FileNotFoundError("This artifact asset was not found.")
+                item = row["assets"][index]
+                with workspace_files.open_file(ws, item["path"]) as handle:
+                    artifacts.check_asset(handle, item)
+                    return self._file(Path(item["path"]), preview=True, handle=handle)
+            raise FileNotFoundError("This artifact resource was not found.")
         self._check_origin(self.command not in {"GET", "HEAD"})
         if self.command in {"GET", "HEAD"}:
             if parts == ["api", "bootstrap"]:
                 return self._json({"csrf_token": self.app.csrf_token, "capabilities": {
                     "upload": True, "queue": True, "steer": "interrupt_then_resume", "compact": "native",
-                    "max_upload_bytes": MAX_UPLOAD}})
+                    "max_upload_bytes": MAX_UPLOAD, "max_attachments": chat_attachments.MAX_FILES,
+                    "attachment_types": "any", "image_attachments": True,
+                    "path_references": True, "local_imports": True, "max_references": references.MAX_REFERENCES}})
+            if len(parts) == 3 and parts[:2] == ["api", "uploads"]:
+                path = self.app.attachment_paths([parts[2]])[0]
+                row = read_json(self.app.upload_dir / f"{parts[2]}.json")
+                return self._file(path, artifact=True, download=row.get("kind") not in {"image", "video", "audio", "pdf"})
+            if len(parts) == 5 and parts[:2] == ["api", "requests"] and parts[3] == "attachments":
+                ws = self.app.workspace(parts[2])
+                row = chat_attachments.canonical(ws, parts[4])
+                path = chat_attachments.original_path(ws, row)
+                with path.open("rb") as handle:
+                    return self._file(Path(row["name"]), artifact=True, handle=handle,
+                                      download=row["kind"] not in {"image", "video", "audio", "pdf"})
             if parts == ["api", "requests"]:
                 return self._json({"requests": self.app.requests()})
             if parts == ["api", "features"]:
-                return self._json(references.catalog())
+                return self._json(references.catalog(query=query.get("q", [""])[0]))
+            if len(parts) in {4, 5} and parts[:2] == ["api", "requests"] and parts[3] == "imports":
+                ws = self.app.workspace(parts[2])
+                if len(parts) == 5:
+                    return self._json({"import": self.app.local_imports.get(ws, parts[4])})
+                return self._json(self.app.local_imports.list(ws))
             if parts == ["api", "models"]:
                 return self._json(models.catalog(self.app.runs_dir))
+            if parts == ["api", "prompts"]:
+                return self._json(prompts.catalog(self.app.runs_dir))
             if parts == ["api", "integrations"]:
                 return self._json(self.app.integrations.status())
             if len(parts) in {5, 6} and parts[:2] == ["api", "requests"] and parts[3] == "studio":
@@ -445,6 +539,15 @@ class Handler(BaseHTTPRequestHandler):
                     result = self.app.studio.list(ws, query.get("kind", [None])[0])
                     result["jobs"] = [self.app.studio_entry(ws, row) for row in result["jobs"]]
                     return self._json(result)
+            if len(parts) in {4, 5, 6} and parts[:2] == ["api", "requests"] and parts[3] == "artifacts":
+                ws = self.app.workspace(parts[2])
+                if len(parts) == 4:
+                    return self._json({"artifacts": [self.app.artifact_entry(ws, row) for row in artifacts.listing(ws)]})
+                if len(parts) == 5:
+                    revision = query.get("revision", [None])[0]
+                    return self._json(self.app.artifact_entry(ws, artifacts.get(ws, parts[4], int(revision) if revision else None)))
+                if parts[5] == "feedback":
+                    return self._json(artifacts.feedback(ws, parts[4], after=int(query.get("after", [0])[0])))
             if len(parts) in {4, 5} and parts[:2] == ["api", "requests"] and parts[3] == "workspace":
                 ws = self.app.workspace(parts[2])
                 relative = query.get("path", [""])[0]
@@ -469,16 +572,23 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) in {3, 4} and parts[:2] == ["api", "requests"]:
                 ws = self.app.workspace(parts[2])
                 if len(parts) == 3:
-                    return self._json(self.app.snapshot(ws))
+                    return self._json(self.app.snapshot(ws, include_events=query.get("events", ["1"])[0] != "0"))
                 if parts[3] == "events":
+                    if "before" in query:
+                        if "after" in query:
+                            raise ValueError("Choose either newer or older activity.")
+                        return self._json(event_page(ws, before=int(query["before"][0]),
+                                                     limit=int(query.get("limit", ["300"])[0])))
                     after = max(0, int(parse_qs(url.query).get("after", ["0"])[0]))
                     return self._json(self.app.snapshot(ws, after=after, full=False))
                 if parts[3] == "features":
-                    return self._json(references.catalog(ws))
+                    return self._json(references.catalog(ws, query=query.get("q", [""])[0]))
                 if parts[3] == "model":
                     selected = models.selection(ws, self.app.runs_dir)
                     return self._json({"selection": selected, "model": models.describe(selected, self.app.runs_dir),
                                        "active_selection": (self.app.queue.snapshot(ws).get("active") or {}).get("main_config", {}).get("selection")})
+                if parts[3] == "prompt":
+                    return self._json(prompts.status(ws, self.app.queue.snapshot(ws).get("active"), self.app.runs_dir))
             if len(parts) >= 3 and parts[0] == "files":
                 return self._file(self.app.file(parts[1], "/".join(parts[2:])), artifact=True)
             if parts[0] != "api":
@@ -496,6 +606,42 @@ class Handler(BaseHTTPRequestHandler):
                                               kind=self.headers.get("X-Upload-Kind", "image"))
                 return self._json(self.app.studio_entry(ws, result), 201)
             body = self._body()
+            if len(parts) == 6 and parts[:2] == ["api", "requests"] and parts[3] == "artifacts" and parts[5] == "feedback":
+                ws = self.app.workspace(parts[2])
+                def enqueue_feedback(message, mode):
+                    return self.app.queue.enqueue(ws, message=message, mode=mode, skip_index=True,
+                                                  idempotency_key=f"artifact:{parts[4]}:{body.get('submission_id', '')}",
+                                                  main_config=models.explicit_runtime(ws, self.app.runs_dir))
+                return self._json({"feedback": artifacts.submit_feedback(ws, parts[4], body, enqueue_feedback)}, 202)
+            if parts == ["api", "integrations", "mcp", "add"]:
+                return self._json({"item": self.app.integrations.remote.add(body)}, 201)
+            if len(parts) == 5 and parts[:3] == ["api", "integrations", "mcp"]:
+                remote = self.app.integrations.remote
+                identifier, action = parts[3:]
+                if action == "connect":
+                    return self._json(remote.connect(identifier, self._callback_uri(remote=True)))
+                if action == "configure":
+                    return self._json({"item": remote.configure(identifier, body)})
+                if action in {"refresh", "disconnect", "remove"}:
+                    return self._json({"item": getattr(remote, action)(identifier)})
+            if len(parts) == 4 and parts[:3] == ["api", "integrations", "figma-mcp"]:
+                desktop = self.app.integrations.desktop
+                if parts[3] == "connect":
+                    return self._json(desktop.connect())
+                if parts[3] == "refresh":
+                    return self._json(desktop.refresh())
+                if parts[3] == "disconnect":
+                    return self._json(desktop.disconnect())
+            if len(parts) == 4 and parts[:3] == ["api", "integrations", "figma-direct"]:
+                direct = self.app.integrations.direct
+                if parts[3] == "configure":
+                    return self._json(direct.configure(body))
+                if parts[3] == "connect":
+                    return self._json(direct.begin_auth(self._callback_uri(direct=True)))
+                if parts[3] == "refresh":
+                    return self._json(direct.verify())
+                if parts[3] == "disconnect":
+                    return self._json(direct.disconnect())
             if len(parts) in {5, 7} and parts[:2] == ["api", "requests"] and parts[3:5] == ["studio", "jobs"]:
                 ws = self.app.workspace(parts[2])
                 if len(parts) == 5:
@@ -516,6 +662,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(service.disconnect())
             if parts == ["api", "models", "preferences"]:
                 return self._json(models.preferences(body, self.app.runs_dir))
+            if parts == ["api", "prompts", "preferences"]:
+                return self._json(prompts.preferences(body, self.app.runs_dir))
             if parts == ["api", "models", "resolve"]:
                 return self._json({"model": models.resolve(body.get("model"), self.app.runs_dir)})
             if len(parts) == 3 and parts[:2] == ["api", "providers"]:
@@ -523,49 +671,89 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"providers": update_provider(parts[2], body)})
             if parts == ["api", "requests"]:
                 return self._json(self.app.create(body), 201)
+            if parts == ["api", "workspaces"]:
+                return self._json(self.app.draft_workspace(), 201)
             if len(parts) == 4 and parts[:2] == ["api", "requests"]:
                 ws = self.app.workspace(parts[2])
                 action = parts[3]
+                if action == "imports":
+                    return self._json({"import": self.app.local_imports.start(ws, body.get("path"))}, 202)
                 if action == "browser":
                     return self._json(BrowserSession(ws).ui_action(body))
                 if action == "model":
                     return self._json({"selection": models.set_selection(ws, body.get("selection"), self.app.runs_dir),
                                        "applies_to": "next_turn"})
+                if action == "prompt":
+                    if set(body) != {"profile_id"}:
+                        raise ValueError("Choose an agent prompt profile.")
+                    prompts.set_selection(ws, body["profile_id"])
+                    return self._json(prompts.status(ws, self.app.queue.snapshot(ws).get("active"), self.app.runs_dir))
                 if action == "messages":
+                    message = self.app.message(body)
                     attachments = self.app.attachment_paths(body.get("attachments", []))
-                    job = self.app.queue.enqueue(ws, message=self.app.message(body), mode=body.get("mode", "queue"),
-                                                 attachments=[str(p) for p in attachments], skip_index=not bool(attachments),
+                    refs = chat_attachments.ingest(ws, attachments)
+                    job = self.app.queue.enqueue(ws, message=message, mode=body.get("mode", "queue"),
+                                                 attachment_refs=refs,
+                                                 skip_index=not any(ref["kind"] == "video" for ref in refs),
                                                  context=body.get("context"),
                                                  main_config=models.explicit_runtime(ws, self.app.runs_dir))
                     return self._json({"job": job}, 202)
                 if action == "stop":
                     return self._json(self.app.queue.stop(ws))
                 if action == "resume":
-                    return self._json(self.app.queue.resume(ws))
+                    current_model = body.get("use_current_model", False)
+                    current_prompt = body.get("use_current_prompt", False)
+                    if type(current_model) is not bool or type(current_prompt) is not bool:
+                        raise ValueError("use_current_model and use_current_prompt must be booleans.")
+                    override = models.explicit_runtime(ws, self.app.runs_dir) if current_model else None
+                    # A model-only override keeps the interrupted turn's captured
+                    # prompt unless the person also selects the current prompt.
+                    if override and not current_prompt:
+                        captured = (self.app.queue.snapshot(ws).get("resumable_job") or {}).get("main_config", {}).get("prompt")
+                        if captured:
+                            override["prompt"] = captured
+                        else:
+                            row = prompts.profile()
+                            override["prompt"] = {key: row[key] for key in ("id", "label", "sha256", "content")}
+                    return self._json(self.app.queue.resume(ws, job_id=body.get("job_id"), main_config=override,
+                                                          prompt=prompts.snapshot(ws, self.app.runs_dir) if current_prompt else None))
                 if action == "answers":
                     return self._json(self.app.answer(ws, body), 202)
                 if action == "compact":
                     return self._json({"job": self.app.compact(ws)}, 202)
         elif self.command == "DELETE":
             self._body()
+            if len(parts) == 5 and parts[:2] == ["api", "requests"] and parts[3] == "imports":
+                return self._json({"import": self.app.local_imports.cancel(self.app.workspace(parts[2]), parts[4])})
             if len(parts) == 5 and parts[:2] == ["api", "requests"] and parts[3] == "queue":
                 return self._json({"job": self.app.queue.cancel(self.app.workspace(parts[2]), parts[4])})
         raise FileNotFoundError("That endpoint was not found.")
 
-    def _callback_uri(self) -> str:
-        return f"http://{self._check_host()}/api/integrations/solstice/callback"
+    def _callback_uri(self, direct: bool = False, remote: bool = False) -> str:
+        provider = "mcp" if remote else "figma-direct" if direct else "solstice"
+        return f"http://{self._check_host()}/api/integrations/{provider}/callback"
 
-    def _integration_callback(self, query: dict) -> None:
-        ok = False
+    def _integration_callback(self, query: dict, direct: bool = False, remote: bool = False) -> None:
+        ok, pending = False, False
         try:
-            self.app.integrations.complete_auth(query.get("code", [""])[0], query.get("state", [""])[0], self._callback_uri())
+            if remote:
+                if any(len(values) != 1 for values in query.values()):
+                    raise IntegrationError("Ambiguous sign-in callback. Reconnect.")
+                result = self.app.integrations.remote.complete_auth(
+                    {key: values[0] for key, values in query.items()}, self._callback_uri(remote=True))
+                pending = isinstance(result, dict) and result.get("state") == "connecting"
+            else:
+                service = self.app.integrations.direct if direct else self.app.integrations
+                service.complete_auth(query.get("code", [""])[0], query.get("state", [""])[0], self._callback_uri(direct=direct))
             ok = True
         except IntegrationError:
             pass  # Provider details, codes and credentials never enter this page.
         nonce = secrets.token_urlsafe(24)
-        message = "Connected. You can return to the Workbench." if ok else "Sign-in was not completed. Return to the Workbench and try again."
+        message = ("Sign-in received. Workbench is finishing the connection." if pending else
+                   "Connected. You can return to the Workbench." if ok else
+                   "Sign-in was not completed. Return to the Workbench and try again.")
         data = json.dumps({"type": "vwb-integration-auth", "ok": ok})
-        payload = (f'<!doctype html><html><head><meta charset="utf-8"><title>Solstice connection</title></head>'
+        payload = (f'<!doctype html><html><head><meta charset="utf-8"><title>Workbench connection</title></head>'
                    f'<body><p>{message}</p><a href="/">Return to Workbench</a><script nonce="{nonce}">'
                    f'if(window.opener){{window.opener.postMessage({data},location.origin);window.close();}}'
                    '</script></body></html>').encode()
@@ -608,13 +796,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Transfer-Encoding"):
             raise ValueError("Chunked uploads are not supported.")
         length = int(self.headers.get("Content-Length", "0"))
-        if not 0 < length <= MAX_UPLOAD:
-            raise ValueError("Upload a video smaller than 4 GB.")
-        filename = unquote(self.headers.get("X-Filename", "video.mp4"))
-        filename = Path(filename.replace("\\", "/")).name
-        if (Path(filename).suffix.lower() not in VIDEO_TYPES or not filename or len(filename) > 240
-                or any(ord(c) < 32 for c in filename)):
-            raise ValueError("Attach an MP4, MOV, M4V, MKV or WebM video.")
+        if not 0 <= length <= MAX_UPLOAD:
+            raise ValueError("Attach a file no larger than 4 GB.")
+        filename = chat_attachments.filename(unquote(self.headers.get("X-Filename", "attachment")))
         upload_id = uuid.uuid4().hex
         self.app.upload_dir.mkdir(parents=True, exist_ok=True)
         upload_folder = self.app.upload_dir / upload_id
@@ -629,15 +813,31 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("The upload was interrupted. Try attaching it again.")
                     fh.write(block)
                     remaining -= len(block)
-            write_json(self.app.upload_dir / f"{upload_id}.json", {
-                "id": upload_id, "name": filename, "file": f"{upload_id}/{filename}", "size": length, "created": now_iso()})
+            from vwb.util.hashing import sha256_file
+            metadata = {"id": upload_id, **chat_attachments.describe(dest, filename),
+                        "file": f"{upload_id}/{filename}", "size": length, "created": now_iso(),
+                        "sha256": sha256_file(dest)}
+            write_json(self.app.upload_dir / f"{upload_id}.json", metadata)
         except BaseException:
             dest.unlink(missing_ok=True)
             upload_folder.rmdir()
             raise
-        self._json({"upload": {"id": upload_id, "name": filename, "size": length}}, 201)
+        self._json({"upload": {key: value for key, value in metadata.items() if key != "file"}
+                    | {"url": f"/api/uploads/{upload_id}"}}, 201)
 
-    def _file(self, path: Path, *, artifact: bool = False, preview: bool = False, handle=None) -> None:
+    def _artifact_html(self, content: bytes) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", "sandbox allow-scripts; default-src 'none'; script-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(content)
+
+    def _file(self, path: Path, *, artifact: bool = False, preview: bool = False, handle=None, download: bool = False) -> None:
         if handle is None and not path.is_file():
             raise FileNotFoundError("The file was not found.")
         size = os.fstat(handle.fileno()).st_size if handle is not None else path.stat().st_size
@@ -667,7 +867,9 @@ class Handler(BaseHTTPRequestHandler):
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         if preview and path.suffix.lower() == ".mjs":
             content_type = "text/javascript"
-        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Type", "application/octet-stream" if download else content_type)
+        if download:
+            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(path.name)}")
         self.send_header("Content-Length", str(max(0, end - start + 1)))
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "no-cache")
@@ -730,6 +932,7 @@ def serve(*, port: int = 8765, open_browser: bool = True, runs_dir: Path = RUNS_
     try:
         server = WorkbenchServer(("127.0.0.1", port), app)
     except BaseException:
+        app.local_imports.close()
         app.studio.close()
         app.queue.close()
         raise
@@ -743,6 +946,7 @@ def serve(*, port: int = 8765, open_browser: bool = True, runs_dir: Path = RUNS_
         pass
     finally:
         server.server_close()
+        app.local_imports.close()
         app.studio.close()
         app.queue.close()
         app.close_browsers()

@@ -9,7 +9,7 @@ FROM node:22-bookworm-slim
 
 ARG CODEX_VERSION=0.162.1
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates git ripgrep jq python3 curl \
+ && apt-get install -y --no-install-recommends ca-certificates git ripgrep jq python3 python3-venv python3-pip python3-dev build-essential curl \
  && rm -rf /var/lib/apt/lists/* \
  && npm install -g @openai/codex@${CODEX_VERSION} \
  && npm cache clean --force

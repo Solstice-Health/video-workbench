@@ -278,6 +278,7 @@ class Canvas(BaseModel):
     profile: str = "youtube_shorts"
     format: dict[str, int]              # width, height, fps
     time_map: list[Span]
+    duration_frames: int | None = Field(default=None, ge=1, strict=True)
     layers: list[Layer] = Field(default_factory=list)
     copy_deck: list[CopyEntry] = Field(default_factory=list, alias="copy")
     audio: AudioSpec = Field(default_factory=AudioSpec)
@@ -289,7 +290,7 @@ class Canvas(BaseModel):
 
     @property
     def length(self) -> int:
-        return sum(s.src_out - s.src_in for s in self.time_map)
+        return sum(s.src_out - s.src_in for s in self.time_map) if self.time_map else (self.duration_frames or 0)
 
     @property
     def fps(self) -> int:

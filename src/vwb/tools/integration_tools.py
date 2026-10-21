@@ -1,4 +1,4 @@
-"""Read-only remote integrations through the same Registry policy as local tools."""
+"""Remote integrations through Registry with separate read and execution policies."""
 
 from __future__ import annotations
 
@@ -22,16 +22,19 @@ def integration_status(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResul
     try:
         status = _service(ctx).status()
         # Agent gets capabilities/status, not host public-client configuration or OAuth state.
-        return ToolResult.json({"items": status["items"], "notice": "Connect through the Workbench Integrations panel. Credentials stay on the host."})
+        items = [{k: v for k, v in item.items() if k not in {"tools", "client_id", "scope", "url", "auth", "transport"}}
+                 for item in status["items"]]
+        return ToolResult.json({"items": items, "notice": "Connect directly to an MCP server or use a provider preset in Workbench Integrations. Credentials stay on the host. Discover tools using the item's exact id."})
     except IntegrationError as exc:
         return ToolResult.error(str(exc))
 
 
-CATALOG_SCHEMA = schema({"integration": {"type": "string", "enum": ["solstice", "figma"], "default": "solstice"},
+CATALOG_SCHEMA = schema({"integration": {"type": "string", "maxLength": 128, "default": "solstice",
+                                        "description": "An exact integration id from integration_status, including saved mcp_* servers."},
                          "query": {"type": "string", "maxLength": 1000},
                          "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                          "offset": {"type": "integer", "minimum": 0}})
-CALL_SCHEMA = schema({"tool": {"type": "string", "minLength": 1, "maxLength": 128},
+CALL_SCHEMA = schema({"tool": {"type": "string", "minLength": 1, "maxLength": 256},
                       "arguments": {"type": "object"}}, ["tool", "arguments"])
 
 
@@ -64,24 +67,36 @@ def integration_tools(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult
 
 
 def integration_call(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
+    return _call(ctx, arguments, execute=False)
+
+
+def integration_execute(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
+    return _call(ctx, arguments, execute=True)
+
+
+def _call(ctx: ToolContext, arguments: dict[str, Any], *, execute: bool) -> ToolResult:
     try:
         Draft202012Validator(CALL_SCHEMA).validate(arguments)
-        result = _service(ctx).call(ctx.ws, arguments["tool"], arguments["arguments"])
+        service = _service(ctx)
+        handler = service.execute if execute else service.call
+        result = handler(ctx.ws, arguments["tool"], arguments["arguments"])
         images = result.pop("images", [])
         value = ToolResult.json(_agent_result(result), images=images, artifacts=[item["sha256"] for item in result["artifacts"]])
         value.is_error = bool(result["isError"])
         return value
     except ValidationError:
-        return ToolResult.error("Invalid integration_call arguments. Use the published schema.")
+        return ToolResult.error("Invalid integration tool arguments. Use the published schema.")
     except IntegrationError as exc:
         return ToolResult.error(str(exc))
 
 
 TOOLS = [
-    Tool("integration_status", "Check Solstice/Figma connection and read-tool availability. Does not authenticate or make remote calls.",
+    Tool("integration_status", "Check saved direct MCP servers and provider presets for connection and tool availability. Does not authenticate or make remote calls.",
          schema({}), integration_status, "integration.read", "integrations"),
-    Tool("integration_tools", "Discover approved read tools and exact argument schemas on the connected Solstice gateway. Filter integration='figma' for Figma; no direct Figma calls.",
+    Tool("integration_tools", "Discover enabled tools and exact schemas using an integration id from integration_status. Direct MCP tools include dispatch_tool: integration_call for reads, integration_execute for other explicitly enabled tools. Provider presets include figma_mcp, figma_direct, figma and solstice.",
          CATALOG_SCHEMA, integration_tools, "integration.read", "integrations"),
-    Tool("integration_call", "Call one discovered, approved read tool through Solstice. Embedded images/documents are imported with provenance into work/integrations. Never follows advertised sibling servers or mutates remote state.",
+    Tool("integration_call", "Call one discovered, enabled read tool. Namespaced mcp_* tools connect directly to their saved server. Images/documents import with provenance and raster asset_ref values into work/integrations. Other direct tools require integration_execute.",
          CALL_SCHEMA, integration_call, "integration.read", "integrations"),
+    Tool("integration_execute", "Execute a discovered direct MCP tool explicitly enabled by the user in Integrations. It may change remote data. Follow the user's request and tool schema; enabling a tool does not authorize unrelated actions. Calls are never automatically retried after dispatch.",
+         CALL_SCHEMA, integration_execute, "integration.execute", "integrations"),
 ]

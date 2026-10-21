@@ -15,7 +15,7 @@ checks; a person accepts. This build is the v0 slice for Clip and Resize, plus o
  AGENT PLANE             ▼
    main agent    GPT-6 Astra (max) in Codex, its own Docker container; one Codex thread per request,
    (job lead)    resumed on every message; the swarm on its MCP server
-                 (fallbacks: the stateless GPT loop, then Claude Fable 5.1 on the Agent SDK)
+                 (fallbacks: the stateless GPT loop, then Claude Fable 5.1 through the direct Anthropic API)
  optional workers, dispatched only when the main agent chooses:
    scene_miner   Gemini 3.8 Flash, harness loop, sees the source video natively
    planner_b ┐
@@ -37,6 +37,17 @@ Queued jobs freeze their model, context budget, effort and speed settings.
 Provider credentials remain on the control plane. See [model controls](MODELS.md)
 for supported models, capability checks, credential overrides and context limits.
 
+Direct remote MCP servers are host connections, independent of Solstice. The UI
+owns server configuration, OAuth consent and tool enablement. The official MCP
+SDK performs discovery and authentication; host-only connection records preserve
+grants across processes. Agents discover namespaced tool schemas through
+`integration_tools`; reads use `integration_call`, while explicitly enabled
+non-read tools use `integration_execute` and its separate policy capability.
+Both remain inside Registry and import bounded results with provenance. Connection
+generations fence late OAuth completions, and per-server locks serialize token
+renewal and calls. See [integrations](INTEGRATIONS.md) for supported transports,
+trust boundaries and provider registration requirements.
+
 ## Planes and trust (spec D02, I1-I4)
 - **Control plane**: the `vwb` process. It alone holds vendor keys, writes the ledger, mints signed human events,
   runs the verifier and writes release packages. Agents reach it only through typed tool calls.
@@ -48,6 +59,115 @@ for supported models, capability checks, credential overrides and context limits
   on the host; Codex runs only in Docker. Roles limit which tools each agent sees.
 - **Ledger** (`ledger/ledger.jsonl`): append-only and hash-chained. Flags, commits, renders, verdicts, questions and
   human events live here; flag state is a replay of the ledger. `ledger/tools.jsonl` logs every call with hashes.
+
+## Supervised agents and open capabilities
+
+The original flat swarm is now a bounded agent tree. `agent_spawn` creates a child;
+children can delegate with the same tools. `agent_send`/`agent_inbox` carry peer
+messages, `agent_list` reports task/status/tool activity, `agent_wait` supports
+any/all completion with bounded waits, and `agent_interrupt`/`agent_followup`
+control a subtree and continue a saved worker conversation. The older swarm tools
+are aliases over this lifecycle. Workers share `work/`, so parents must assign
+file ownership explicitly. Separate model contexts do not imply separate files.
+
+Each child's effective tools are the intersection of its role and its parent's
+effective tools. A worker cannot gain authority by spawning a broader role.
+Only the main role commits video compositions. Default bounds are depth 3, 6
+children per parent, 24 agents total and 6 concurrently active. A full tree
+refuses a spawn promptly instead of queueing work behind waiting parents.
+Status and messages are durable in `swarm/`, but execution is scoped to a main
+turn. Workers are stopped when that turn ends; restart never silently relaunches
+paid work. Tool side effects already completed are not undone by interruption.
+
+Messages arrive before the next model call in API workers and at the next toolkit
+result/inbox call in Codex or Claude SDK hosts. They do not alter an in-flight
+model generation. Codex interruption removes its container; API cancellation is
+cooperative between calls. Public worker activity is emitted separately from
+the signed human ledger. Peer messages cannot grant permission or accept outputs.
+
+`human_ask` defaults to non-blocking questions but can choose `mode="blocking"`.
+`human_wait` waits on an existing ticket after independent work finishes. Waiting
+is cancellable and bounded to an hour; a timeout leaves the question open without
+assuming an answer. Renewable short leases identify live waiters. UI replies to
+a live waiter feed the existing tool call, without interrupting or queueing a
+duplicate turn. Expired leases return to normal queued-message delivery. Blocking
+questions and permission/source-file questions never default. Answers remain in
+the durable tickets and signed ledger, and inline replies appear in chat history.
+
+`image_inspect` reads request images or asset revisions, crops/zooms within bounded
+pixels and returns source coordinate transforms. Existing `media_frame` provides
+video crop inspection. All providers can write small scripts through `file_write`
+and run them using `sandbox_run`. The Docker image includes Python venv/pip and
+build tools. `sandbox_environment` creates/reuses `work/.sandbox/envs/<name>` and
+records `pip freeze`; direct `pip --target` installs can also live under work/.
+Only work/ is shared, the container root is read-only, and no credentials or host
+sockets are mounted. Network defaults to none. `network=public` separately passes
+the `sandbox.network` policy gate and tunnels proxy-aware HTTP(S) over Docker stdio
+to a public-destination proxy. DNS is pinned per connection; private, local and
+special addresses are rejected. This works across Docker Desktop's VM boundary
+without a bridge network. Git HTTPS works; raw TCP, SSH and private registries do
+not. The main Codex host's existing model/tool gateway transport is separate.
+
+Runtime is bounded to 30 minutes with 256–4096 MiB and 1–4 CPUs (defaults 512 MiB,
+1 CPU). `background=true` returns a durable job supervised outside the chat worker;
+`sandbox_status` pages logs, polls or cancels it across turns/reloads. Four jobs per
+request, 8 MiB retained per output stream. A dead supervisor marks its job interrupted
+without replaying the command. Background jobs survive chat Stop and require explicit
+cancellation. Temporary tools are scripts, not trusted host handlers. Docker is
+required and there is no host execution/installation fallback.
+
+Chat attachments use immutable originals under `.attachments/<id>/` and independent
+editable copies under `work/attachments/<id>/`. Public chat and queued messages store
+IDs, SHA-256, MIME/kind, filename, byte count and work path; no base64 blobs. PDF/text/
+image/unknown files do not become video sources. Valid video uploads retain source
+indexing. `attachment_list`, `attachment_read` and `attachment_remember` provide
+pinned inspection and persistent summaries. Unknown binaries are retained for an
+appropriate sandbox parser, never automatically executed or unpacked.
+Bulk path selections use `ChatTurn.context.folders/files`, independently of the
+12 inline attachments. One folder is one reference, including nested files.
+`LocalImports` snapshots explicitly selected host paths into private staging,
+then atomically publishes independent copies under `work/imports/<id>/`.
+APFS uses descriptor-based copy-on-write clones where available; fallback copies
+check available disk space and source identity/size/timestamps. No host path is
+mounted into the agent container. Import manifests stay outside `work/`;
+directory hierarchy and relative work paths persist across turns and compaction.
+This route does not inline pixels, pin immutable attachment originals, or eagerly
+index videos. Agents enumerate and inspect the selected batch using their
+existing file, image/PDF and sandbox tools.
+Ordinary text reads scan at most 8 MiB with bounded line/output lengths; large-file
+editing belongs in streaming sandbox scripts. Discovery stops at 500 matches or
+10,000 scanned entries and prunes venv/package caches unless explicitly named.
+
+Image payloads are cached from pinned originals, with integrity checks on reuse,
+40 MP/50 MiB source bounds, 2048 px/4 MiB output bounds, and a 16 MiB aggregate
+uploaded-image budget. Oversized images remain attachable for sandbox conversion. Newer images take priority;
+omitted images remain explicit retrievable references. Direct provider histories
+store logical image refs and hydrate them at the request boundary. OpenAI Responses,
+Anthropic Messages, OpenRouter and Claude SDK receive native image blocks; Codex
+receives read-only payload mounts via `--image`, including resumed sessions. Native
+hosts own their internal transcript format. Model capability checks keep unsupported
+images as references. Saved summaries can replace uploaded pixels during API replay.
+Native compaction checkpoints the catalog without changing chat/files; original
+images can always be reopened through tools. Other providers still have no manual
+native compaction operation.
+
+`pdf_info`, `pdf_read`, `pdf_search` and `pdf_render` share the preview's two-worker
+limit and inspect PDFs in bounded disposable PDFium processes. Inputs are pinned
+no-follow descriptors, limited to 64 MiB/10,000 pages. `attachment:<id>` reads the
+immutable original even if its working copy changes. Text and literal search have
+continuation cursors; renders include crop/zoom transforms. Explicit OCR uses Apple
+Vision when available, with a three-page limit. No JavaScript/forms/embedded-file
+execution is enabled. This is resource/process isolation, not a security VM for a
+native parser. Structured table extraction and exact reading order are not claimed.
+
+General HTML review artifacts are independent of `vwb.canvas/2` compositions.
+`artifact_publish` snapshots authored HTML and records explicit local assets plus
+stable review item IDs. A sandboxed canvas tab can arrange any gallery, chart,
+video set or custom interaction. Its bridge stages item/region/time selections;
+only the host's user action submits feedback into the normal message queue.
+`artifact_feedback` exposes durable, version-specific feedback to agents. Remote
+resources and host API access are unavailable to the HTML; changed assets require
+republishing. See the authoring guide returned by `artifact_list`.
 
 ## The request workspace (`runs/<request>/`)
 | Folder | What | Who writes |
@@ -107,6 +227,14 @@ a GPT reading from text and contact sheets, and their disagreements. The dossier
 first; SQL, search and frame tools give the detail.
 
 ## Composition: the canvas is code (spec D37, revised)
+Source video is optional at intake. A request may begin with a brief or authorized
+design reference. Those requests skip video indexing and use `time_map: []` plus
+an explicit `duration_frames`; `canvas_new(duration_s=...)` creates that clock.
+The compositor renders its image/clip/shape/text layers directly and the audio
+renderer supplies silence. Imported raster designs receive immutable asset refs
+with external-source lineage. Source video edits retain their span-based clock
+and source narration. Both modes use the same commit, render and review pipeline.
+
 There are no templates. A canvas (`vwb.canvas/2`, see `docs/CANVAS.md`) is an open scene graph the agent writes:
 video windows (crop and box keyframes, masks, effects), images, shapes, text and captions, in any arrangement and
 motion. Text comes only from the copy deck. The agent edits the file like source code, then:

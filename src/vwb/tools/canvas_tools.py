@@ -9,6 +9,7 @@ hands a version to the control plane, whose verifier alone derives flags and tri
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ from vwb.canvas import copydeck
 from vwb.canvas.compile import check, expand, load_working, plan, working_path
 from vwb.canvas.model import font_library
 from vwb.canvas.store import CanvasStore
-from vwb.config import REPO_ROOT, load_profile
+from vwb.config import DOCS_DIR, load_profile
 from vwb.index.store import IndexStore
 from vwb.media.decode import read_frames
 from vwb.media.frames import contact_sheet, jpeg_bytes, resize_to_width
@@ -46,7 +47,7 @@ def _profile(ctx: ToolContext) -> dict[str, Any]:
 # ---------------------------------------------------------------- authoring
 
 def canvas_schema(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
-    return ToolResult(text=(REPO_ROOT / "docs" / "CANVAS.md").read_text())
+    return ToolResult(text=(DOCS_DIR / "CANVAS.md").read_text())
 
 
 def layout_facts(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
@@ -59,7 +60,7 @@ def layout_facts(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     from vwb.workspace.registry import Registry
     assets = [{"ref": f"slot:{r['slot']}@{r['rev']}", "kind": r["kind"], "prov": r["prov"],
                "size": json.loads(r["fit"]).get("native_size")} for r in Registry(ctx.ws.assets).list()]
-    m = st.media()
+    m = st.media() if ctx.ws.load().sources else None
     return ToolResult.json({
         "canvas": [W, H], "fps": prof["fps"], "max_duration_s": prof["max_duration_s"],
         "safe_zone": {"x": sz["left"], "y": sz["top"], "w": W - sz["left"] - sz["right"], "h": H - sz["top"] - sz["bottom"],
@@ -71,7 +72,9 @@ def layout_facts(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
         "fonts": {fam: {"category": f["category"], "weights": f["weights"], "italic": f["italic"]}
                   for fam, f in font_library().items()},
         "fonts_note": "Open-licence library; no family is a default. Match the source's typeface where you can.",
-        "source": {"size": [m["width"], m["height"]], "fps": m["fps"]},
+        "source": {"size": [m["width"], m["height"]], "fps": m["fps"]} if m else None,
+        "timeline": "source_spans" if m else "authored_duration",
+        "timeline_note": "Use source frame spans." if m else "Use canvas_new with duration_s. Imported designs are references; no source video or narration is required.",
         "brand_style_from_readings": [s for s in styles if s],
         "assets": assets,
     })
@@ -83,16 +86,32 @@ def canvas_new(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     if p.exists() and not a.get("overwrite"):
         return ToolResult.error(f"{ctx.ws.rel(p)} exists; edit it, or pass overwrite=true")
     prof = _profile(ctx)
-    src = ctx.ws.load().source()
-    spans = [[int(x), int(y)] for x, y in parse_json_arg(a["spans"])]
+    req = ctx.ws.load()
+    spans = parse_json_arg(a.get("spans") or [])
+    duration = a.get("duration_s")
+    if duration is not None:
+        if spans:
+            return ToolResult.error("Choose duration_s for a new video or spans for a source edit, not both.")
+        if (type(duration) not in (int, float) or not math.isfinite(duration)
+                or not 0 < duration <= prof["max_duration_s"] or round(duration * prof["fps"]) < 1):
+            return ToolResult.error(f"duration_s must cover at least one frame and be at most {prof['max_duration_s']} seconds.")
+        n, src, time_map = round(duration * prof["fps"]), None, []
+    else:
+        if not req.sources or not spans:
+            return ToolResult.error("For a new video without source cuts, pass duration_s. For a source edit, attach a video and pass spans.")
+        if (not isinstance(spans, list) or any(not isinstance(pair, list) or len(pair) != 2
+                or any(type(v) is not int for v in pair) or not 0 <= pair[0] < pair[1] for pair in spans)):
+            return ToolResult.error("spans must contain [start, end] frame pairs with 0 <= start < end.")
+        src = req.source()
+        time_map = [{"media": src.ref, "src_in": x, "src_out": y} for x, y in spans]
+        n = sum(y - x for x, y in spans)
     doc = {"schema": "vwb.canvas/2", "profile": prof["id"],
            "format": {"width": prof["width"], "height": prof["height"], "fps": prof["fps"]},
-           "time_map": [{"media": src.ref, "src_in": x, "src_out": y} for x, y in spans],
+           "time_map": time_map, **({"duration_frames": n} if duration is not None else {}),
            "intent": a.get("intent", ""), "layers": []}
     write_json(p, doc)
-    n = sum(y - x for x, y in spans)
     return ToolResult.json({"path": str(p.relative_to(ctx.ws.work)), "frames": n, "seconds": round(n / prof["fps"], 2),
-                            "media": src.ref, "note": "Add layers by editing this file (see canvas_schema). Nothing is "
+                            "media": src.ref if src else None, "note": "Add layers by editing this file (see canvas_schema). Nothing is "
                                                       "placed for you: you design the composition."})
 
 
@@ -448,10 +467,10 @@ TOOLS = [
          "styles, masks, effects. Read it before writing a canvas.", schema({}), canvas_schema, "tool", "canvas"),
     Tool("layout_facts", "Facts for composing (not a layout): canvas size, safe zone, platform UI, legibility floors, "
          "fonts, brand colours from the readings, recovered assets.", schema({}), layout_facts, "tool", "canvas"),
-    Tool("canvas_new", "Create work/outputs/<output>/canvas.json with the format and time map (source frame spans) "
-         "and no layers. You then write the layers.", schema({"output": {"type": "string"}, "intent": {"type": "string"},
+    Tool("canvas_new", "Create work/outputs/<output>/canvas.json with no layers. Use duration_s to make a new video from a brief or design references, without source video. For source edits, use spans instead. You then write the layers.", schema({"output": {"type": "string"}, "intent": {"type": "string"},
+         "duration_s": {"type": "number", "exclusiveMinimum": 0},
          "spans": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}}, "overwrite": {"type": "boolean"}},
-         ["output", "spans"]), canvas_new, "tool", "canvas"),
+         ["output"]), canvas_new, "tool", "canvas"),
     Tool("copy_add", "Mint a typeset string into the copy deck. source: shot_title (shot id: that slide's title, two "
          "OCR readers), ocr (text track ids), transcript (sentence ids), or authored (text, with a note saying where it "
          "came from, for example a value measured with chart_read; flagged for a person to confirm). "

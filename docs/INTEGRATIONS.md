@@ -1,10 +1,213 @@
-# Solstice and Figma integrations
+# Direct MCP servers and provider integrations
 
-Workbench uses the organization's Solstice MCP gateway. It does not contact Figma MCP,
-Figma REST, or sibling MCP servers directly. Every agent call goes through
-`Registry.call`, the `integration.read` policy row, the role allowlist, and the call log.
+## Connect an MCP server directly
+
+Solstice is optional. In **Plugins → Manage connections → Add MCP server**, enter
+a name and its Streamable HTTP endpoint. Automatic authentication connects public
+servers immediately or opens the server's browser sign-in. Select the saved
+connection in the composer to ask the agent to use it.
+
+The connection manager supports HTTPS endpoints and HTTP on loopback for local
+servers. It uses the official Python MCP client, including protected-resource and
+authorization-server discovery, dynamic client registration when offered, PKCE,
+callback state/issuer validation, and refresh tokens. Advanced settings support a
+bearer token or the server's pre-registered OAuth client credentials and scopes.
+The callback is `/api/integrations/mcp/callback` on the current Workbench origin.
+Registration settings must match that exact URL. Servers that do not allow dynamic
+registration still require a client registered for Workbench; connecting directly
+cannot remove a provider's access restrictions.
+
+### Figma remote requires client approval
+
+The hosted URL `https://mcp.figma.com/mcp` does not need the desktop app, but
+[Figma's remote setup guide](https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/)
+currently limits connections to approved MCP clients. Adding its URL to Workbench
+does not grant that approval. Figma's
+[staff clarification](https://forum.figma.com/ask-the-community-7/figma-s-mcp-product-57290)
+also states that ordinary REST OAuth app credentials do not grant `mcp:connect`.
+Use the client request link in the setup guide, or contact the Figma account team
+about an internal client on an Organization or Enterprise plan.
+
+Checked 2026-10-20: public discovery advertises OAuth and dynamic registration.
+Advertising a registration endpoint does not mean every client can register.
+Workbench's earlier error mapped every registration exception to an approval
+requirement; that message alone was not evidence of Figma's exact refusal.
+The connection screen now explains the provider's documented requirement
+separately from the actual registration error. Raw provider errors and credentials
+are not displayed.
+
+### Credentials and tool access
+
+Saved connections have independent `mcp_<id>` identifiers. Their host-only state
+lives in `runs/.integrations/mcp/`, outside request workspaces. Credentials are never
+returned to the browser or agent. Disconnect clears the user grant; Remove deletes
+the saved connection. Provider-side consent revocation remains in the provider's
+account settings.
+
+The manager shows the live tool catalog. Tools explicitly annotated read-only and
+non-destructive are enabled initially. Other tools require the person to enable
+them. After a custom selection is saved, newly discovered tools stay disabled.
+Discovery returns the exact schema, namespaced name and `dispatch_tool`:
+
+- `integration_call` uses the existing `integration.read` policy and refuses
+  non-read-only direct tools.
+- `integration_execute` uses a separate `integration.execute` policy for tools the
+  user explicitly enabled. It is available to the main agent and general workers;
+  specialized read roles retain their existing restrictions.
+
+Both paths pass through Registry, validate live schemas and import bounded results
+with provenance into `work/integrations/<connection-id>/`. Enabling a tool is not
+authorization for unrelated actions. Remote tool descriptions and outputs are
+untrusted source material. A dispatched tool call is not automatically retried
+after an ambiguous network failure.
+
+This connection manager supports remote **Streamable HTTP** tools. It does not
+launch arbitrary stdio commands, connect legacy HTTP+SSE endpoints, automatically
+fetch resource links, or grant server-initiated sampling and elicitation. Those
+are separate protocol capabilities, not requirements for ordinary tool servers.
+
+Implementation reference:
+[official Python SDK OAuth client](https://github.com/modelcontextprotocol/python-sdk/blob/main/docs/client/oauth-clients.md).
+
+### Verification, 2026-10-20
+
+246 targeted MCP, existing integration, frontend, HTTP-route and chat/resume tests
+pass. The 18 real-wire protocol tests exercise public/bearer/OAuth servers, PKCE,
+registration, refresh at a discovered non-root endpoint after reopening, callback
+state/issuer/replay checks, connection isolation, permission changes and credential
+echo redaction. A live Microsoft Learn connection discovered three tools and
+successfully searched through Registry with an imported result and call log.
+The visible UI also completed the local OAuth fixture's full redirect/callback
+flow and enabled a tool that then executed through Registry. Temporary OAuth
+test connections were removed; no production account grant was used in that test.
+
+Tested with MCP SDK 2.3.0 and httpx2 2.13.1. The adapter restores persisted absolute
+token expiry in the SDK's initialization hook and wraps the HTTP dialer to pin
+validated destination IPs while preserving TLS host checks. These compatibility
+points must be rechecked on SDK/transport upgrades.
+
+## Provider presets
+
+Workbench has three independent Figma routes: **Figma MCP (desktop)**, using the
+official local MCP server; **Figma direct**, using Figma's REST API from the
+Workbench host; and **Figma via Solstice**, using the organization's gateway.
+Selecting one never automatically falls back to another. Every agent call goes through
+`Registry.call`, the appropriate integration policy row, the role allowlist, and the call log.
+
+## Official Figma desktop MCP
+
+1. Sign in to the Figma desktop app and open the design file. The account needs
+   file access and a Dev or Full seat on an eligible plan.
+2. With nothing selected, enter Dev Mode (Shift+D). In the right sidebar, enable
+   the desktop MCP server. Keep Figma open.
+3. In Workbench → Plugins → Manage connections, choose Connect desktop MCP.
+   Workbench checks the actual server catalog at `http://127.0.0.1:3845/mcp`.
+   No REST OAuth app, Client ID/Secret or Solstice registration is needed.
+4. Select Figma MCP (desktop) in Plugins, then send a frame link or explicitly
+   ask to use the current desktop selection. A source video is optional.
+
+`integration_tools(integration="figma_mcp")` exposes available known read tools
+with a `figma_mcp.` prefix and their live argument schemas. This includes design
+context, metadata, screenshots, variable definitions, motion context and Code
+Connect reads when the desktop server advertises them. Unknown/write tools are
+excluded, even if a remote annotation claims they are read-only. Explicit
+non-read-only or destructive hints also exclude a tool. Schemas are checked for
+external references and refreshed before dispatch. Workbench identifies itself
+as `solstice-video-workbench` and sends no bearer token to the desktop endpoint.
+
+Embedded screenshots and text/code context import under `work/integrations/figma_mcp/`.
+Raster imports receive reusable asset refs with external evidence lineage. Exact
+HTTP asset links in returned source code or explicit resource-link results may be imported only from
+`127.0.0.1:3845/assets/<filename>` or `localhost:3845/assets/<filename>` for PNG,
+JPEG, WebP or SVG. No query strings, traversal, other ports/routes or redirects
+are fetched. Downloads are bounded at 4 MiB each, 64 files/8 MiB aggregate;
+SVG stays inert text. Other resource links remain references, not downloads.
+Illustrative URLs inside explanatory prose are not treated as design assets.
+The file limit is separate from the eight inline raster images sent to a model;
+additional imported assets remain available by workspace path and asset reference.
+The original content plus imported assets must fit the 200-block response limit.
+Connection preferences persist, but a successful catalog check is not proof
+Figma remains open; discovery and dispatch check again. Disconnect only disables
+Workbench's connection, not the Figma app's own MCP server.
+
+This implementation connects to the official **desktop** server. The hosted
+server offers additional capabilities, including write-to-canvas, but Figma's
+[remote setup guide](https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/)
+currently restricts it to approved clients. Workbench needs its own client
+approval before a hosted connection can be offered. The REST app registration
+does not grant hosted MCP client approval. See the
+[desktop setup guide](https://developers.figma.com/docs/figma-mcp-server/local-server-installation/)
+and [tool reference](https://developers.figma.com/docs/figma-mcp-server/tools-and-prompts/).
+Tests exercise the actual protocol over simulated HTTP. The user must enable
+Figma's desktop server for live reads and keep the intended design open.
+
+Live verification on 2026-10-20 discovered eight supported read tools. Through
+Registry, the open social-ad design returned its page metadata, an 820 × 1024
+screenshot of MOA / Frame 1, and full design context with all 11 referenced local
+assets imported. The large context was saved to `response.json` with a bounded
+excerpt returned to the agent. An illustrative URL in Figma's explanatory text
+was excluded from downloads. Verification artifacts and call logs are under
+`runs/.checks/figma-desktop-20261020/`; no model turn or design edit was run.
+All 29 desktop adapter tests pass, including file-count, byte-limit and example-URL
+regressions.
+
+## Figma direct: local setup without a Solstice deployment
+
+1. At <https://www.figma.com/developers/apps>, create an OAuth app for your team.
+   Save its Client ID and Client Secret. In OAuth credentials, add the exact callback
+   `http://127.0.0.1:8765/api/integrations/figma-direct/callback`. Register the callback
+   actually shown by your Workbench if you use another local host/port.
+2. Enable `file_content:read` and `current_user:read`. The app owner and plan admins
+   can test a draft; publish privately for other eligible team/organization members.
+3. Open Workbench → Plugins → Manage connections → Figma direct settings. Enter the
+   Figma app ID, secret and matching callback. Save Figma settings, then choose
+   Connect Figma direct. Complete consent in your regular browser.
+4. Choose Check Figma account if needed. Once Connected, select Figma direct from Plugins
+   and send a Figma file/frame link in chat.
+
+The host uses one-use state and S256 PKCE, exchanges the code with Figma using the
+registered app's credentials, checks `/v1/me`, and stores the grant outside every
+agent mount in `runs/.integrations/figma_direct/connection.json` (0600; directory
+0700). App secrets never appear in status responses or agent tool schemas. Refresh
+is serialized across processes and saved before reads. A blank secret field retains
+the saved secret; changing the app ID requires its corresponding secret. Configuration
+changes clear the old grant. Disconnect forgets local user tokens and pending sign-in
+while retaining app settings; upstream Figma consent is managed separately in Figma.
+
+`integration_tools(integration="figma_direct")` exposes `figma_direct_get_file`
+(file key, optional node IDs and depth 1–10, default 2) and
+`figma_direct_get_images` (1–8 node IDs, PNG/SVG, scale 0.01–4). Both use the
+existing `integration_call` Registry tool. Direct imports emit the existing canvas
+event and live in `work/integrations/figma_direct/`, with source URLs and hashes.
+PNG is validated before import; SVG is inert text. JSON reads are capped at 2 MiB,
+preview downloads at 4 MiB each/8 MiB total. Only fixed Figma API endpoints and
+allowlisted HTTPS Figma CDN hosts are contacted. CDN requests carry no Figma
+authorization, redirects are rejected, and provider errors do not expose bodies.
+Rate limits return an actionable message without automatic retries.
+
+Connected means `/v1/me` verified the account, not that every file is readable.
+Manage connections shows the verified account; file access is checked on each read.
+The adapter classifies bounded JSON error codes into fixed, safe messages without
+echoing arbitrary provider bodies. A 401 or recognized invalid/expired-token 403
+can renew the credential and retry once. Generic 403s (including `Request denied`)
+do not invalidate a working account or trigger repeated refresh/reconnect attempts.
+Explicit insufficient-scope errors point to the app scopes and renewed consent.
+The requested scopes are setup requirements, not evidence of the granted scopes.
+
+When a file opens in the browser but REST returns 403, compare the browser account
+with the verified account and check the app's configured scopes. Browser access
+alone does not establish REST authorization, and `Request denied` does not identify
+the underlying Figma rule. Do not claim a specific permission, seat, or app-policy
+problem without evidence. Preserve the working grant while investigating.
+
+This route reads designs and renders frames; it does not implement official MCP
+design-to-code tools, live desktop selection, editing Figma files or a live Figma
+editor. Provider consent and real file access require your own app registration
+and have not been verified by the automated transport tests.
 
 ## What is implemented
+
+The following sections describe the separate Solstice gateway route.
 
 The host can configure a registered public OAuth client, start an authorization-code
 flow with PKCE, validate a one-use callback state, retain the user's grant across

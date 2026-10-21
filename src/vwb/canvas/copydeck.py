@@ -70,7 +70,10 @@ def mint(ws: Workspace, *, copy_id: str, role: str, source: str, shot: int | Non
          tracks: list[int] | None = None, sentences: list[int] | None = None, text: str | None = None,
          note: str | None = None) -> CopyEntry:
     store = IndexStore(ws.index / "index.sqlite")
-    media = ws.load().source().ref
+    req = ws.load()
+    if not req.sources and source != "authored":
+        raise ValueError("No source video is attached. Use authored copy with a note citing the Figma file/node or brief; it remains unverified.")
+    media = req.source().ref if req.sources else None
     if source == "shot_title":
         rows = store.all("SELECT * FROM text_tracks WHERE shot=? AND role='title' ORDER BY y, x", (shot,))
         if not rows:

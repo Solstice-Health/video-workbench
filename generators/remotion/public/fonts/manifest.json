@@ -4,6 +4,7 @@
   "id": "arimo",
   "version": "5.3.0",
   "license": "OFL-1.1",
+  "license_file": "licenses/arimo.txt",
   "category": "sans-serif",
   "faces": [
    {
@@ -43,6 +44,7 @@
   "id": "barlow",
   "version": "5.3.0",
   "license": "OFL-1.1",
+  "license_file": "licenses/barlow.txt",
   "category": "sans-serif",
   "faces": [
    {
@@ -97,6 +99,7 @@
   "id": "dm-sans",
   "version": "5.3.0",
   "license": "OFL-1.1",
+  "license_file": "licenses/dm-sans.txt",
   "category": "sans-serif",
   "faces": [
    {
@@ -151,6 +154,7 @@
   "id": "ibm-plex-sans",
   "version": "5.3.0",
   "license": "OFL-1.1",
+  "license_file": "licenses/ibm-plex-sans.txt",
   "category": "sans-serif",
   "faces": [
    {
@@ -195,6 +199,7 @@
   "id": "inter",
   "version": "5.3.0",
   "license": "OFL-1.1",
+  "license_file": "licenses/inter.txt",
   "category": "sans-serif",
   "faces": [
    {
@@ -249,6 +254,7 @@
   "id": "lato",
   "version": "5.3.0",
   "license": "OFL-1.1",
+  "license_file": "licenses/lato.txt",
   "category": "sans-serif",
   "faces": [
    {
@@ -288,6 +294,7 @@
   "id": "merriweather",
   "version": "5.3.0",
   "license": "OFL-1.1",
+  "license_file": "licenses/merriweather.txt",
   "category": "serif",
   "faces": [
    {
@@ -342,6 +349,7 @@
   "id": "montserrat",
   "version": "5.3.0",
   "license": "OFL-1.1",
+  "license_file": "licenses/montserrat.txt",
   "category": "sans-serif",
   "faces": [
    {
@@ -396,6 +404,7 @@
   "id": "noto-sans",
   "version": "5.3.0",
   "license": "OFL-1.1",
+  "license_file": "licenses/noto-sans.txt",
   "category": "sans-serif",
   "faces": [
    {
@@ -450,6 +459,7 @@
   "id": "open-sans",
   "version": "5.3.0",
   "license": "OFL-1.1",
+  "license_file": "licenses/open-sans.txt",
   "category": "sans-serif",
   "faces": [
    {
@@ -499,6 +509,7 @@
   "id": "playfair-display",
   "version": "5.3.0",
   "license": "OFL-1.1",
+  "license_file": "licenses/playfair-display.txt",
   "category": "serif",
   "faces": [
    {
@@ -548,6 +559,7 @@
   "id": "poppins",
   "version": "5.3.0",
   "license": "OFL-1.1",
+  "license_file": "licenses/poppins.txt",
   "category": "sans-serif",
   "faces": [
    {
@@ -602,6 +614,7 @@
   "id": "roboto",
   "version": "5.3.0",
   "license": "OFL-1.1",
+  "license_file": "licenses/roboto.txt",
   "category": "sans-serif",
   "faces": [
    {
@@ -656,6 +669,7 @@
   "id": "roboto-condensed",
   "version": "5.3.0",
   "license": "OFL-1.1",
+  "license_file": "licenses/roboto-condensed.txt",
   "category": "sans-serif",
   "faces": [
    {
@@ -710,6 +724,7 @@
   "id": "source-sans-3",
   "version": "5.3.0",
   "license": "OFL-1.1",
+  "license_file": "licenses/source-sans-3.txt",
   "category": "sans-serif",
   "faces": [
    {
@@ -764,6 +779,7 @@
   "id": "source-serif-4",
   "version": "5.3.0",
   "license": "OFL-1.1",
+  "license_file": "licenses/source-serif-4.txt",
   "category": "serif",
   "faces": [
    {

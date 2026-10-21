@@ -20,6 +20,8 @@ def index_build(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
 
 
 def index_overview(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
+    if not ctx.ws.load().sources:
+        return ToolResult.json({"sources": [], "notice": "No source video or video dossier. Read the brief and authorized design imports instead. Use canvas_new(duration_s=...) for an authored timeline."})
     p = ctx.ws.index / "dossier.md"
     if not p.exists():
         return ToolResult.error("no index yet; call index_build")

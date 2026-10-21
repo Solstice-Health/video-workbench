@@ -17,6 +17,31 @@ DEFAULT = {"model_id": "astra", "context_tokens": 1000000, "effort": "max",
            "fast": False, "ultra_fast": False, "custom_model": None}
 
 
+def direct_anthropic_route(cfg: dict) -> dict:
+    """Apply the host's direct-Anthropic policy, including saved router configs.
+
+    Only aliases of curated native IDs are translated. Arbitrary router slugs
+    are never guessed into Anthropic model names or sent through OpenRouter.
+    """
+    model = cfg.get("model", "")
+    if cfg.get("host") == "claude_sdk":
+        return {**cfg, "provider": "anthropic", "host": "anthropic_api"}
+    if not isinstance(model, str) or not model.startswith("anthropic/"):
+        return cfg
+    alias = re.sub(r"[^a-z0-9]", "", model.removeprefix("anthropic/").lower())
+    native = next((row for row in load_config("models")["models"]
+                   if row["provider"] == "anthropic"
+                   and re.sub(r"[^a-z0-9]", "", row["model"].lower()) == alias), None)
+    if native is None:
+        raise ValueError("Anthropic models use the direct Anthropic API. Choose a supported Anthropic model "
+                         "from the model picker; this OpenRouter alias has no verified native mapping.")
+    if cfg.get("context_window", 0) > native["native_context"]:
+        raise ValueError("This saved context budget exceeds the direct Anthropic model's limit. Choose a smaller budget.")
+    return {**cfg, "provider": "anthropic", "host": "anthropic_api", "model": native["model"],
+            "native_context": min(cfg.get("native_context", native["native_context"]), native["native_context"]),
+            "image_input_supported": True}
+
+
 def _path(runs_dir: Path) -> Path:
     return runs_dir / ".ui" / "model_preferences.json"
 
@@ -25,10 +50,32 @@ def _preferences(runs_dir: Path) -> dict:
     return read_json(_path(runs_dir), {}) or {}
 
 
+def image_input_supported(row: dict) -> bool:
+    """Known built-ins retain vision; custom OpenRouter requires explicit evidence.
+
+    Older saved custom selections have no modality metadata. They remain usable
+    for text/tools while images stay file references until the model is checked
+    again. The same rule covers frozen queue configs made before this field.
+    """
+    if type(row.get("image_input_supported")) is bool:
+        return row["image_input_supported"]
+    modalities = row.get("input_modalities")
+    if isinstance(modalities, list) and all(isinstance(value, str) for value in modalities):
+        return "image" in modalities
+    if row.get("id") == "custom_openrouter" or (row.get("selection") or {}).get("model_id") == "custom_openrouter":
+        return False
+    if row.get("provider") == "openrouter":
+        return any(model.get("provider") == "openrouter" and model.get("model") == row.get("model")
+                   for model in load_config("models")["models"])
+    return True
+
+
 def _descriptor(row: dict, statuses: dict) -> dict:
+    row = direct_anthropic_route(row)
     ready = statuses.get(row["provider"], False)
     limit = row.get("native_context", 0)
     return {**row, "available": ready and row.get("tools_supported", True),
+            "image_input_supported": image_input_supported(row),
             "unavailable_reason": "" if ready else f"Add your {row['provider']} API key in Provider APIs.",
             "capabilities": {"contexts": [n for n in [300000, 1000000] if limit >= n] or ([limit] if limit else []),
                              "efforts": row.get("efforts", []), "fast": row.get("fast", False),
@@ -63,6 +110,14 @@ def canonical_openrouter(value: Any) -> str:
 
 def resolve(value: Any, runs_dir: Path = RUNS_DIR) -> dict:
     model_id = canonical_openrouter(value)
+    if model_id.startswith("anthropic/"):
+        routed = direct_anthropic_route({"model": model_id, "provider": "openrouter", "host": "openrouter_api"})
+        native = next(row for row in load_config("models")["models"] if row["model"] == routed["model"])
+        row = {**native, "id": "custom_openrouter", "canonical_id": model_id,
+               "label": native["label"] + " (Anthropic direct)", "image_input_supported": True}
+        write_json(runs_dir / ".ui" / "resolved_models" / f"{_model_hash(model_id)}.json", row)
+        states = {p["id"]: p["configured"] for p in provider_status()}
+        return _descriptor(row, states)
     try:
         with httpx.Client(timeout=20, follow_redirects=False, trust_env=False) as client:
             response = client.get("https://openrouter.ai/api/v1/models")
@@ -81,10 +136,15 @@ def resolve(value: Any, runs_dir: Path = RUNS_DIR) -> dict:
             reasoning = source.get("reasoning") or {}
             reported = reasoning.get("supported_efforts", [])
             efforts = [e for e in EFFORTS if e in reported]
+            architecture = source.get("architecture")
+            modalities = architecture.get("input_modalities") if isinstance(architecture, dict) else None
+            if not isinstance(modalities, list) or any(not isinstance(value, str) for value in modalities):
+                modalities = None
             # Without explicit capability metadata, don't invent five compatible settings.
             row = {"id": "custom_openrouter", "label": source.get("name", model_id), "provider": "openrouter",
                    "model": model_id, "canonical_id": model_id, "host": "openrouter_api", "native_context": limit,
                    "efforts": efforts, "fast": False, "ultra_fast": False, "tools_supported": True,
+                   "input_modalities": modalities,
                    "max_output_tokens": min((source.get("top_provider") or {}).get("max_completion_tokens") or 16384, 16384)}
             # Tier availability is endpoint-specific; query the endpoint tags before showing speed controls.
             endpoint = client.get(f"https://openrouter.ai/api/v1/models/{model_id}/endpoints")
@@ -164,7 +224,10 @@ def explicit_runtime(ws=None, runs_dir: Path = RUNS_DIR) -> dict | None:
     """Old conversations retain their configured slot/fallbacks until a UI choice is saved."""
     selected = read_json(ws.memory / "model_selection.json") if ws is not None else None
     selected = selected or _preferences(runs_dir).get("default_selection")
-    return runtime(selected, runs_dir) if selected else None
+    if not selected:
+        return None
+    from vwb.prompts import with_snapshot
+    return with_snapshot(runtime(selected, runs_dir), ws, runs_dir)
 
 
 def set_selection(ws, value: Any, runs_dir: Path = RUNS_DIR) -> dict:
@@ -196,8 +259,10 @@ def runtime(selected: dict, runs_dir: Path = RUNS_DIR) -> dict:
         row = read_json(runs_dir / ".ui" / "resolved_models" / f"{_model_hash(selected['custom_model'])}.json")
     else:
         row = next(m for m in load_config("models")["models"] if m["id"] == selected["model_id"])
+    row = direct_anthropic_route(row)
     budget = selected["context_tokens"]
     return {"model": row["model"], "provider": row["provider"], "host": row["host"],
+            "input_modalities": row.get("input_modalities"), "image_input_supported": image_input_supported(row),
             "effort": selected["effort"], "context_window": budget, "native_context_window": row["native_context"],
             "auto_compact_tokens": int(budget * 0.85), "max_turns": int(slot("main").get("max_turns", 400)),
             "max_output_tokens": row.get("max_output_tokens", 16384), "fallbacks": [],

@@ -100,6 +100,48 @@ def test_context_unknown_never_guesses_and_fallback_does_not_show_codex_context(
     assert usage["model"] == "other" and usage["compact_available"] is False
 
 
+def test_native_compaction_keeps_current_context_separate_from_billed_iterations(ws):
+    key = "anthropic_api:claude-opus-5-5"
+    events.set_active_host(ws, key)
+    measured = {"input_tokens": 100000, "output_tokens": 4000, "total_tokens": 104000,
+                "input_tokens_details": {"cached_tokens": 90000},
+                "output_tokens_details": {"thinking_tokens": 3000},
+                "billed_input_tokens": 900000, "billed_output_tokens": 5000,
+                "billed_cached_input_tokens": 500000}
+    limits = {"max_output_tokens": 128000, "auto_compaction_enabled": True, "auto_compact_tokens": 850000,
+              "compaction_count": 1, "last_stop_reason": "tool_use"}
+    write_json(ws.memory / "provider_context.json", {"key": key, "used_tokens": 104000,
+        "limit_tokens": 1000000, "breakdown": measured, **limits})
+    append_jsonl(ws.ledger / "tools.jsonl", {"usage": measured})
+
+    usage = events.context_usage(ws)
+    context, billing = usage["context"], usage["billing"]
+    assert context["used_tokens"] == 104000 and context["percent"] == 10.4
+    assert context["breakdown"]["input_tokens"] == 100000
+    assert context["breakdown"]["cached_input_tokens"] == 90000
+    assert context["breakdown"]["reasoning_output_tokens"] == 3000
+    assert {field: context[field] for field in limits} == limits
+    assert billing["calls"] == 1 and billing["input_tokens"] == 900000
+    assert billing["output_tokens"] == 5000 and billing["total_tokens"] == 905000
+    assert billing["cached_input_tokens"] == 500000 and billing["reasoning_output_tokens"] == 3000
+    assert usage["compact_available"] is False
+
+    events.set_active_host(ws, "openrouter_api:other")
+    assert all(events.context_usage(ws)["context"][field] is None for field in limits)
+
+
+def test_reported_zero_reasoning_and_billed_counters_do_not_fall_back_to_context(ws):
+    append_jsonl(ws.ledger / "tools.jsonl", {"usage": {"input_tokens": 100, "output_tokens": 20,
+        "output_tokens_details": {"reasoning_tokens": 0, "thinking_tokens": 15}}})
+    append_jsonl(ws.ledger / "tools.jsonl", {"usage": {"input_tokens": 100, "output_tokens": 20,
+        "billed_input_tokens": 0, "billed_output_tokens": 0, "billed_cached_input_tokens": 0,
+        "billed_reasoning_output_tokens": 0, "output_tokens_details": {"thinking_tokens": 15}}})
+    usage = events.context_usage(ws)
+    assert usage["billing"]["reasoning_output_tokens"] == 0
+    assert usage["billing"]["total_tokens"] == 120
+    assert usage["billing"]["input_tokens"] == 100 and usage["billing"]["output_tokens"] == 20
+
+
 def _proc(rows):
     return SimpleNamespace(stdin=io.StringIO(), stdout=io.StringIO("".join(json.dumps(r) + "\n" for r in rows)))
 
@@ -201,3 +243,124 @@ def test_ui_container_labels_are_scoped_to_valid_job_id(monkeypatch):
     job_id = "0123456789abcdef" * 2
     monkeypatch.setenv("VWB_UI_JOB_ID", job_id)
     assert host_codex._ui_job_labels() == ["--label", f"vwb.ui-job={job_id}"]
+
+
+def _activity(ws, rows):
+    path = ws.memory / events.EVENT_FILE
+    with path.open("a") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+    return path
+
+
+def _event(seq, ident=None, kind="thinking", actor="job_lead", **data):
+    return {"seq": seq, "ts": f"2026-10-21T12:{seq // 60:02}:{seq % 60:02}Z", "kind": kind,
+            "actor": actor, "data": {**({"id": ident} if ident is not None else {}), **data}}
+
+
+def test_activity_pages_coalesce_snapshots_by_kind_actor_and_identity(ws):
+    _activity(ws, [_event(seq, "stream", text="x" * seq, status="in_progress") for seq in range(1, 1001)])
+    _activity(ws, [_event(1001, "stream", text="Final thought", status="completed"),
+                   _event(1002, "stream", kind="message", text="Answer"),
+                   _event(1003, "stream", actor="child", text="Independent thought")])
+    page = events.event_page(ws)
+    assert [row["seq"] for row in page["events"]] == [1001, 1002, 1003]
+    assert page["events"][0]["data"]["text"] == "Final thought"
+    assert page["cursor"] == 1003 and not page["events_has_more"]
+    assert len(events.read_events(ws)) == 1003  # Original stream remains intact.
+
+
+def test_older_activity_pagination_is_bounded_chronological_and_complete(ws):
+    _activity(ws, [_event(seq, f"tool-{seq}", kind="tool", output=f"Result {seq}") for seq in range(1, 21)])
+    page = events.event_page(ws, limit=5)
+    assert [row["seq"] for row in page["events"]] == list(range(16, 21))
+    collected = page["events"]
+    while page["events_has_more"]:
+        page = events.event_page(ws, before=page["events_before"], limit=5)
+        assert page["cursor"] == 20
+        assert len(page["events"]) <= 5
+        collected = page["events"] + collected
+    assert [row["seq"] for row in collected] == list(range(1, 21))
+
+
+def test_forward_activity_catchup_never_advances_past_undelivered_results(ws):
+    _activity(ws, [_event(seq, f"tool-{seq}", kind="tool", output="x" * 1000) for seq in range(1, 11)])
+    cursor, collected = 0, []
+    while True:
+        page = events.event_page(ws, after=cursor, limit=8, byte_limit=2400)
+        assert len(page["events"]) <= 2
+        collected.extend(page["events"])
+        cursor = page["cursor"]
+        if not page["events_after_has_more"]:
+            break
+        assert cursor == collected[-1]["seq"]
+    assert [row["seq"] for row in collected] == list(range(1, 11))
+    assert cursor == 10
+    assert events.event_page(ws, after=cursor)["events"] == []
+
+
+def test_warm_activity_poll_only_parses_new_bytes_and_delivered_rows(ws, monkeypatch):
+    _activity(ws, [_event(seq, "stream", text="Saved snapshot") for seq in range(1, 1001)])
+    cursor = events.event_page(ws)["cursor"]
+    real_loads = events.json.loads
+    parsed = []
+    def loads(value, *args, **kwargs):
+        row = real_loads(value, *args, **kwargs)
+        if isinstance(row, dict) and "seq" in row:
+            parsed.append(row["seq"])
+        return row
+    monkeypatch.setattr(events.json, "loads", loads)
+    assert events.event_page(ws, after=cursor)["events"] == []
+    assert not parsed
+    _activity(ws, [_event(1001, "stream", text="Finished", status="completed")])
+    page = events.event_page(ws, after=cursor)
+    assert [row["seq"] for row in page["events"]] == [1001]
+    assert parsed == [1001, 1001]
+    assert len(events.read_events(ws, after=1000)) == 1
+    assert all(seq > cursor for seq in parsed)
+
+
+def test_activity_index_retries_partial_lines_and_rebuilds_after_replacement(ws):
+    path = _activity(ws, [])
+    assert events.event_page(ws)["cursor"] == 0
+    row = json.dumps(_event(1, "first", text="Complete only when newline exists"))
+    with path.open("a") as handle:
+        handle.write(row[:40])
+    assert not events.event_page(ws)["events"]
+    with path.open("a") as handle:
+        handle.write(row[40:] + "\n")
+    assert events.event_page(ws)["cursor"] == 1
+    replacement = path.with_suffix(".replacement")
+    replacement.write_text(json.dumps(_event(1, "replacement", text="New file")) + "\n")
+    replacement.replace(path)
+    assert events.event_page(ws)["events"][0]["data"]["text"] == "New file"
+    path.write_text(json.dumps(_event(1, "truncated", text="Short")) + "\n")
+    assert events.event_page(ws)["events"][0]["data"]["text"] == "Short"
+
+
+def test_billing_poll_only_reads_new_complete_lines(ws, monkeypatch):
+    path = ws.ledger / "tools.jsonl"
+    append_jsonl(path, {"usage": {"input_tokens": 100, "output_tokens": 20}})
+    assert events.context_usage(ws)["billing"]["total_tokens"] == 120
+    real_loads = events.json.loads
+    parsed = []
+    def loads(value, *args, **kwargs):
+        parsed.append(value)
+        return real_loads(value, *args, **kwargs)
+    monkeypatch.setattr(events.json, "loads", loads)
+    assert events.context_usage(ws)["billing"]["total_tokens"] == 120
+    assert not parsed
+    line = json.dumps({"usage": {"input_tokens": 50, "output_tokens": 10}})
+    with path.open("a") as handle:
+        handle.write(line[:20])
+    assert events.context_usage(ws)["billing"]["total_tokens"] == 120
+    with path.open("a") as handle:
+        handle.write(line[20:] + "\n")
+    assert events.context_usage(ws)["billing"]["total_tokens"] == 180
+    assert len(parsed) == 1
+
+
+@pytest.mark.parametrize("kwargs", [{"limit": 0}, {"limit": 301}, {"before": 0}, {"after": -1}, {"after": 1, "before": 2}])
+def test_activity_page_refuses_ambiguous_or_invalid_cursors(ws, kwargs):
+    with pytest.raises(ValueError):
+        events.event_page(ws, **kwargs)

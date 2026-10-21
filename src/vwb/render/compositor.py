@@ -439,7 +439,12 @@ class Compositor:
         return frame
 
     # ------------------------------------------------------------------ streams
-    def _source_frames(self) -> Iterator[tuple[int, tuple[str, int], np.ndarray]]:
+    def _source_frames(self) -> Iterator[tuple[int, tuple[str, int] | None, np.ndarray]]:
+        if not self.c.time_map:
+            blank = np.zeros((1, 1, 3), np.uint8)
+            for f in range(self.c.length):
+                yield f, None, blank
+            return
         out = 0
         for span in self.c.time_map:
             for sf, rgb in FrameReader(self.media[span.media]).frames(span.src_in, span.src_out):
@@ -481,8 +486,11 @@ class Compositor:
                     if st.kind == "plate" and st.start <= f < st.end and self.plate_path(st).exists():
                         plates[st.plate_id or ""] = next(PlateReader(self.plate_path(st), self.W, self.H, self.c.fps)
                                                          .frames(start=f - st.start, count=1), None)
-            m, sf = where[f]
-            result[f] = self.compose(f, decoded[m][sf], plates, (m, sf))
+            if f in where:
+                m, sf = where[f]
+                result[f] = self.compose(f, decoded[m][sf], plates, (m, sf))
+            else:
+                result[f] = self.compose(f, np.zeros((1, 1, 3), np.uint8), plates)
         return result
 
 

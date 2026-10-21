@@ -1,9 +1,10 @@
-"""Discover and bind explicit user-selected skills and agent-readable folders."""
+"""Discover and bind explicit user-selected skills and agent-readable paths."""
 from __future__ import annotations
 
 import json
 import os
 import re
+import stat
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -13,9 +14,12 @@ import yaml
 from vwb.config import RECIPES_DIR
 
 MAX_FOLDERS = 500
-MAX_REFERENCES = 12
-SKIP = {"node_modules", "__pycache__"}
-PLUGINS = {"solstice", "figma"}
+MAX_REFERENCES = 100
+MAX_RESULTS = 100
+MAX_SCAN = 10_000
+MAX_DEPTH = 32
+SKIP = {"node_modules", "__pycache__", "venv", "site-packages"}
+PLUGINS = {"solstice", "figma", "figma_direct", "figma_mcp"}
 
 
 def skills() -> list[dict[str, str]]:
@@ -32,69 +36,170 @@ def skills() -> list[dict[str, str]]:
     return rows
 
 
-def catalog(ws=None) -> dict[str, Any]:
+def _parts(rel: str) -> tuple[str, ...]:
+    parts = Path(rel).parts
+    if (Path(rel).is_absolute() or "\\" in rel or any(ord(c) < 32 or ord(c) == 127 for c in rel)
+            or any(p == ".." or p.startswith(".") or p in SKIP for p in parts)):
+        raise ValueError("That path is outside the selectable workspace.")
+    return parts
+
+
+def _directory(root: Path, parts: tuple[str, ...] = ()) -> int:
+    """Pin each parent, so a swapped directory cannot redirect discovery."""
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in parts:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _check_path(ws, rel: str, *, folder: bool) -> None:
+    parts = _parts(rel)
+    if not parts and not folder:
+        raise ValueError("Choose a file, not the workspace root.")
+    fd = _directory(ws.work, parts if folder else parts[:-1])
+    try:
+        if not folder and not stat.S_ISREG(os.stat(parts[-1], dir_fd=fd, follow_symlinks=False).st_mode):
+            raise ValueError("Select a regular file; symbolic links are not supported.")
+    finally:
+        os.close(fd)
+
+
+def catalog(ws=None, query: str = "") -> dict[str, Any]:
+    if not isinstance(query, str) or len(query) > 512 or any(ord(c) < 32 for c in query):
+        raise ValueError("Search workspace paths with at most 512 characters.")
+    query = query.strip()
+    # Absolute paths inside work/ are searchable; other host paths are only
+    # opened by the explicit local-import operation, never by autocomplete.
+    if ws is not None and query.startswith(str(ws.work) + "/"):
+        query = query[len(str(ws.work)) + 1:]
+    elif query == "work":
+        query = ""
+    elif query.startswith("work/"):
+        query = query[5:]
     rows, pending = [], deque()
-    if ws is not None and ws.work.is_dir() and not ws.work.is_symlink():
-        rows.append({"id": ".", "name": "work/", "description": "All folders in this conversation's workspace"})
-        pending.append((ws.work, 0))
-    while pending and len(rows) < MAX_FOLDERS:
-        directory, depth = pending.popleft()
-        if depth >= 8:
+    scanned, truncated = 0, False
+    needle = query.rstrip("/").casefold()
+    if ws is not None and not query.startswith(("/", "~")):
+        try:
+            fd = _directory(ws.work)
+            os.close(fd)
+            start = ()
+            exact_file = False
+            if query:
+                try:
+                    _check_path(ws, query, folder=False)
+                    rel = "/".join(_parts(query))
+                    rows.append({"id": rel, "name": f"work/{rel}", "kind": "file",
+                                 "description": "File in this conversation's workspace"})
+                    exact_file = True
+                except (OSError, ValueError):
+                    pass
+            # A path prefix narrows traversal before scanning, so a folder past
+            # the discovery budget can still be reached directly.
+            parent = query.rstrip("/") if query.endswith("/") else query.rpartition("/")[0]
+            for prefix in dict.fromkeys([query.rstrip("/"), parent]):
+                if not prefix or exact_file:
+                    continue
+                try:
+                    candidate = _parts(prefix)
+                    fd = _directory(ws.work, candidate)
+                    os.close(fd)
+                    start = candidate
+                    break
+                except (OSError, ValueError):
+                    pass
+            rel = "/".join(start) or "."
+            if not exact_file and (not needle or needle in rel.casefold()):
+                rows.append({"id": rel, "name": f"work/{'/'.join(start)}" + ("/" if start else ""),
+                             "description": "All files in this folder, read as needed", "kind": "folder"})
+            if not exact_file:
+                pending.append(start)
+        except OSError:
+            pass
+    while pending and len(rows) < MAX_RESULTS and scanned < MAX_SCAN:
+        parts = pending.popleft()
+        if len(parts) >= MAX_DEPTH:
+            truncated = True
             continue
         try:
-            with os.scandir(directory) as entries:
-                children = sorted((e for e in entries if not e.name.startswith(".") and e.name not in SKIP
-                                   and e.is_dir(follow_symlinks=False)), key=lambda e: e.name.casefold())
+            fd = _directory(ws.work, parts)
+            try:
+                with os.scandir(fd) as entries:
+                    children = []
+                    for entry in entries:
+                        if scanned >= MAX_SCAN:
+                            truncated = True
+                            break
+                        scanned += 1
+                        if entry.name.startswith(".") or entry.name in SKIP:
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            children.append((entry.name, "folder"))
+                        elif entry.is_file(follow_symlinks=False):
+                            children.append((entry.name, "file"))
+            finally:
+                os.close(fd)
         except OSError:
+            truncated = True
             continue
-        for child in children:
-            if len(rows) >= MAX_FOLDERS:
-                break
-            path = Path(child.path)
-            rel = path.relative_to(ws.work).as_posix()
-            rows.append({"id": rel, "name": f"work/{rel}/", "description": "Folder in this conversation"})
-            pending.append((path, depth + 1))
-    return {"skills": skills(), "folders": rows, "folder_scope": "conversation_work",
-            "folders_truncated": bool(pending), "folder_limit": MAX_FOLDERS}
+        for name, kind in sorted(children, key=lambda item: (item[1] != "folder", item[0].casefold())):
+            child_parts = (*parts, name)
+            rel = "/".join(child_parts)
+            if kind == "folder":
+                pending.append(child_parts)
+            if not needle or needle in rel.casefold():
+                if len(rows) >= MAX_RESULTS:
+                    truncated = True
+                    break
+                rows.append({"id": rel, "name": f"work/{rel}" + ("/" if kind == "folder" else ""),
+                             "description": ("All files in this folder, read as needed" if kind == "folder"
+                                             else "File in this conversation's workspace"), "kind": kind})
+    truncated |= bool(pending)
+    return {"skills": skills(), "folders": [r for r in rows if r["kind"] == "folder"],
+            "files": [r for r in rows if r["kind"] == "file"], "folder_scope": "conversation_work",
+            "folders_truncated": truncated, "paths_truncated": truncated, "scanned": scanned,
+            "path_limit": MAX_RESULTS, "folder_limit": MAX_FOLDERS, "max_references": MAX_REFERENCES,
+            "search_query": query}
 
 
 def validate(value: Any, ws=None) -> dict[str, list[str]]:
     if value is None:
         return {"skills": [], "folders": []}
-    if not isinstance(value, dict) or set(value) - {"skills", "folders", "plugins"}:
-        raise ValueError("Context must contain selected skills, folders and plugins.")
+    if not isinstance(value, dict) or set(value) - {"skills", "folders", "files", "plugins"}:
+        raise ValueError("Context must contain selected skills, folders, files and plugins.")
     result = {}
-    for kind in ("skills", "folders", "plugins"):
+    for kind in ("skills", "folders", "files", "plugins"):
         items = value.get(kind, [])
         if not isinstance(items, list) or any(not isinstance(v, str) or not v or len(v) > 512 for v in items):
             raise ValueError(f"Selected {kind} must be a list of identifiers.")
         result[kind] = list(dict.fromkeys(items))
-    if any(plugin not in PLUGINS for plugin in result["plugins"]):
+    if any(plugin not in PLUGINS and not re.fullmatch(r"mcp_[a-f0-9]{12}", plugin) for plugin in result["plugins"]):
         raise ValueError("A selected plugin is unavailable. Remove it and choose again.")
     # Preserve the canonical form of older messages and queue records. A plugin
     # selection is a request to use that integration, never an OAuth credential.
     if not result["plugins"]:
         result.pop("plugins")
+    if not result["files"]:
+        result.pop("files")
     if sum(map(len, result.values())) > MAX_REFERENCES:
         raise ValueError(f"Choose at most {MAX_REFERENCES} references per message.")
     available = {s["id"] for s in skills()}
     if any(s not in available for s in result["skills"]):
         raise ValueError("A selected skill is no longer available. Remove it and choose again.")
-    for rel in result["folders"]:
-        if ws is None:
-            raise ValueError("Choose a conversation before selecting a workspace folder.")
-        parts = Path(rel).parts
-        if Path(rel).is_absolute() or "\\" in rel or "\x00" in rel or any(
-                p == ".." or p.startswith(".") or p in SKIP for p in parts):
-            raise ValueError("That folder is outside the selectable workspace.")
-        root = ws.work.resolve()
-        path = ws.work
-        for part in parts:
-            path = path / part
-            if path.is_symlink():
-                raise ValueError("Symlink folders cannot be selected.")
-        if ws.work.is_symlink() or not path.is_dir() or not path.resolve().is_relative_to(root):
-            raise ValueError("A selected folder is missing or outside the workspace. Choose again.")
+    for kind in ("folders", "files"):
+        for rel in result.get(kind, []):
+            if ws is None:
+                raise ValueError("Choose a conversation before selecting a workspace path.")
+            try:
+                _check_path(ws, rel, folder=kind == "folders")
+            except OSError as exc:
+                raise ValueError("A selected path is missing or outside the workspace. Choose again.") from exc
     return result
 
 
@@ -104,12 +209,23 @@ def prompt(value: dict[str, list[str]]) -> str:
         lines.append("The user selected these skills. Read their procedures with skill_read(name) before using them: "
                      + json.dumps(value["skills"]))
     if value.get("folders"):
-        lines.append("The user selected these folders, relative to your work/ directory. Inspect relevant files with "
-                     "file_list/file_read; folder selection does not expand your permissions: " + json.dumps(value["folders"]))
+        lines.append("The user selected these folders, relative to your work/ directory, including their nested files: "
+                     + json.dumps(value["folders"]) + ". This is a batch reference, not an inline attachment limit. "
+                     "Enumerate the requested inputs with file_list using a scoped glob, or a sandbox script for large batches. "
+                     "Check truncation and account for every requested input. Read files, PDF pages or image pixels only as needed "
+                     "with the appropriate inspection tools. Imported videos are work files; they are not automatically indexed "
+                     "media sources. Use sandbox tools for bulk transformations. Folder selection does not expand your permissions.")
+    if value.get("files"):
+        lines.append("The user selected these files, relative to your work/ directory: " + json.dumps(value["files"])
+                     + ". Inspect them with file_read, image/PDF tools or a sandbox parser as appropriate. "
+                     "These are live file references, not automatically loaded contents or pinned image payloads.")
     if value.get("plugins"):
         lines.append("The user selected these plugins or MCP connections: " + json.dumps(value["plugins"])
-                     + ". Inspect integration_status before using their tools. Figma must go through the Solstice MCP gateway; "
-                     "never bypass it with direct credentials or assume a disconnected integration is available. "
+                     + ". Inspect integration_status before using their tools. For saved mcp_* connections, pass the exact "
+                     "id to integration_tools, then use each tool's dispatch_tool and namespaced name. These servers "
+                     "connect directly and do not need Solstice. Use integration='figma_direct' for the "
+                     "separate Figma direct REST connection, integration='figma_mcp' for official desktop MCP, or integration='figma' for Figma through the Solstice MCP gateway. Respect the selected "
+                     "route; never silently switch connections or assume a disconnected integration is available. "
                      "Import retrieved previews into work/integrations so the user can open them in the workspace canvas. "
                      "Selection does not grant additional permissions or authorize unrelated writes.")
     return "\n\nUser-selected references:\n" + "\n".join(lines) if lines else ""

@@ -95,6 +95,8 @@ def check(ws: Workspace, c: Canvas) -> list[Problem]:
     sz = prof["safe_zone"]
     safe = (sz["left"], sz["top"], W - sz["right"], H - sz["bottom"])
     media = {s.ref: s for s in ws.load().sources}
+    if c.time_map and c.duration_frames is not None:
+        P.append(Problem("error", "duration_frames", "choose source spans in time_map or an authored duration_frames, not both"))
     for span in c.time_map:
         if span.media not in media:
             P.append(Problem("error", "time_map", f"unknown media {span.media}; known: {list(media)}"))
@@ -114,6 +116,8 @@ def check(ws: Workspace, c: Canvas) -> list[Problem]:
     reg = Registry(ws.assets)
     fonts = font_library()
     for l in c.layers:
+        if not c.time_map and isinstance(l, (VideoLayer, CaptionsLayer)):
+            P.append(Problem("error", l.id, "source video and transcript captions require a source time_map; use image, clip, shape and text layers on an authored timeline"))
         if l.span and not (0 <= l.span[0] < l.span[1] <= c.length):
             P.append(Problem("error", l.id, f"span {l.span} is outside 0-{c.length}"))
         for prop in ("box", "crop", "opacity", "rotate", "draw", "fill"):

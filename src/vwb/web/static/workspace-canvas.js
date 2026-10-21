@@ -1,6 +1,7 @@
 import htm from './vendor/htm.mjs';
 import {BrowserPanel} from './browser-panel.js';
 import {GenerationStudio} from './generation-studio.js';
+import {ArtifactPanel, ArtifactLibrary, artifactTab, artifactLibraryTab} from './artifact-panel.js';
 const {createElement, useState, useEffect, useRef} = window.React;
 const html = htm.bind(createElement);
 const {Button, Icon, Tooltip, MessageBar, SolsticeMark} = window.Eeva;
@@ -14,6 +15,12 @@ export function canvasReducer(state, action) {
     const existing = next.groups.find(g => g.tabs.some(t => t.id === action.tab.id));
     const target = existing || group;
     if (!existing) target.tabs.push(action.tab);
+    else target.tabs = target.tabs.map(tab => {
+      if (tab.id !== action.tab.id) return tab;
+      // Live publications never replace the pixels under a person's feedback draft.
+      if (tab.kind === 'artifact' && action.tab.automatic) return {...tab, latestRevision: Math.max(tab.latestRevision || tab.revision, action.tab.revision)};
+      return {...tab, ...action.tab};
+    });
     target.active = action.tab.id; next.focused = target.id;
   }
   if (action.type === 'select' && group.tabs.some(t => t.id === action.id)) {group.active = action.id; next.focused = group.id;}
@@ -55,11 +62,18 @@ export function mergeDirectoryPage(previous, page, append = false) {
 }
 // A first snapshot is history. Only events observed after it may open new tabs.
 export function importedTabs(events, seen) {
-  const cursor = Math.max(seen ?? 0, 0, ...events.map(event => Number(event.seq) || 0));
-  if (seen == null) return {cursor, tabs: []};
+  // Long conversations can exceed JavaScript's function argument limit. Scan
+  // directly rather than copying the history and spreading it into Math.max.
+  let cursor = Math.max(seen ?? 0, 0);
   const paths = new Map();
   for (const event of events) {
-    if (event.kind !== 'integration.imported' || Number(event.seq) <= seen || event.data?.is_error) continue;
+    const seq = Number(event.seq) || 0;
+    cursor = Math.max(cursor, seq);
+    if (seen == null || seq <= seen || event.data?.is_error) continue;
+    if (event.kind === 'artifact.published' && event.data?.id && event.data?.revision) {
+      const tab = {...artifactTab(event.data), automatic: true}; paths.set(tab.id, tab); continue;
+    }
+    if (event.kind !== 'integration.imported') continue;
     const artifacts = event.data?.artifacts || [];
     const image = artifacts.find(item => item.kind === 'image');
     const document = artifacts.find(item => item.mime_type === 'application/json' || item.workspace_path?.endsWith('.json'));
@@ -78,7 +92,7 @@ export function WorkspaceExplorer({api, requestId, onOpen, onOutputs, onBrowser,
   const [loading, setLoading] = useState(new Set()), [error, setError] = useState(''), [query, setQuery] = useState('');
   const [search, setSearch] = useState(null), [searching, setSearching] = useState(false), [searchError, setSearchError] = useState('');
   const generation = useRef(0), busyPaths = useRef(new Set());
-  const dragFile = (event, entry) => {event.dataTransfer.effectAllowed='copy'; event.dataTransfer.setData('application/x-vwb-workspace-file', JSON.stringify({requestId,path:entry.path,name:entry.name})); event.dataTransfer.setData('text/plain', entry.path);};
+  const dragFile = (event, entry) => {event.dataTransfer.effectAllowed='copy'; event.dataTransfer.setData('application/x-vwb-workspace-file', JSON.stringify({requestId,path:entry.path,name:entry.name,kind:entry.kind})); event.dataTransfer.setData('text/plain', entry.path);};
   const load = async (path, token = generation.current, cursor = null) => {
     if (!requestId || busyPaths.current.has(path)) return;
     busyPaths.current.add(path); setLoading(p => new Set(p).add(path)); setError('');
@@ -116,7 +130,7 @@ export function WorkspaceExplorer({api, requestId, onOpen, onOutputs, onBrowser,
     const rendered = rows.filter(e => !query || e.kind === 'directory' || e.name.toLowerCase().includes(query.toLowerCase())).map(entry => {
       const directory = entry.kind === 'directory', open = expanded.has(entry.path);
       return html`<li key=${entry.path}><button className=${`workspace-file-row ${activePath === entry.path ? 'selected' : ''}`} style=${{'--depth': depth}}
-        draggable=${!directory} onDragStart=${event => {if (!directory) dragFile(event,entry);}}
+        draggable="true" onDragStart=${event => dragFile(event,entry)}
         aria-expanded=${directory ? open : undefined} title=${entry.path} onClick=${() => directory ? toggle(entry.path) : onOpen(fileTab(entry))}>
         <${Icon} name=${directory ? open ? 'chevron-down' : 'chevron-right' : 'file'} size=${14}/><span>${entry.name}</span>
         ${directory && loading.has(entry.path) && html`<span className="caption">…</span>`}</button>
@@ -129,7 +143,7 @@ export function WorkspaceExplorer({api, requestId, onOpen, onOutputs, onBrowser,
   const reload = () => {generation.current++; busyPaths.current = new Set(); setLoading(new Set()); setFolders({}); setExpanded(new Set([''])); load('');};
   return html`<div className="workspace-explorer"><div className="navigator-heading"><h2>Workspace</h2><${IconAction} name="refresh" label="Refresh workspace files" disabled=${!requestId || loading.has('')} onClick=${reload}/></div>
     <div className="explorer-shortcuts"><button onClick=${onOutputs}><${Icon} name="file" size=${14}/>Outputs</button><button onClick=${onBrowser}><${Icon} name="link" size=${14}/>Browser</button>
-      <button onClick=${() => onOpen(studioTab('image'))}><${Icon} name="sparkles" size=${14}/>Images</button><button onClick=${() => onOpen(studioTab('video'))}><${Icon} name="file" size=${14}/>Video</button></div>
+      <button onClick=${() => onOpen(artifactLibraryTab())}><${Icon} name="table" size=${14}/>Canvases</button><button onClick=${() => onOpen(studioTab('image'))}><${Icon} name="sparkles" size=${14}/>Images</button><button onClick=${() => onOpen(studioTab('video'))}><${Icon} name="file" size=${14}/>Video</button></div>
     <label className="conversation-search"><${Icon} name="search" size=${14}/><input aria-label="Quick open workspace files" placeholder="Find a file…" value=${query} onChange=${e => setQuery(e.target.value)} onKeyDown=${event => {if(event.key === 'Escape'){event.preventDefault();setQuery('');} if(event.key === 'ArrowDown'){event.preventDefault();event.currentTarget.closest('.workspace-explorer').querySelector('.workspace-search-results button')?.focus();}}}/></label>
     ${error && html`<p className="explorer-error" role="alert">${error}<button className="text-action" onClick=${() => load('')}>Try again</button></p>`}
     <div className="workspace-file-list">${!requestId ? html`<p className="navigator-empty">Choose a conversation to browse its files.</p>` : query.trim() ? html`<div className="workspace-search-results" aria-label="Workspace search results">
@@ -195,6 +209,7 @@ function CanvasNewTab({onOpen, onExplore}) {
   const choose = tab => {setOpen(false); onOpen(tab);};
   return html`<div className="canvas-new-tab" ref=${shell}><${IconAction} name="plus" label="Open a canvas tab" aria-expanded=${open} onClick=${() => setOpen(value => !value)}/>
     ${open && html`<div className="canvas-new-menu" aria-label="New canvas tab">
+      <button onClick=${() => choose(artifactLibraryTab())}><${Icon} name="table" size=${16}/><span>Canvases<small>Interactive reviews and visualizations</small></span></button>
       <button onClick=${() => choose(studioTab('image'))}><${Icon} name="sparkles" size=${16}/><span>Image studio<small>Create and edit with Sunburst</small></span></button>
       <button onClick=${() => choose(studioTab('video'))}><${Icon} name="file" size=${16}/><span>Video studio<small>Generate with Omni</small></span></button>
       <button onClick=${() => choose({id:'browser',kind:'browser',title:'Browser'})}><${Icon} name="link" size=${16}/><span>Browser</span></button>
@@ -221,6 +236,8 @@ export function WorkspaceCanvas({api, requestId, state, dispatch, renderOutputs,
       <div className="canvas-group-content" role="tabpanel" aria-label=${tab?.title || 'Empty canvas'}>
         ${!visible ? null : tab?.kind === 'browser' ? html`<${BrowserPanel} key=${requestId || 'new'} embedded api=${api} requestId=${requestId} notice=${notice} onClose=${() => dispatch({type: 'close', group: group.id, id: tab.id})}/>`
           : tab?.kind === 'outputs' ? renderOutputs()
+          : tab?.kind === 'artifact' ? html`<${ArtifactPanel} key=${`${requestId}:${tab.id}`} api=${api} requestId=${requestId} tab=${tab} onRevision=${revision => dispatch({type:'open',group:group.id,tab:{...tab,revision,automatic:false}})}/>`
+          : tab?.kind === 'artifacts' ? html`<${ArtifactLibrary} api=${api} requestId=${requestId} onOpen=${item => dispatch({type:'open',group:group.id,tab:item})}/>`
           : tab?.kind === 'file' ? html`<${FilePreview} key=${tab.id} api=${api} requestId=${requestId} tab=${tab}/>`
           : ['image-studio','video-studio'].includes(tab?.kind) ? html`<${GenerationStudio} key=${`${requestId}:${tab.id}`} kind=${tab.kind === 'video-studio' ? 'video' : 'image'} api=${api} requestId=${requestId} onOpen=${item => dispatch({type:'open',group:group.id,tab:item})}/>`
           : html`<div className="canvas-empty"><${Icon} name="folder" size=${18}/><h3>A place for your work</h3><p>Open a file from the workspace, or bring the browser alongside your conversation.</p><div><${Button} variant="secondary" size="sm" onClick=${onExplore}>Browse workspace<//><${Button} variant="text" size="sm" onClick=${() => dispatch({type: 'open', group: group.id, tab: {id: 'browser', kind: 'browser', title: 'Browser'}})}>Open browser<//></div></div>`}

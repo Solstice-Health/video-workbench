@@ -4,6 +4,7 @@
 # hosts:     codex       = Codex CLI in a Docker container (policy row host.codex); the job lead and the
 #                          GPT workers (planner_b, composer, critic) run here
 #            claude_sdk  = Claude Agent SDK session (tool-restricted, in-process MCP toolkit)
+#            anthropic_api = persistent direct Anthropic API loop, using the host's Anthropic key
 #            tool_loop   = the harness's own function-calling loop (OpenAI Responses or Gemini)
 
 main:
@@ -15,7 +16,7 @@ main:
   max_turns: 400
   fallbacks:
     - {host: tool_loop, provider: openai, model: gpt-6-astra, effort: max}
-    - {host: claude_sdk, model: claude-fable-5-1, effort: max}
+    - {host: anthropic_api, provider: anthropic, model: claude-fable-5-1, effort: max, context_window: 1000000, native_context_window: 1000000}
 
 worker.video:
   purpose: Video-native worker (scene-miner). Reads the source natively and proposes moments.

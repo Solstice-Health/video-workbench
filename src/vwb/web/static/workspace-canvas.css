@@ -153,6 +153,8 @@
 .integration-connection-actions {display:flex; gap:8px; flex-wrap:wrap; padding:20px 0;}
 .integration-settings {box-shadow:inset 0 1px rgba(29,28,26,.07); padding-top:16px;}
 .integration-settings summary {font-size:13px; line-height:20px; font-weight:600; cursor:pointer;}
+.integration-settings + .integration-settings {margin-top:20px;}
+.integration-cards article > .integration-direct-actions {justify-content:flex-start; flex-wrap:wrap; gap:8px; margin-top:12px;}
 .integration-settings p {font-size:12px; line-height:20px; color:var(--ds-text-secondary);}
 .integration-settings form {display:flex; flex-direction:column; align-items:flex-start; gap:16px;}
 .integration-settings label {display:flex; flex-direction:column; gap:8px; width:100%; font-size:12px; line-height:16px;}

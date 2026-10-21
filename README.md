@@ -34,7 +34,7 @@ vwb chat -i -r <request-id>      # keep talking to the same agent: "make short-0
   OCR read-back of every string, re-render attestation, audio read-back, standing regulatory rules, flags with code-set
   severity, triage, cue sheets, delivery notes and signed manifests.
 - **Main agent and optional swarm**: a GPT-6 Astra main agent in Codex with one persistent thread per request
-  (fallbacks: the GPT loop, then Claude Fable 5.1 on the Agent SDK); a Gemini scene-miner and GPT-6.1-Sol planner,
+  (fallbacks: the GPT loop, then Claude Fable 5.1 through the direct Anthropic API); a Gemini scene-miner and GPT-6.1-Sol planner,
   composers and critic in Codex containers, dispatched only when the main agent chooses; `human.ask` with a
   non-blocking broker; a review page per request.
 - **Recipes**: Clip, Resize and the N-Shorts chain, as skills (`recipes/`). Any other request runs in open mode on the
@@ -50,14 +50,25 @@ vwb chat -i -r <request-id>      # keep talking to the same agent: "make short-0
   approved read tools; Figma imports design JSON and previews through the optional Solstice gateway extension.
   [Connection setup and Figma options](docs/INTEGRATIONS.md) describe the required registrations and deployment.
 
-## Quickstart
+## Set up frontend and backend
+
+The complete application is in [Solstice-Health/video-workbench](https://github.com/Solstice-Health/video-workbench).
+The Python server includes the React/Eeva frontend. They ship together and use one
+origin; there is no separate frontend build or server. Use macOS on Apple Silicon
+for the full video-indexing workflow. Install uv, Node 22 or 24 with npm, FFmpeg and
+Docker Desktop, then:
+
 ```bash
-uv sync                                               # Python 3.12 env
-(cd generators/remotion && npm install && npm run setup-fonts && npx remotion browser ensure)
-docker build -t vwb-codex-agent:0.162.1 docker/codex-agent   # Codex worker image (needs Docker running)
-uv run vwb doctor                                      # checks binaries, generator, keys
-uv run vwb chat "(Clip + resize): Make 10 youtube shorts from this: /abs/path/source.mp4"
+git clone git@github.com:Solstice-Health/video-workbench.git
+cd video-workbench
+./scripts/setup.sh --with-agent --with-browser
+.venv/bin/vwb ui
 ```
+
+Add the provider keys you need in `.env` or **Models and APIs → Provider APIs**.
+For an initial UI-only installation, use `./scripts/setup.sh --ui-only`. Setup
+preserves existing environment files and refuses to replace dependencies while
+the server is running. [Complete setup, remote access, updates and rollback](docs/SETUP.md).
 
 ### Open the chat workbench
 
@@ -99,8 +110,8 @@ See [model and API settings](docs/MODELS.md) for available IDs and runtime behav
 
 Keys come from the nearest `.env` above the repo (or `VWB_ENV_FILE`); see `.env.example`. Provider keys saved in
 Workbench override these baseline values through a private host file. The Claude fallback uses
-the local Claude Code login if no valid Anthropic key is set. Local hardware: Apple Silicon (MLX Whisper, Apple
-Vision).
+the direct Anthropic API and requires an Anthropic key. Local hardware for full video indexing: Apple Silicon
+(MLX Whisper, Apple Vision).
 
 After a run:
 ```bash
