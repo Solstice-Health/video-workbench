@@ -62,6 +62,15 @@ trust boundaries and provider registration requirements.
 
 ## Supervised agents and open capabilities
 
+Native creative applications are a separate, explicitly human-enabled host
+capability. After Effects uses macOS AppleScript to dispatch snapshotted JSX and
+an owned `aerender` process for rendering; durable supervisors retain receipts,
+logs and cancellation state. Blender uses the official MCP SDK's stdio client
+with a fixed, hash-locked MCP for Blender runtime and a loopback add-on. These
+scripts run as the desktop user, not in Docker. Configuration is unavailable to
+agent tools; reads and enabled writes still pass through Registry and the policy
+dial. See [desktop applications](DESKTOP_APPS.md) for trust and lifecycle details.
+
 The original flat swarm is now a bounded agent tree. `agent_spawn` creates a child;
 children can delegate with the same tools. `agent_send`/`agent_inbox` carry peer
 messages, `agent_list` reports task/status/tool activity, `agent_wait` supports

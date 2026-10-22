@@ -155,6 +155,17 @@
 .integration-settings summary {font-size:13px; line-height:20px; font-weight:600; cursor:pointer;}
 .integration-settings + .integration-settings {margin-top:20px;}
 .integration-cards article > .integration-direct-actions {justify-content:flex-start; flex-wrap:wrap; gap:8px; margin-top:12px;}
+.integration-cards article > .creative-app-permission, .integration-cards article > .creative-app-pending {display:flex; flex-direction:column; align-items:flex-start; gap:12px; margin-top:16px; padding-top:12px; box-shadow:inset 0 1px rgba(29,28,26,.07);}
+.creative-app-permission p, .creative-app-pending p {margin:0;}
+.creative-app-consent {display:flex; align-items:flex-start; gap:8px; font-size:13px; line-height:20px; cursor:pointer;}
+.creative-app-consent input {flex-shrink:0; width:16px; height:16px; margin:2px 0 0; accent-color:var(--ds-text-primary);}
+.creative-app-consent input:disabled + span {color:var(--ds-text-tertiary);}
+.creative-app-permission-actions {display:flex; flex-wrap:wrap; align-items:center; gap:8px;}
+.creative-app-setup {margin-top:16px; font-size:12px; line-height:20px; color:var(--ds-text-secondary);}
+.creative-app-setup summary {cursor:pointer; color:var(--ds-text-primary);}
+.creative-app-setup ol {margin:12px 0; padding-left:20px;}
+.creative-app-setup li + li {margin-top:8px;}
+.creative-app-path {overflow-wrap:anywhere; user-select:all;}
 .integration-settings p {font-size:12px; line-height:20px; color:var(--ds-text-secondary);}
 .integration-settings form {display:flex; flex-direction:column; align-items:flex-start; gap:16px;}
 .integration-settings label {display:flex; flex-direction:column; gap:8px; width:100%; font-size:12px; line-height:16px;}

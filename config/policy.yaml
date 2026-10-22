@@ -51,6 +51,8 @@ capabilities:
   browser.files: allow             # bounded explicit workspace uploads/downloads, logged through Registry
   integration.read: allow          # enabled reads via direct MCP servers or provider presets
   integration.execute: allow       # direct MCP tools explicitly enabled in the human connection manager
+  desktop.after_effects.status: allow  # detect the local application and human connection settings
+  desktop.after_effects.execute: allow # human-enabled native ExtendScript/aerender; not a sandbox
 
 roles:
   # Which tools each role may call. "*" means every tool not listed under deny.
@@ -78,7 +80,8 @@ roles:
             media_frame, media_contact_sheet, clip_candidates, clip_refine, clip_validate, focus_find, memory_note,
             file_list, file_read, file_grep, file_write]
   composer:         # GPT-6.1-Sol (Codex in Docker): drafts a composition; the job lead commits
-    allow: [agent_spawn, agent_list, agent_send, agent_inbox, agent_wait, agent_interrupt, agent_followup,
+    allow: [after_effects_status, after_effects_run, after_effects_render, after_effects_job,
+            agent_spawn, agent_list, agent_send, agent_inbox, agent_wait, agent_interrupt, agent_followup,
             image_inspect, pdf_info, pdf_read, pdf_search, pdf_render, attachment_list, attachment_read, attachment_remember,
             sandbox_run, sandbox_environment, sandbox_status, artifact_publish, artifact_list, artifact_feedback,
             index_overview, index_query, index_search, index_transcript, index_shots,

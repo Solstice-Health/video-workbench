@@ -35,7 +35,7 @@ def _raster(data: bytes, mime: str) -> None:
 
 
 def import_result(ws, tool: str, arguments: dict, result: dict, gateway: str, *, provider: str = "solstice") -> dict:
-    if provider not in {"solstice", "figma_direct", "figma_mcp"} and not re.fullmatch(r"mcp_[a-f0-9]{12}", provider):
+    if provider not in {"solstice", "figma_direct", "figma_mcp", "blender_mcp"} and not re.fullmatch(r"mcp_[a-f0-9]{12}", provider):
         raise IntegrationError("Unknown integration import provider.")
     content = result.get("content", [])
     if not isinstance(content, list) or len(content) > 200:

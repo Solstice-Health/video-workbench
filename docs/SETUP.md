@@ -111,6 +111,12 @@ Choose the model, context budget, effort and agent prompt in the composer. The
 default prompt is Descriptive; Minimal, Loose and three industry-inspired
 profiles are also available.
 
+Optional native creative applications are configured in **Plugins and MCPs →
+Manage connections**. After Effects uses macOS ExtendScript and `aerender`;
+Blender MCP prepares its own pinned bridge and matching add-on. Neither desktop
+application is installed by the setup script. See [desktop application setup](DESKTOP_APPS.md)
+for installation, host execution permissions, outputs and cancellation behavior.
+
 For a UI-only installation, check readiness with `.venv/bin/vwb doctor --ui-only`.
 Missing optional providers or Docker are reported without printing key values.
 

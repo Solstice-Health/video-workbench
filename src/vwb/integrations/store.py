@@ -16,7 +16,7 @@ class IntegrationError(RuntimeError):
 
 class Store:
     def __init__(self, runs_dir: Path, namespace: str = "solstice"):
-        if namespace not in {"solstice", "figma_direct", "figma_mcp", "mcp"}:
+        if namespace not in {"solstice", "figma_direct", "figma_mcp", "blender_mcp", "mcp"}:
             raise IntegrationError("Unknown integration storage namespace.")
         self.root = Path(runs_dir) / ".integrations" / namespace
         # Do not follow a symlink planted by a request or another local process.

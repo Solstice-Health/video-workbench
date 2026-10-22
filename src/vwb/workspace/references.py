@@ -19,7 +19,7 @@ MAX_RESULTS = 100
 MAX_SCAN = 10_000
 MAX_DEPTH = 32
 SKIP = {"node_modules", "__pycache__", "venv", "site-packages"}
-PLUGINS = {"solstice", "figma", "figma_direct", "figma_mcp"}
+PLUGINS = {"solstice", "figma", "figma_direct", "figma_mcp", "blender_mcp", "after_effects"}
 
 
 def skills() -> list[dict[str, str]]:
@@ -228,4 +228,16 @@ def prompt(value: dict[str, list[str]]) -> str:
                      "route; never silently switch connections or assume a disconnected integration is available. "
                      "Import retrieved previews into work/integrations so the user can open them in the workspace canvas. "
                      "Selection does not grant additional permissions or authorize unrelated writes.")
+        if "after_effects" in value["plugins"]:
+            lines.append("After Effects uses native after_effects_status, after_effects_run, after_effects_render "
+                         "and after_effects_job tools. Write ExtendScript .jsx files under work/ and use the returned "
+                         "host workspace path for imports and outputs. Local automation must be enabled by the person "
+                         "in Manage connections; never bypass that switch through a shell or sandbox. These scripts "
+                         "run in the real desktop application, not in Docker. Preserve an existing unsaved project.")
+        if "blender_mcp" in value["plugins"]:
+            lines.append("Use integration_tools(integration='blender_mcp') for the pinned local Blender MCP bridge. "
+                         "Use integration_call for inspection and integration_execute for Python only after the person "
+                         "enables code execution. Save .blend files and rendered media under the returned workspace "
+                         "directory; inspect receipts and files before claiming output success. Blender Python runs "
+                         "in the real application with the person's local account access.")
     return "\n\nUser-selected references:\n" + "\n".join(lines) if lines else ""
