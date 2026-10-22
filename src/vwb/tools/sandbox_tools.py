@@ -78,6 +78,8 @@ def _options(args):
         raise ValueError('network must be none or public (public HTTP/HTTPS only)')
     if type(args.get('background', False)) is not bool:
         raise ValueError('background must be a boolean')
+    if type(args.get('models', False)) is not bool:
+        raise ValueError('models must be a boolean')
     memory = args.get('memory_mb', 512)
     cpus = args.get('cpus', 1)
     if type(memory) is not int or not 256 <= memory <= 4096:
@@ -104,10 +106,15 @@ def _command(ctx: ToolContext, argv: list[str], cwd: str, timeout: float, name: 
             '--env=PIP_CACHE_DIR=/workspace/.sandbox/cache/pip', '--env=PIP_DISABLE_PIP_VERSION_CHECK=1',
             '--env=PYTHONUNBUFFERED=1', '--env=GIT_TERMINAL_PROMPT=0',
             '--env=PATH=/workspace/.sandbox/user/bin:/usr/local/bin:/usr/bin:/bin']
-    if network == 'public':
-        from vwb.sandbox import runner
+    if network == 'public' or (args or {}).get('models'):
+        from vwb.sandbox import model_client, runner
         command += ['--interactive', '--volume', f'{Path(runner.__file__).resolve()}:/run/vwb-network.py:ro']
-        argv = ['python3', '-I', '/run/vwb-network.py', *argv]
+        options = ['--public'] if network == 'public' else []
+        if (args or {}).get('models'):
+            command += ['--volume', f'{Path(model_client.__file__).resolve()}:/run/vwb-sdk/vwb_models.py:ro',
+                        '--env=PYTHONPATH=/run/vwb-sdk']
+            options.append('--models')
+        argv = ['python3', '-I', '/run/vwb-network.py', *options, '--', *argv]
     return command + ["--entrypoint=/usr/bin/timeout", IMAGE, "--signal=KILL", "--", f"{timeout:g}s", *argv]
 
 
@@ -130,15 +137,55 @@ def sandbox_run(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 
 def _dispatch(ctx, args):
+    if args.get('models') and not _model_permissions(ctx):
+        return ToolResult.error('This agent has no inherited model-tool permissions.')
     if args.get('background'):
         from vwb.sandbox.jobs import launch
         return ToolResult.json(launch(ctx, args))
     return _execute(ctx, args)
 
 
+MODEL_TOOLS = ('model_providers', 'model_catalog', 'model_request')
+
+
+def _model_permissions(ctx):
+    inherited = ctx.state.get('allowed_tools')
+    return [name for name in MODEL_TOOLS if Registry.allowed_for_role(ctx.role, name)
+            and (inherited is None or name in inherited)]
+
+
+class _BridgeCancel:
+    def __init__(self, ctx, stop, job):
+        self.ctx, self.stop, self.job = ctx, stop, job
+
+    def is_set(self):
+        return (self.stop.is_set() or _cancelled(self.ctx)
+                or bool(self.job and (self.job['directory'] / 'cancel').exists()))
+
+
+def _model_handler(ctx, deadline, job=None):
+    """The relay receives only this closure, never a registry or credentials."""
+    from vwb.tools import build_registry
+    registry = build_registry()
+    permissions = _model_permissions(ctx)
+
+    def call(name, args, stop):
+        state = {**ctx.state, 'allowed_tools': permissions, 'model_deadline': deadline,
+                 'cancel_event': _BridgeCancel(ctx, stop, job)}
+        bridge = ToolContext(ws=ctx.ws, agent=ctx.agent, role=ctx.role,
+                             gateway=ctx.gateway, state=state)
+        if time.monotonic() >= deadline:
+            return {'is_error': True, 'text': 'Sandbox model request deadline expired.', 'data': None}
+        result = registry.call(bridge, name, args)
+        return {'is_error': result.is_error, 'text': result.text, 'data': result.data}
+
+    return call
+
+
 def _execute(ctx: ToolContext, args: dict[str, Any], *, job=None) -> ToolResult:
     argv, cwd, timeout = _arguments(ctx, args)
     network, _, _ = _options(args)
+    relay = network == 'public' or args.get('models', False)
     if _cancelled(ctx):
         return ToolResult.error("Sandbox command cancelled before launch")
     if not shutil.which("docker"):
@@ -150,11 +197,12 @@ def _execute(ctx: ToolContext, args: dict[str, Any], *, job=None) -> ToolResult:
     status = "completed"
     with contextlib.ExitStack() as stack:
         try:
-            proc = subprocess.Popen(command, stdin=subprocess.PIPE if network == 'public' else subprocess.DEVNULL,
+            proc = subprocess.Popen(command, stdin=subprocess.PIPE if relay else subprocess.DEVNULL,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if network == 'public':
+            if relay:
                 from vwb.sandbox.transport import PublicProcess
-                proc = PublicProcess(proc)
+                handler = _model_handler(ctx, started + timeout, job) if args.get('models') else None
+                proc = PublicProcess(proc, model_handler=handler, allow_public=network == 'public')
             out_log = stack.enter_context((job['directory'] / 'stdout.log').open('wb')) if job else None
             err_log = stack.enter_context((job['directory'] / 'stderr.log').open('wb')) if job else None
             stdout, stderr = _Capture(proc.stdout, out_log), _Capture(proc.stderr, err_log)
@@ -188,6 +236,7 @@ def _execute(ctx: ToolContext, args: dict[str, Any], *, job=None) -> ToolResult:
                     "log_limit_bytes": LOG_BYTES if job else 0,
                     "logs_truncated": bool(job and max(stdout.total, stderr.total) > LOG_BYTES),
                     "cwd": cwd, "network": 'public_http_https' if network == 'public' else 'disabled',
+                    "models": bool(args.get('models')),
                     "filesystem": "Only the request work folder is writable and shared",
                     "note": "Environments and package caches persist under work/.sandbox. Root is read-only; "
                             "vendor keys and host sockets are absent. Public mode supports proxy-aware HTTP(S) clients, "
@@ -228,7 +277,7 @@ result=subprocess.run([python,'-m','pip','freeze'],capture_output=True,text=True
 (p/'requirements.freeze.txt').write_text(result.stdout)
 print(json.dumps({'python':python,'requirements':str(p/'requirements.freeze.txt')}))
 '''
-    execution = {key: args[key] for key in ('timeout_s', 'background', 'memory_mb', 'cpus', 'network') if key in args}
+    execution = {key: args[key] for key in ('timeout_s', 'background', 'memory_mb', 'cpus', 'network', 'models') if key in args}
     execution.setdefault('network', 'public' if packages else 'none')
     execution.setdefault('timeout_s', 600)
     execution['argv'] = ['python3', '-c', script, path, json.dumps(packages)]
@@ -254,6 +303,7 @@ def _remove(name: str) -> None:
 
 
 EXECUTION = {'network': {'type': 'string', 'enum': ['none', 'public']},
+             'models': {'type': 'boolean'},
              'background': {'type': 'boolean'}, 'memory_mb': {'type': 'integer', 'minimum': 256, 'maximum': 4096},
              'cpus': {'type': 'integer', 'minimum': 1, 'maximum': 4},
              'timeout_s': {'type': 'number', 'minimum': 1, 'maximum': MAX_TIMEOUT}}
@@ -263,6 +313,9 @@ TOOLS = [Tool("sandbox_run", "Run an agent-written script or command inside a re
               "e.g. ['python3','scripts/build.py']; use ['bash','-lc','...'] only when shell syntax is needed. "
               "Only work/ is shared; vendor credentials are absent. network=public enables public HTTP(S) "
               "through a proxy for pip/curl/Git HTTPS, with private destinations blocked. Default network=none. "
+              "models=true enables a scoped model gateway, even with network=none: Python scripts can import "
+              "providers, catalog, request from vwb_models (stdlib only, also inside venvs). Provider keys stay "
+              "on the host; calls keep this agent's role, policy and inherited model-tool permissions. "
               "Create reusable Python environments with sandbox_environment, or pip --target for loose packages. "
               "background=true returns a durable job ID; poll or cancel with sandbox_status. Max runtime 30 minutes. "
               "Use checkpoints for larger batches. Requires Docker and the local Codex image; no host fallback.",

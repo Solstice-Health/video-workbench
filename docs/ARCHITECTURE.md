@@ -37,6 +37,14 @@ Queued jobs freeze their model, context budget, effort and speed settings.
 Provider credentials remain on the control plane. See [model controls](MODELS.md)
 for supported models, capability checks, credential overrides and context limits.
 
+General model calls are separate from chat-model selection. `model_providers`,
+`model_catalog` and `model_request` expose configured providers, current model
+discovery and supported native API operations through Registry. A sandbox script
+can opt into the credential-free `vwb_models` bridge with `models=true`; the host
+makes each authorized request and retains generated files and response receipts
+under the workspace. See [model access](MODEL_ACCESS.md) for provider and modality
+limits.
+
 Direct remote MCP servers are host connections, independent of Solstice. The UI
 owns server configuration, OAuth consent and tool enablement. The official MCP
 SDK performs discovery and authentication; host-only connection records preserve

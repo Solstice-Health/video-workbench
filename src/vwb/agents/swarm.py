@@ -43,7 +43,8 @@ limitations concisely to your parent. Do not claim work is verified without chec
 
 
 def prompt(role: str) -> str:
-    return GENERAL_PROMPT if role == "worker" else (PROMPTS_DIR / f"{role}.md").read_text()
+    base = GENERAL_PROMPT if role == "worker" else (PROMPTS_DIR / f"{role}.md").read_text()
+    return base + "\n\n" + (PROMPTS_DIR / "model_access.md").read_text().strip()
 
 
 def message_text(messages: list[dict[str, Any]]) -> str:

@@ -56,6 +56,7 @@ packages = ["src/vwb"]
 "recipes" = "vwb/_resources/recipes"
 "docs/CANVAS.md" = "vwb/_resources/docs/CANVAS.md"
 "docs/DESKTOP_APPS.md" = "vwb/_resources/docs/DESKTOP_APPS.md"
+"docs/MODEL_ACCESS.md" = "vwb/_resources/docs/MODEL_ACCESS.md"
 "docker/codex-agent/Dockerfile" = "vwb/_resources/docker/codex-agent/Dockerfile"
 "generators/remotion/package.json" = "vwb/_resources/generators/remotion/package.json"
 "generators/remotion/package-lock.json" = "vwb/_resources/generators/remotion/package-lock.json"

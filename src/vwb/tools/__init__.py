@@ -21,6 +21,7 @@ def build_registry() -> Registry:
         integration_tools,
         job_tools,
         media_tools,
+        model_tools,
         pdf_tools,
         people_tools,
         sandbox_tools,
@@ -29,7 +30,7 @@ def build_registry() -> Registry:
     tools: list[Tool] = []
     for module in (job_tools, file_tools, index_tools, media_tools, edit_tools, gen_tools, canvas_tools, people_tools,
                    web_tools, browser_tools, integration_tools, agent_tools, artifact_tools,
-                   inspection_tools, sandbox_tools, attachment_tools, pdf_tools, after_effects_tools):
+                   inspection_tools, sandbox_tools, attachment_tools, pdf_tools, after_effects_tools, model_tools):
         tools.extend(module.TOOLS)
     return Registry(tools)
 

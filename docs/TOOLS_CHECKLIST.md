@@ -39,6 +39,7 @@ Spec references: D = decision, X = experiment, R/S = sources (see the spec and t
 - [ ] microVM per request for host-side agents (today: tool-restricted hosts + Docker for Codex) (D02)
 
 ## B. Model gateway and slots
+- [x] General model access: `model_providers`, live paged `model_catalog` and `model_request` for configured OpenAI, Google, Anthropic and OpenRouter APIs; native payloads, bounded workspace file inputs, generated output files and receipts. The credential-free `vwb_models` helper bridges `sandbox_run(models=true)` through the same Registry. Catalog metadata and account entitlements vary; no arbitrary endpoints or Realtime/WebSocket sessions. See `docs/MODEL_ACCESS.md`.
 - [x] Slots named by function with fallbacks (config/slots.yaml) (D27)
 - [x] Retries with backoff on transient errors; SLOT-FALLBACK flag when a fallback serves
 - [x] Call log with input and output hashes for every model and tool call (ledger/tools.jsonl) (I4)

@@ -53,6 +53,10 @@ docs = job_lead._docs()
 assert all(path.is_file() for path in docs.values())
 assert (config.DOCS_DIR / "CANVAS.md").read_text().startswith("# Canvas")
 assert (config.DOCS_DIR / "DESKTOP_APPS.md").is_file()
+assert (config.DOCS_DIR / "MODEL_ACCESS.md").is_file()
+from vwb.sandbox import model_client
+assert Path(model_client.__file__).is_file()
+assert {"model_providers", "model_catalog", "model_request"} <= set(build_registry().tools)
 from vwb.integrations import IntegrationService
 from vwb.integrations.blender_mcp import LOCK
 assert LOCK.is_file() and "mcp-for-blender==2.2.2" in LOCK.read_text()

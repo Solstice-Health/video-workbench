@@ -39,6 +39,7 @@ RECEIPT_PROV = {
     "sunburst.create": "generated",             # new pixels, not from the source
     "omni.generate": "generative_motion",       # motion made by the video model
     "omni.key": "generative_motion",            # the same clip keyed to alpha
+    "model.generate": "generated",             # general provider image, video or audio output
 }
 
 _SCHEMA = """

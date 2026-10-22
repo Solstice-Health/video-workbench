@@ -34,9 +34,20 @@ PROMPTS_DIR = PACKAGE_DIR / "agents" / "prompts"
 GENERATORS_DIR = RESOURCE_ROOT / "generators"
 RUNS_DIR = Path(os.environ.get("VWB_RUNS_DIR", REPO_ROOT / "runs"))
 
-_SECRET_KEYS = ("OPENAI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "EXA_API_KEY", "OPENROUTER_API_KEY")
+_SECRET_KEYS = ("OPENAI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "EXA_API_KEY", "OPENROUTER_API_KEY")
 PROVIDERS = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
              "google": "GOOGLE_API_KEY", "openrouter": "OPENROUTER_API_KEY"}
+_PROVIDER_ALIASES = {"google": ("GEMINI_API_KEY",)}
+
+
+def _provider_baseline(provider: str, file_values: dict[str, Any]) -> tuple[str | None, str]:
+    """Resolve aliases once, with process settings before the environment file."""
+    keys = (PROVIDERS[provider], *_PROVIDER_ALIASES.get(provider, ()))
+    for source, values in (("environment", os.environ), (".env", file_values)):
+        for key in keys:
+            if values.get(key):
+                return values[key], source
+    return None, "Not configured"
 
 
 def _managed_keys() -> dict[str, str]:
@@ -58,10 +69,10 @@ def provider_status() -> list[dict[str, Any]]:
     values = dotenv_values(env_file) if env_file else {}
     labels = {"openai": "OpenAI", "anthropic": "Anthropic", "google": "Google", "openrouter": "OpenRouter"}
     rows = []
-    for provider, key in PROVIDERS.items():
-        baseline = os.environ.get(key) or values.get(key)
-        source = ("Workbench" if managed[provider] else "Disabled") if provider in managed else (
-            "environment" if os.environ.get(key) else ".env" if baseline else "Not configured")
+    for provider in PROVIDERS:
+        baseline, source = _provider_baseline(provider, values)
+        if provider in managed:
+            source = "Workbench" if managed[provider] else "Disabled"
         rows.append({"id": provider, "label": labels[provider], "configured": bool(managed.get(provider, baseline)),
                      "source": source, "can_reset": provider in managed and bool(baseline)})
     return rows
@@ -138,6 +149,10 @@ def secrets() -> Secrets:
         file_values = dotenv_values(env_file)
         for key in _SECRET_KEYS:
             values[key] = values[key] or file_values.get(key)
+    else:
+        file_values = {}
+    for provider, key in PROVIDERS.items():
+        values[key] = _provider_baseline(provider, file_values)[0]
     for provider, value in _managed_keys().items():
         values[PROVIDERS[provider]] = value
     return Secrets(

@@ -77,11 +77,12 @@ def _read(directory):
 
 
 def _public(row):
-    return {key: value for key, value in row.items() if key not in {'request_root', 'arguments', 'supervisor_pid'}}
+    return {key: value for key, value in row.items()
+            if key not in {'request_root', 'arguments', 'supervisor_pid', 'host_config', 'model_permissions'}}
 
 
 def launch(ctx, args):
-    from vwb.tools.sandbox_tools import _arguments, _cancelled, _options
+    from vwb.tools.sandbox_tools import _arguments, _cancelled, _model_permissions, _options
     _arguments(ctx, args)
     _options(args)
     if _cancelled(ctx):
@@ -93,10 +94,17 @@ def launch(ctx, args):
         job_id = uuid.uuid4().hex
         directory = _root(ctx.ws) / job_id
         directory.mkdir()
-        row = {'id': job_id, 'owner': ctx.agent, 'status': 'starting', 'created': time.time(),
+        permissions = _model_permissions(ctx) if args.get('models') else []
+        if args.get('models') and not permissions:
+            raise ValueError('This agent has no inherited model-tool permissions.')
+        row = {'id': job_id, 'owner': ctx.agent, 'role': ctx.role, 'status': 'starting', 'created': time.time(),
                'heartbeat': time.time(), 'request_root': str(ctx.ws.root.resolve()),
                'arguments': {**args, 'background': False}, 'timeout_s': args.get('timeout_s', 60),
                'network': args.get('network', 'none'),
+               'models': bool(args.get('models')), 'model_permissions': permissions,
+               # Host configuration paths are private metadata, outside the
+               # mounted work folder. They are never injected into Docker.
+               'host_config': {key: os.environ[key] for key in ('VWB_ENV_FILE', 'VWB_RUNS_DIR') if key in os.environ},
                'note': 'Background automation survives chat turns. Use sandbox_status(cancel=true) to stop it. '
                        'Outputs written under work/ remain; cancellation does not roll them back.'}
         (directory / 'job.json').write_text(json.dumps(row))
