@@ -317,6 +317,54 @@ def test_http_csrf_origin_and_host_protection(http):
     assert app.queue.snapshot(ws)["queue"][0]["message"] == "Hi"
 
 
+@pytest.mark.parametrize(("path", "body", "expected"), [
+    ("after-effects/configure", {"enabled": True}, ("after-effects/configure", {"enabled": True})),
+    ("after-effects/configure", {"acknowledge_interrupted": True},
+     ("after-effects/configure", {"acknowledge_interrupted": True})),
+    ("after-effects/refresh", {}, None),
+    ("blender-mcp/configure", {"allow_code_execution": True},
+     ("blender-mcp/configure", {"allow_code_execution": True})),
+    ("blender-mcp/prepare", {}, ("blender-mcp/prepare", {})),
+    ("blender-mcp/connect", {}, ("blender-mcp/connect", {})),
+    ("blender-mcp/refresh", {}, ("blender-mcp/refresh", {})),
+    ("blender-mcp/disconnect", {}, ("blender-mcp/disconnect", {})),
+])
+def test_creative_application_routes_are_human_mutations(http, monkeypatch, path, body, expected):
+    from types import SimpleNamespace
+
+    request, app, _, _ = http
+    calls = []
+    catalog = {"items": [{"id": "after_effects"}, {"id": "blender_mcp"}]}
+    service = SimpleNamespace(
+        after_effects=SimpleNamespace(configure=lambda body: calls.append(("after-effects/configure", body))),
+        blender=SimpleNamespace(
+            configure=lambda **body: calls.append(("blender-mcp/configure", body)),
+            **{action: (lambda action=action: calls.append((f"blender-mcp/{action}", {})))
+               for action in ("prepare", "connect", "refresh", "disconnect")}),
+        status=lambda: catalog,
+    )
+    monkeypatch.setattr(Workbench, "integrations", property(lambda self: service))
+    route = f"/api/integrations/{path}"
+    assert request("POST", route, json.dumps(body))[0] == 403
+    assert not calls
+    headers = {"X-CSRF-Token": app.csrf_token, "Content-Type": "application/json"}
+    status, _, raw = request("POST", route, json.dumps(body), headers)
+    assert status == 200 and json.loads(raw) == catalog
+    assert calls == ([expected] if expected else [])
+
+
+def test_blender_settings_route_rejects_arbitrary_command_configuration(http, monkeypatch):
+    from types import SimpleNamespace
+
+    request, app, _, _ = http
+    service = SimpleNamespace(blender=SimpleNamespace(configure=lambda **body: pytest.fail("Invalid settings ran")))
+    monkeypatch.setattr(Workbench, "integrations", property(lambda self: service))
+    headers = {"X-CSRF-Token": app.csrf_token, "Content-Type": "application/json"}
+    status, _, raw = request("POST", "/api/integrations/blender-mcp/configure",
+                             json.dumps({"command": "arbitrary executable"}), headers)
+    assert status == 400 and "local add-on port" in json.loads(raw)["error"]
+
+
 def test_model_settings_routes_freeze_queue_and_never_return_keys(http, monkeypatch):
     from vwb import config
     request, app, ws, _ = http

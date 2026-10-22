@@ -52,6 +52,18 @@ assert (STATIC_DIR / "index.html").is_file()
 docs = job_lead._docs()
 assert all(path.is_file() for path in docs.values())
 assert (config.DOCS_DIR / "CANVAS.md").read_text().startswith("# Canvas")
+assert (config.DOCS_DIR / "DESKTOP_APPS.md").is_file()
+assert (config.DOCS_DIR / "MODEL_ACCESS.md").is_file()
+from vwb.sandbox import model_client
+assert Path(model_client.__file__).is_file()
+assert {"model_providers", "model_catalog", "model_request"} <= set(build_registry().tools)
+from vwb.integrations import IntegrationService
+from vwb.integrations.blender_mcp import LOCK
+assert LOCK.is_file() and "mcp-for-blender==2.2.2" in LOCK.read_text()
+creative = {row["id"]: row for row in IntegrationService().status()["items"]}
+assert not creative["after_effects"]["enabled"]
+assert not creative["blender_mcp"]["allow_code_execution"]
+assert not creative["blender_mcp"]["prepared"]
 assert len(build_registry().for_role("job_lead")) > 30
 importlib.import_module("vwb.cli")
 frontend_test = os.environ.get("VWB_SMOKE_FRONTEND_TEST")

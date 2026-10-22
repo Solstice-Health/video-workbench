@@ -17,7 +17,9 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 
 from vwb.config import RUNS_DIR
+from vwb.desktop.after_effects import AfterEffects
 
+from .blender_mcp import DesktopBlender
 from .figma_direct import DirectFigma
 from .figma_mcp import DesktopFigma
 from .remote_mcp import RemoteMCP
@@ -93,6 +95,8 @@ class IntegrationService:
         self.direct = direct or DirectFigma(runs_dir)
         self.desktop = desktop or DesktopFigma(runs_dir)
         self.remote = RemoteMCP(runs_dir)
+        self.blender = DesktopBlender(runs_dir)
+        self.after_effects = AfterEffects(runs_dir)
 
     def _config(self, state: dict) -> dict:
         configured = state.get("config", {})
@@ -152,7 +156,10 @@ class IntegrationService:
              "message": ("Figma read tools are available through Solstice." if figma_connected else
                          "Sign in to Figma through Solstice, then refresh this connection." if figma_available else
                          "Connect Solstice and enable its Figma gateway extension, or choose the separate Figma direct plugin."),
-             **common}, direct["item"], self.desktop.status(), *self.remote.status()], "config": config, "direct_figma": {"config": direct["config"], "setup": direct["setup"]},
+             **common}, direct["item"], self.desktop.status(), self.blender.status(),
+            self.after_effects.status(), *self.remote.status()], "config": config,
+            "direct_figma": {"config": direct["config"], "setup": direct["setup"]},
+            "blender_mcp": self.blender.status(), "after_effects": self.after_effects.status(),
             "setup": {"issuer": ISSUER, "scopes": SCOPES, "gateway_urls": list(GATEWAYS),
                       "client_registration_required": True, "callback_path": CALLBACK_PATH}}
 
@@ -349,6 +356,12 @@ class IntegrationService:
         return tools
 
     def tools(self, query: str = "", limit: int = 30, offset: int = 0, integration: str = "solstice") -> dict:
+        if integration == "blender_mcp":
+            return self.blender.tools(query=query, limit=limit, offset=offset)
+        if integration == "after_effects":
+            return {"integration": integration, "tools": [], "total": 0, "offset": offset, "limit": limit,
+                    "notice": "After Effects uses the native after_effects_status, after_effects_run, "
+                              "after_effects_render and after_effects_job tools. It does not require MCP."}
         if isinstance(integration, str) and integration.startswith("mcp_"):
             return self.remote.tools(integration, query=query, limit=limit, offset=offset)
         if integration == "figma_mcp":
@@ -381,6 +394,8 @@ class IntegrationService:
             return self.direct.call(ws, tool, arguments)
         if tool.startswith("figma_mcp."):
             return self.desktop.call(ws, tool, arguments)
+        if tool.startswith("blender_mcp."):
+            return self.blender.call(ws, tool, arguments, read_only=True)
         with self.store.lock:
             state = self.store.read()
             token = self._access(state)
@@ -410,6 +425,8 @@ class IntegrationService:
 
     def execute(self, ws, tool: str, arguments: dict) -> dict:
         """Execute an explicitly enabled direct MCP tool under its separate policy capability."""
+        if isinstance(tool, str) and tool.startswith("blender_mcp."):
+            return self.blender.call(ws, tool, arguments, read_only=False)
         if not isinstance(tool, str) or not tool.startswith("mcp_"):
             raise IntegrationError("Use integration_execute only for a discovered direct MCP tool.")
         return self._remote_call(ws, tool, arguments, read_only=False)

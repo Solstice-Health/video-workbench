@@ -41,6 +41,9 @@ vwb chat -i -r <request-id>      # keep talking to the same agent: "make short-0
   same tools.
 - **Public web research**: `web_search`, `web_fetch` and bounded `web_research` through OpenRouter, with host-held
   credentials, source links and logged usage. See [web tools](docs/WEB.md) for setup, limits and alternatives.
+- **Model access**: discover configured OpenAI, Google, Anthropic and OpenRouter models and call supported
+  text, image, audio, video and embedding APIs through tools or sandbox Python scripts, with host-held keys.
+  See [model access](docs/MODEL_ACCESS.md) for discovery, examples and output files.
 - **Workspace canvas**: collapsible chat, a file explorer, closeable tabs and two viewing groups for videos,
   images, interactive local HTML, paged PDFs, text and the shared browser. The Python harness remains unchanged.
 - **Shared browser**: the main agent controls an isolated headed Chrome session through typed tools. The canvas

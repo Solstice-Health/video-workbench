@@ -59,7 +59,12 @@ def _agent_result(result: dict) -> dict:
 def integration_tools(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
     try:
         Draft202012Validator(CATALOG_SCHEMA).validate(arguments)
-        return ToolResult.json(_service(ctx).tools(**arguments))
+        result = _service(ctx).tools(**arguments)
+        if arguments.get("integration") in {"blender_mcp", "after_effects"}:
+            # Creative apps run on the host, not at the agent container's /work.
+            # Give scripts an exact destination without exposing host credentials.
+            result["workspace_path"] = str(ctx.ws.work.resolve())
+        return ToolResult.json(result)
     except ValidationError:
         return ToolResult.error("Invalid integration_tools arguments. Use the published schema.")
     except IntegrationError as exc:
@@ -93,7 +98,7 @@ def _call(ctx: ToolContext, arguments: dict[str, Any], *, execute: bool) -> Tool
 TOOLS = [
     Tool("integration_status", "Check saved direct MCP servers and provider presets for connection and tool availability. Does not authenticate or make remote calls.",
          schema({}), integration_status, "integration.read", "integrations"),
-    Tool("integration_tools", "Discover enabled tools and exact schemas using an integration id from integration_status. Direct MCP tools include dispatch_tool: integration_call for reads, integration_execute for other explicitly enabled tools. Provider presets include figma_mcp, figma_direct, figma and solstice.",
+    Tool("integration_tools", "Discover enabled tools and exact schemas using an integration id from integration_status. Direct MCP tools include dispatch_tool: integration_call for reads, integration_execute for other explicitly enabled tools. Presets include blender_mcp, figma_mcp, figma_direct, figma and solstice. After Effects uses its native after_effects_* tools.",
          CATALOG_SCHEMA, integration_tools, "integration.read", "integrations"),
     Tool("integration_call", "Call one discovered, enabled read tool. Namespaced mcp_* tools connect directly to their saved server. Images/documents import with provenance and raster asset_ref values into work/integrations. Other direct tools require integration_execute.",
          CALL_SCHEMA, integration_call, "integration.read", "integrations"),

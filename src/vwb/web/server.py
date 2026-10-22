@@ -624,6 +624,23 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"item": remote.configure(identifier, body)})
                 if action in {"refresh", "disconnect", "remove"}:
                     return self._json({"item": getattr(remote, action)(identifier)})
+            if len(parts) == 4 and parts[:3] == ["api", "integrations", "after-effects"]:
+                service = self.app.integrations
+                if parts[3] == "configure":
+                    service.after_effects.configure(body)
+                    return self._json(service.status())
+                if parts[3] == "refresh":
+                    return self._json(service.status())
+            if len(parts) == 4 and parts[:3] == ["api", "integrations", "blender-mcp"]:
+                service = self.app.integrations
+                if parts[3] == "configure":
+                    if set(body) - {"allow_code_execution", "port"}:
+                        raise ValueError("Blender settings only accept Python execution permission and the local add-on port.")
+                    service.blender.configure(**body)
+                    return self._json(service.status())
+                if parts[3] in {"prepare", "connect", "refresh", "disconnect"}:
+                    getattr(service.blender, parts[3])()
+                    return self._json(service.status())
             if len(parts) == 4 and parts[:3] == ["api", "integrations", "figma-mcp"]:
                 desktop = self.app.integrations.desktop
                 if parts[3] == "connect":

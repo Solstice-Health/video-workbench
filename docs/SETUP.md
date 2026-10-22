@@ -78,7 +78,14 @@ a deployment image.
   login substitutes for this API key. Sandbox scripts still require Docker.
 - **Google**: video-native reading and Omni video generation. Full source indexing
   also uses the other configured readers and local Apple Silicon tools.
-- **OpenRouter**: optional public web search, fetch and bounded research tools.
+- **OpenRouter**: its model catalog and supported multimodal requests, plus
+  optional public web search, fetch and bounded research tools.
+
+Agents can discover and use these APIs through `model_providers`, `model_catalog`
+and `model_request`. Scripts use `sandbox_run(models=true)` and the credential-free
+`vwb_models` helper. Google also accepts `GEMINI_API_KEY` when `GOOGLE_API_KEY` is
+unset. See [model access from tools and scripts](MODEL_ACCESS.md) for discovery,
+supported operations and generated-file handling.
 
 Keys are resolved from `VWB_ENV_FILE`, or the nearest `.env` above the source
 checkout. Provider overrides saved through the UI take precedence and live in
@@ -110,6 +117,12 @@ opens the browser automatically. Loading the page does not launch an agent.
 Choose the model, context budget, effort and agent prompt in the composer. The
 default prompt is Descriptive; Minimal, Loose and three industry-inspired
 profiles are also available.
+
+Optional native creative applications are configured in **Plugins and MCPs →
+Manage connections**. After Effects uses macOS ExtendScript and `aerender`;
+Blender MCP prepares its own pinned bridge and matching add-on. Neither desktop
+application is installed by the setup script. See [desktop application setup](DESKTOP_APPS.md)
+for installation, host execution permissions, outputs and cancellation behavior.
 
 For a UI-only installation, check readiness with `.venv/bin/vwb doctor --ui-only`.
 Missing optional providers or Docker are reported without printing key values.

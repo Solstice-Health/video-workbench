@@ -1,5 +1,11 @@
 # Direct MCP servers and provider integrations
 
+The built-in **Blender MCP** preset uses a pinned stdio bridge to the local Blender
+add-on. **After Effects** uses native macOS scripting tools and does not require
+MCP. Both appear in Manage connections, with separate human controls for native
+code execution. Their setup and lifecycle are described in
+[desktop applications](DESKTOP_APPS.md).
+
 ## Connect an MCP server directly
 
 Solstice is optional. In **Plugins → Manage connections → Add MCP server**, enter

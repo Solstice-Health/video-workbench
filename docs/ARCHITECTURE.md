@@ -37,6 +37,14 @@ Queued jobs freeze their model, context budget, effort and speed settings.
 Provider credentials remain on the control plane. See [model controls](MODELS.md)
 for supported models, capability checks, credential overrides and context limits.
 
+General model calls are separate from chat-model selection. `model_providers`,
+`model_catalog` and `model_request` expose configured providers, current model
+discovery and supported native API operations through Registry. A sandbox script
+can opt into the credential-free `vwb_models` bridge with `models=true`; the host
+makes each authorized request and retains generated files and response receipts
+under the workspace. See [model access](MODEL_ACCESS.md) for provider and modality
+limits.
+
 Direct remote MCP servers are host connections, independent of Solstice. The UI
 owns server configuration, OAuth consent and tool enablement. The official MCP
 SDK performs discovery and authentication; host-only connection records preserve
@@ -61,6 +69,15 @@ trust boundaries and provider registration requirements.
   human events live here; flag state is a replay of the ledger. `ledger/tools.jsonl` logs every call with hashes.
 
 ## Supervised agents and open capabilities
+
+Native creative applications are a separate, explicitly human-enabled host
+capability. After Effects uses macOS AppleScript to dispatch snapshotted JSX and
+an owned `aerender` process for rendering; durable supervisors retain receipts,
+logs and cancellation state. Blender uses the official MCP SDK's stdio client
+with a fixed, hash-locked MCP for Blender runtime and a loopback add-on. These
+scripts run as the desktop user, not in Docker. Configuration is unavailable to
+agent tools; reads and enabled writes still pass through Registry and the policy
+dial. See [desktop applications](DESKTOP_APPS.md) for trust and lifecycle details.
 
 The original flat swarm is now a bounded agent tree. `agent_spawn` creates a child;
 children can delegate with the same tools. `agent_send`/`agent_inbox` carry peer

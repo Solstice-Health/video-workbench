@@ -39,6 +39,7 @@ capabilities:
   asset.recover.generative: allow   # rungs 3-5 (image-model split, tracing, keyed motion)
   gen.image: allow                  # sunburst: create, extract, inpaint, outpaint (flags follow the asset)
   gen.video: allow                  # Omni clips and keyed motion (flags follow the asset)
+  gen.audio: allow                  # general model speech/audio output; host keeps credentials
   sam3.on_marks: ask
 
   # read-only web scouts; remote search/fetch run through the host gateway
@@ -51,6 +52,8 @@ capabilities:
   browser.files: allow             # bounded explicit workspace uploads/downloads, logged through Registry
   integration.read: allow          # enabled reads via direct MCP servers or provider presets
   integration.execute: allow       # direct MCP tools explicitly enabled in the human connection manager
+  desktop.after_effects.status: allow  # detect the local application and human connection settings
+  desktop.after_effects.execute: allow # human-enabled native ExtendScript/aerender; not a sandbox
 
 roles:
   # Which tools each role may call. "*" means every tool not listed under deny.
@@ -61,7 +64,8 @@ roles:
     allow: ["*"]
     deny: [canvas_commit]
   scene_miner:      # Gemini, watches the source natively
-    allow: [agent_spawn, agent_list, agent_send, agent_inbox, agent_wait, agent_interrupt, agent_followup,
+    allow: [model_providers, model_catalog, model_request,
+            agent_spawn, agent_list, agent_send, agent_inbox, agent_wait, agent_interrupt, agent_followup,
             image_inspect, pdf_info, pdf_read, pdf_search, pdf_render, attachment_list, attachment_read, attachment_remember,
             sandbox_run, sandbox_environment, sandbox_status, artifact_publish, artifact_list, artifact_feedback,
             index_overview, index_query, index_search, index_transcript, index_shots,
@@ -69,7 +73,8 @@ roles:
             media_frame, media_contact_sheet, watch_ask, focus_find, memory_note,
             file_list, file_read, file_grep, file_write]
   planner_b:        # GPT-6.1-Sol, an independent plan from another family
-    allow: [agent_spawn, agent_list, agent_send, agent_inbox, agent_wait, agent_interrupt, agent_followup,
+    allow: [model_providers, model_catalog, model_request,
+            agent_spawn, agent_list, agent_send, agent_inbox, agent_wait, agent_interrupt, agent_followup,
             image_inspect, pdf_info, pdf_read, pdf_search, pdf_render, attachment_list, attachment_read, attachment_remember,
             sandbox_run, sandbox_environment, sandbox_status, artifact_publish, artifact_list, artifact_feedback,
             index_overview, index_query, index_search, index_transcript, index_shots,
@@ -78,7 +83,9 @@ roles:
             media_frame, media_contact_sheet, clip_candidates, clip_refine, clip_validate, focus_find, memory_note,
             file_list, file_read, file_grep, file_write]
   composer:         # GPT-6.1-Sol (Codex in Docker): drafts a composition; the job lead commits
-    allow: [agent_spawn, agent_list, agent_send, agent_inbox, agent_wait, agent_interrupt, agent_followup,
+    allow: [model_providers, model_catalog, model_request,
+            after_effects_status, after_effects_run, after_effects_render, after_effects_job,
+            agent_spawn, agent_list, agent_send, agent_inbox, agent_wait, agent_interrupt, agent_followup,
             image_inspect, pdf_info, pdf_read, pdf_search, pdf_render, attachment_list, attachment_read, attachment_remember,
             sandbox_run, sandbox_environment, sandbox_status, artifact_publish, artifact_list, artifact_feedback,
             index_overview, index_query, index_search, index_transcript, index_shots,
@@ -89,7 +96,8 @@ roles:
             layout_facts, canvas_schema, canvas_new, canvas_check, canvas_preview, canvas_snapshot, canvas_query, shape_kit, copy_add, copy_list,
             file_list, file_read, file_grep, file_write, file_edit, memory_note]
   critic:           # GPT-6.1-Sol, another family; checks renders, never certifies
-    allow: [agent_spawn, agent_list, agent_send, agent_inbox, agent_wait, agent_interrupt, agent_followup,
+    allow: [model_providers, model_catalog, model_request,
+            agent_spawn, agent_list, agent_send, agent_inbox, agent_wait, agent_interrupt, agent_followup,
             image_inspect, pdf_info, pdf_read, pdf_search, pdf_render, attachment_list, attachment_read, attachment_remember,
             sandbox_run, sandbox_environment, sandbox_status, artifact_publish, artifact_list, artifact_feedback,
             index_overview, index_transcript, index_shots, media_frame, media_contact_sheet,
