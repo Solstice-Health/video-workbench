@@ -347,6 +347,11 @@ def doctor(ui_only: bool = False):
     image_ready = bool(daemon_ready and probe([docker, "image", "inspect", IMAGE, "--format", "{{.Id}}"]))
     check(f"Agent image {IMAGE}", image_ready,
           f"With Docker running: docker build -t {IMAGE} docker/codex-agent", required=False)
+    from vwb.code.runtime import IMAGE as CODE_IMAGE
+    code_ready = bool(daemon_ready and probe([docker, "image", "inspect", CODE_IMAGE, "--format", "{{.Id}}"]))
+    check(f"Repository tools {CODE_IMAGE}", code_ready,
+          "Run uv run python -m vwb.code.runtime install for read-only search, Git and Python/TypeScript navigation.",
+          required=False)
     browser = browser_status()
     check("Pinned shared-browser runtime", browser["installed"],
           "Run uv run python -m vwb.browser.runtime install to enable shared browsing.", required=False)

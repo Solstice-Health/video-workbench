@@ -6,15 +6,17 @@ vwb_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 vwb_ui_only=false
 vwb_agent=false
 vwb_browser=false
+vwb_code=false
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/setup.sh [--ui-only] [--with-agent] [--with-browser]
+Usage: ./scripts/setup.sh [--ui-only] [--with-agent] [--with-browser] [--with-code-tools]
 
 Default: frozen Python environment, Remotion dependencies/fonts/browser, readiness check.
   --ui-only       Python + bundled web UI, without installing the video renderer.
   --with-agent    Build the pinned Codex/sandbox Docker image (Docker must be running).
   --with-browser Install the checksum-pinned shared browser driver (Chrome also required).
+  --with-code-tools Build pinned read-only search/Git/Python/TypeScript tools (requires Docker).
   --help          Show this help. No services or paid agent/model calls are started.
 
 Requires uv. For full rendering, use Node 22 or 24 with npm, ffmpeg and ffprobe.
@@ -27,6 +29,7 @@ for vwb_arg in "$@"; do
     --ui-only) vwb_ui_only=true ;;
     --with-agent) vwb_agent=true ;;
     --with-browser) vwb_browser=true ;;
+    --with-code-tools) vwb_code=true ;;
     --help|-h) usage; exit 0 ;;
     *) printf 'Unknown option: %s\n' "$vwb_arg" >&2; usage >&2; exit 2 ;;
   esac
@@ -68,8 +71,8 @@ if [[ "$vwb_ui_only" == false ]]; then
     fi
   done
 fi
-if [[ "$vwb_agent" == true ]] && ! command -v docker >/dev/null 2>&1; then
-  printf 'Install and start Docker before using --with-agent.\n' >&2
+if [[ "$vwb_agent" == true || "$vwb_code" == true ]] && ! command -v docker >/dev/null 2>&1; then
+  printf 'Install and start Docker before using --with-agent or --with-code-tools.\n' >&2
   exit 1
 fi
 
@@ -90,6 +93,9 @@ if [[ "$vwb_agent" == true ]]; then
 fi
 if [[ "$vwb_browser" == true ]]; then
   .venv/bin/python -m vwb.browser.runtime install
+fi
+if [[ "$vwb_code" == true ]]; then
+  .venv/bin/python -m vwb.code.runtime install
 fi
 
 if [[ -z "${VWB_ENV_FILE:-}" ]] && .venv/bin/python - <<'PY'

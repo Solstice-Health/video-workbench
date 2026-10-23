@@ -29,7 +29,7 @@ from vwb.workspace import Workspace, flags
 from vwb.workspace.ledger import Ledger
 
 ROLE_SLOT = {"worker": "worker.reason", "scene_miner": "worker.video", "planner_b": "worker.reason",
-             "composer": "worker.reason", "critic": "critic"}
+             "composer": "worker.reason", "critic": "critic", "code_explorer": "worker.reason"}
 CODEX_ROLES = {"worker", "planner_b", "composer", "critic"}
 TERMINAL = {"done", "failed", "interrupted"}
 MAX_MESSAGE_CHARS = 16000
@@ -44,7 +44,8 @@ limitations concisely to your parent. Do not claim work is verified without chec
 
 def prompt(role: str) -> str:
     base = GENERAL_PROMPT if role == "worker" else (PROMPTS_DIR / f"{role}.md").read_text()
-    return base + "\n\n" + (PROMPTS_DIR / "model_access.md").read_text().strip()
+    return (base + "\n\n" + (PROMPTS_DIR / "model_access.md").read_text().strip()
+            + "\n\n" + (PROMPTS_DIR / "code_navigation.md").read_text().strip())
 
 
 def message_text(messages: list[dict[str, Any]]) -> str:

@@ -1,0 +1,523 @@
+{
+  "schema": "vwb.code-evaluation/1",
+  "created_at": "2026-10-23T15:42:20.505486+00:00",
+  "backend": "isolated_docker_service",
+  "fixture": {
+    "source_files": 1200,
+    "git_commits": 2,
+    "model_calls": 0
+  },
+  "passed": true,
+  "checks": [
+    {
+      "name": "baseline exact unique",
+      "passed": true,
+      "observed": [
+        "src/module_00600.py"
+      ],
+      "expected": [
+        "src/module_00600.py"
+      ]
+    },
+    {
+      "name": "new exact unique",
+      "passed": true,
+      "observed": [
+        "src/module_00600.py"
+      ],
+      "expected": [
+        "src/module_00600.py"
+      ]
+    },
+    {
+      "name": "regex exact known paths",
+      "passed": true,
+      "observed": [
+        "src/module_00000.py",
+        "src/module_00001.py",
+        "src/module_00002.py",
+        "src/module_00003.py",
+        "src/module_00004.py"
+      ],
+      "expected": [
+        "src/module_00000.py",
+        "src/module_00001.py",
+        "src/module_00002.py",
+        "src/module_00003.py",
+        "src/module_00004.py"
+      ]
+    },
+    {
+      "name": "baseline exact unique",
+      "passed": true,
+      "observed": [
+        "src/module_00600.py"
+      ],
+      "expected": [
+        "src/module_00600.py"
+      ]
+    },
+    {
+      "name": "new exact unique",
+      "passed": true,
+      "observed": [
+        "src/module_00600.py"
+      ],
+      "expected": [
+        "src/module_00600.py"
+      ]
+    },
+    {
+      "name": "regex exact known paths",
+      "passed": true,
+      "observed": [
+        "src/module_00000.py",
+        "src/module_00001.py",
+        "src/module_00002.py",
+        "src/module_00003.py",
+        "src/module_00004.py"
+      ],
+      "expected": [
+        "src/module_00000.py",
+        "src/module_00001.py",
+        "src/module_00002.py",
+        "src/module_00003.py",
+        "src/module_00004.py"
+      ]
+    },
+    {
+      "name": "baseline exact unique",
+      "passed": true,
+      "observed": [
+        "src/module_00600.py"
+      ],
+      "expected": [
+        "src/module_00600.py"
+      ]
+    },
+    {
+      "name": "new exact unique",
+      "passed": true,
+      "observed": [
+        "src/module_00600.py"
+      ],
+      "expected": [
+        "src/module_00600.py"
+      ]
+    },
+    {
+      "name": "regex exact known paths",
+      "passed": true,
+      "observed": [
+        "src/module_00000.py",
+        "src/module_00001.py",
+        "src/module_00002.py",
+        "src/module_00003.py",
+        "src/module_00004.py"
+      ],
+      "expected": [
+        "src/module_00000.py",
+        "src/module_00001.py",
+        "src/module_00002.py",
+        "src/module_00003.py",
+        "src/module_00004.py"
+      ]
+    },
+    {
+      "name": "new paginated coverage",
+      "passed": true,
+      "observed": 1200,
+      "expected": 1200
+    },
+    {
+      "name": "baseline bounded coverage",
+      "passed": true,
+      "observed": 200,
+      "expected": 200
+    },
+    {
+      "name": "ignored and credential files excluded",
+      "passed": true,
+      "observed": [],
+      "expected": []
+    },
+    {
+      "name": "old hash rejected after edit",
+      "passed": true,
+      "observed": true,
+      "expected": true
+    },
+    {
+      "name": "fresh content hash",
+      "passed": true,
+      "observed": "8ba79d5ed6f79e693dc0f08be3876a2fcbf5e8205ef87bcf005894e3dd569a67",
+      "expected": "8ba79d5ed6f79e693dc0f08be3876a2fcbf5e8205ef87bcf005894e3dd569a67"
+    },
+    {
+      "name": "renamed search location",
+      "passed": true,
+      "observed": [
+        "src/renamed.py"
+      ],
+      "expected": [
+        "src/renamed.py"
+      ]
+    },
+    {
+      "name": "Git rename retains original path",
+      "passed": true,
+      "observed": "src/module_00600.py",
+      "expected": "src/module_00600.py"
+    },
+    {
+      "name": "diff contains edited content",
+      "passed": true,
+      "observed": true,
+      "expected": true
+    },
+    {
+      "name": "feature branch fresh",
+      "passed": true,
+      "observed": "fixture-feature",
+      "expected": "fixture-feature"
+    },
+    {
+      "name": "branch switch restores known search",
+      "passed": true,
+      "observed": [
+        "src/module_00600.py"
+      ],
+      "expected": [
+        "src/module_00600.py"
+      ]
+    },
+    {
+      "name": "branch switch restores HEAD",
+      "passed": true,
+      "observed": "c4986a6243bc7200626aca25347b1cc5ee2cca1c",
+      "expected": "c4986a6243bc7200626aca25347b1cc5ee2cca1c"
+    },
+    {
+      "name": "Python definition resolves imported symbol",
+      "passed": true,
+      "observed": [
+        "navigation/definition.py"
+      ],
+      "expected": [
+        "navigation/definition.py"
+      ]
+    },
+    {
+      "name": "TypeScript definition resolves imported symbol",
+      "passed": true,
+      "observed": [
+        "navigation/definition.ts"
+      ],
+      "expected": [
+        "navigation/definition.ts"
+      ]
+    }
+  ],
+  "measurements": {
+    "existing_file_grep": {
+      "calls": 3,
+      "median_ms": 182.076,
+      "response_bytes": 717
+    },
+    "new_code_search": {
+      "calls": 3,
+      "median_ms": 96.041,
+      "response_bytes": 1971
+    }
+  },
+  "calls": [
+    {
+      "label": "exact_unique",
+      "operation": "search",
+      "baseline": true,
+      "elapsed_ms": 182.076,
+      "response_bytes": 239,
+      "returned_items": 1
+    },
+    {
+      "label": "exact_unique",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 503.582,
+      "response_bytes": 657,
+      "returned_items": 1
+    },
+    {
+      "label": "regex",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 90.27,
+      "response_bytes": 1509,
+      "returned_items": 5
+    },
+    {
+      "label": "exact_unique",
+      "operation": "search",
+      "baseline": true,
+      "elapsed_ms": 197.291,
+      "response_bytes": 239,
+      "returned_items": 1
+    },
+    {
+      "label": "exact_unique",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 96.041,
+      "response_bytes": 657,
+      "returned_items": 1
+    },
+    {
+      "label": "regex",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 97.62,
+      "response_bytes": 1509,
+      "returned_items": 5
+    },
+    {
+      "label": "exact_unique",
+      "operation": "search",
+      "baseline": true,
+      "elapsed_ms": 179.176,
+      "response_bytes": 239,
+      "returned_items": 1
+    },
+    {
+      "label": "exact_unique",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 85.222,
+      "response_bytes": 657,
+      "returned_items": 1
+    },
+    {
+      "label": "regex",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 97.384,
+      "response_bytes": 1509,
+      "returned_items": 5
+    },
+    {
+      "label": "frequent_symbol",
+      "operation": "search",
+      "baseline": true,
+      "elapsed_ms": 35.397,
+      "response_bytes": 16660,
+      "returned_items": 200
+    },
+    {
+      "label": "frequent_symbol_paginated",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 439.248,
+      "response_bytes": 19354,
+      "returned_items": 100
+    },
+    {
+      "label": "frequent_symbol_paginated",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 468.785,
+      "response_bytes": 19356,
+      "returned_items": 100
+    },
+    {
+      "label": "frequent_symbol_paginated",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 532.044,
+      "response_bytes": 19356,
+      "returned_items": 100
+    },
+    {
+      "label": "frequent_symbol_paginated",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 655.904,
+      "response_bytes": 19356,
+      "returned_items": 100
+    },
+    {
+      "label": "frequent_symbol_paginated",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 500.154,
+      "response_bytes": 19356,
+      "returned_items": 100
+    },
+    {
+      "label": "frequent_symbol_paginated",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 504.799,
+      "response_bytes": 19356,
+      "returned_items": 100
+    },
+    {
+      "label": "frequent_symbol_paginated",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 478.048,
+      "response_bytes": 19356,
+      "returned_items": 100
+    },
+    {
+      "label": "frequent_symbol_paginated",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 457.274,
+      "response_bytes": 19356,
+      "returned_items": 100
+    },
+    {
+      "label": "frequent_symbol_paginated",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 460.141,
+      "response_bytes": 19356,
+      "returned_items": 100
+    },
+    {
+      "label": "frequent_symbol_paginated",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 481.768,
+      "response_bytes": 19357,
+      "returned_items": 100
+    },
+    {
+      "label": "frequent_symbol_paginated",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 480.376,
+      "response_bytes": 19358,
+      "returned_items": 100
+    },
+    {
+      "label": "frequent_symbol_paginated",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 467.554,
+      "response_bytes": 19358,
+      "returned_items": 100
+    },
+    {
+      "label": "scope_and_credentials",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 104.046,
+      "response_bytes": 449,
+      "returned_items": 0
+    },
+    {
+      "label": "freshness_before_edit",
+      "operation": "read",
+      "baseline": false,
+      "elapsed_ms": 3.07,
+      "response_bytes": 669,
+      "returned_items": 5
+    },
+    {
+      "label": "reject_stale_sha",
+      "operation": "read",
+      "baseline": false,
+      "elapsed_ms": 1.089,
+      "response_bytes": 312,
+      "returned_items": 0
+    },
+    {
+      "label": "freshness_after_edit",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 103.217,
+      "response_bytes": 653,
+      "returned_items": 1
+    },
+    {
+      "label": "freshness_after_rename",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 131.143,
+      "response_bytes": 648,
+      "returned_items": 1
+    },
+    {
+      "label": "git_status_after_rename",
+      "operation": "context",
+      "baseline": false,
+      "elapsed_ms": 388.655,
+      "response_bytes": 822,
+      "returned_items": 1
+    },
+    {
+      "label": "git_diff_current",
+      "operation": "diff",
+      "baseline": false,
+      "elapsed_ms": 85.449,
+      "response_bytes": 1120,
+      "returned_items": 0
+    },
+    {
+      "label": "git_feature_branch",
+      "operation": "context",
+      "baseline": false,
+      "elapsed_ms": 192.225,
+      "response_bytes": 883,
+      "returned_items": 0
+    },
+    {
+      "label": "freshness_branch_switch",
+      "operation": "search",
+      "baseline": false,
+      "elapsed_ms": 89.158,
+      "response_bytes": 655,
+      "returned_items": 1
+    },
+    {
+      "label": "git_main_branch",
+      "operation": "context",
+      "baseline": false,
+      "elapsed_ms": 177.187,
+      "response_bytes": 878,
+      "returned_items": 0
+    },
+    {
+      "label": "python_definition",
+      "operation": "lsp",
+      "baseline": false,
+      "elapsed_ms": 340.038,
+      "response_bytes": 719,
+      "returned_items": 1
+    },
+    {
+      "label": "typescript_definition",
+      "operation": "lsp",
+      "baseline": false,
+      "elapsed_ms": 516.267,
+      "response_bytes": 786,
+      "returned_items": 1
+    }
+  ],
+  "lsp": "Python and TypeScript imported-definition known answers evaluated",
+  "freshness_probe": {
+    "initial_worker_sha256": "1c7e2eba4a94c7c86c26e70092f83da4e98a3763720800da2d137921aa865c41",
+    "host_sha256_after_edit": "8ba79d5ed6f79e693dc0f08be3876a2fcbf5e8205ef87bcf005894e3dd569a67",
+    "host_bytes_after_edit": 33,
+    "host_mtime_ns_after_edit": 1792770138371319314,
+    "worker_sha256_after_edit": "8ba79d5ed6f79e693dc0f08be3876a2fcbf5e8205ef87bcf005894e3dd569a67",
+    "worker_bytes_after_edit": null,
+    "stale": true
+  },
+  "limits": [
+    "Controlled synthetic repository, not real coding-task quality or Cursor parity.",
+    "Adapter timings include IPC/startup overhead; filesystem caches are not controlled.",
+    "No semantic retrieval, embedding, model, video job or agent-trajectory benchmark.",
+    "The existing file_grep result cap and new pagination have different output contracts."
+  ]
+}

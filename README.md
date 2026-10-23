@@ -44,6 +44,9 @@ vwb chat -i -r <request-id>      # keep talking to the same agent: "make short-0
 - **Model access**: discover configured OpenAI, Google, Anthropic and OpenRouter models and call supported
   text, image, audio, video and embedding APIs through tools or sandbox Python scripts, with host-held keys.
   See [model access](docs/MODEL_ACCESS.md) for discovery, examples and output files.
+- **Repository navigation**: shared bounded ripgrep, hash-aware source reads, live Git diffs/history,
+  Python/JS/TS/TSX language-server navigation and focused saved-file context. Optional read-only explorer
+  children use the same tools. See [code intelligence and setup](docs/CODE_INTELLIGENCE.md).
 - **Workspace canvas**: collapsible chat, a file explorer, closeable tabs and two viewing groups for videos,
   images, interactive local HTML, paged PDFs, text and the shared browser. The Python harness remains unchanged.
 - **Shared browser**: the main agent controls an isolated headed Chrome session through typed tools. The canvas
