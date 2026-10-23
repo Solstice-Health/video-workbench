@@ -58,11 +58,18 @@ The optional capabilities can be installed later:
 ./scripts/setup.sh --ui-only       # Python and bundled UI; skip renderer setup
 ./scripts/setup.sh --with-agent    # also build the Docker agent/sandbox image
 ./scripts/setup.sh --with-browser  # also install the shared browser driver
+./scripts/setup.sh --with-code-tools # also build read-only rg/Git/Python/TypeScript tools
 ```
 
 `--ui-only` is useful for reviewing the application before configuring media
 dependencies. It does not make rendering, video indexing or Docker automation
 available. Python dependencies are still installed from the same locked project.
+
+For repository work, `uv run python -m vwb.code.runtime install` can install the
+pinned code-tools image independently. It needs Docker, not a host npm install.
+Search, Git and language-server tools share this image across model providers;
+normal media/chat use does not require it. See [code intelligence](CODE_INTELLIGENCE.md)
+for supported operations, saved-file context, bounds and evaluation.
 
 ## Configure providers and choose a model
 

@@ -529,6 +529,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(prompts.catalog(self.app.runs_dir))
             if parts == ["api", "integrations"]:
                 return self._json(self.app.integrations.status())
+            if len(parts) == 5 and parts[:2] == ["api", "requests"] and parts[3:] == ["code", "context"]:
+                from vwb.code.editor import read_context
+                return self._json(read_context(self.app.workspace(parts[2])))
             if len(parts) in {5, 6} and parts[:2] == ["api", "requests"] and parts[3] == "studio":
                 ws = self.app.workspace(parts[2])
                 if parts[4] == "capabilities" and len(parts) == 5:
@@ -594,6 +597,10 @@ class Handler(BaseHTTPRequestHandler):
             if parts[0] != "api":
                 relative = unquote(url.path).lstrip("/") or "index.html"
                 return self._file(safe_child(STATIC_DIR, relative))
+        elif self.command == "PUT":
+            if len(parts) == 5 and parts[:2] == ["api", "requests"] and parts[3:] == ["code", "context"]:
+                from vwb.code.editor import save_context
+                return self._json(save_context(self.app.workspace(parts[2]), self._body()))
         elif self.command == "POST":
             if parts == ["api", "uploads"]:
                 return self._upload()
@@ -941,7 +948,7 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._json({"error": "The local server could not finish this request. Try again."}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
-    do_GET = do_HEAD = do_POST = do_DELETE = _handle
+    do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = _handle
 
 
 def serve(*, port: int = 8765, open_browser: bool = True, runs_dir: Path = RUNS_DIR) -> None:

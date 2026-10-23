@@ -33,6 +33,9 @@ capabilities:
   sandbox.network: allow          # opt-in public HTTP(S) proxy; no private/host destinations or vendor keys
   sandbox.environment: allow      # reusable virtual environments/packages inside request work/
   sandbox.status: allow           # observe/cancel bounded background sandbox jobs
+  code.search: allow              # bounded rg and hash-aware reads in read-only Docker
+  code.git: allow                 # current repository/diff/history and validated canvas-file hints
+  code.lsp: allow                 # pinned Python/TS language servers, no workspace plugin execution
 
   # asset lab
   asset.recover.pixels: allow       # rungs 0-1 (original and fused pixels)
@@ -71,6 +74,7 @@ roles:
             index_overview, index_query, index_search, index_transcript, index_shots,
             integration_status, integration_tools, integration_call,
             media_frame, media_contact_sheet, watch_ask, focus_find, memory_note,
+            repo_files, repo_search, repo_read, repo_context, repo_diff, repo_history, repo_lsp, repo_status,
             file_list, file_read, file_grep, file_write]
   planner_b:        # GPT-6.1-Sol, an independent plan from another family
     allow: [model_providers, model_catalog, model_request,
@@ -81,6 +85,7 @@ roles:
             integration_status, integration_tools, integration_call,
             web_search, web_fetch, web_research,
             media_frame, media_contact_sheet, clip_candidates, clip_refine, clip_validate, focus_find, memory_note,
+            repo_files, repo_search, repo_read, repo_context, repo_diff, repo_history, repo_lsp, repo_status,
             file_list, file_read, file_grep, file_write]
   composer:         # GPT-6.1-Sol (Codex in Docker): drafts a composition; the job lead commits
     allow: [model_providers, model_catalog, model_request,
@@ -94,6 +99,7 @@ roles:
             media_frame, media_contact_sheet, watch_ask, focus_find, reframe_solve, asset_marks, asset_view, asset_trace, chart_read, video_matte,
             sunburst_create, sunburst_extract, sunburst_inpaint, sunburst_outpaint, omni_video,
             layout_facts, canvas_schema, canvas_new, canvas_check, canvas_preview, canvas_snapshot, canvas_query, shape_kit, copy_add, copy_list,
+            repo_files, repo_search, repo_read, repo_context, repo_diff, repo_history, repo_lsp, repo_status,
             file_list, file_read, file_grep, file_write, file_edit, memory_note]
   critic:           # GPT-6.1-Sol, another family; checks renders, never certifies
     allow: [model_providers, model_catalog, model_request,
@@ -103,4 +109,8 @@ roles:
             index_overview, index_transcript, index_shots, media_frame, media_contact_sheet,
             integration_status, integration_tools, integration_call,
             canvas_get, canvas_check, canvas_list, canvas_query, qc_run, qc_peek, render_info, flags_list, memory_note,
+            repo_files, repo_search, repo_read, repo_context, repo_diff, repo_history, repo_lsp, repo_status,
             asset_view, chart_read, output_compare, file_list, file_read, file_grep]
+  code_explorer:                   # isolated navigation context; no native shell or writes
+    allow: [repo_files, repo_search, repo_read, repo_context, repo_diff, repo_history, repo_lsp, repo_status,
+            agent_spawn, agent_list, agent_send, agent_inbox, agent_wait, agent_interrupt, agent_followup]

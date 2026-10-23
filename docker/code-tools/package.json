@@ -1,0 +1,11 @@
+{
+  "name": "vwb-code-tools-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned third-party language servers for the read-only Docker service",
+  "dependencies": {
+    "pyright": "1.1.414",
+    "typescript-language-server": "6.0.2",
+    "typescript": "6.0.3"
+  }
+}

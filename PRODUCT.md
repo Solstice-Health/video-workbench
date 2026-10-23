@@ -44,6 +44,13 @@ plane owns tools, provenance, checks, flags, and human acceptance.
 - Preserve source provenance, output versions, verification and acceptance rules.
 - Keep vendor keys in the host gateway, away from the browser and agent plane.
 
+## Deferred capabilities
+
+Persistent visual entities, cross-shot person matching, first-appearance retrieval,
+and tracked garment or object edits are future capabilities. For now, video
+overview frames/contact sheets and on-demand visual inspection are sufficient;
+do not present identity-aware temporal editing as an existing indexed capability.
+
 ## Brand Commitments
 
 Use the organization's Eeva design system. The user requested a sleek,

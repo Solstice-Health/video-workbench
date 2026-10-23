@@ -36,7 +36,7 @@ jobs:
         run: |
           python -m pip install uv==0.11.25
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y ffmpeg
+          sudo apt-get install --no-install-recommends -y ffmpeg ripgrep
           uv sync --frozen
       - name: Check Python correctness
         run: |
@@ -70,5 +70,33 @@ jobs:
           path: |
             reports/
             dist/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  code-tools-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12.13"
+      - name: Install host control plane and pinned Docker tools
+        run: |
+          python -m pip install uv==0.11.25
+          uv sync --frozen
+          uv run --frozen python -m vwb.code.runtime install
+      - name: Exercise real repository tools and live symbol navigation
+        run: uv run --frozen python scripts/evaluate_code_tools.py --docker --lsp --output reports/code-tools.json
+      - name: Check actual worker isolation, persistence and shutdown
+        run: VWB_CODE_SERVICE_INTEGRATION=1 uv run --frozen pytest -q tests/test_code_service_integration.py
+      - name: Keep measured fixture results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: code-tools-fixtures
+          path: reports/
           if-no-files-found: ignore
           retention-days: 7

@@ -48,15 +48,21 @@ for entry in json.loads((config.GENERATORS_DIR / "remotion/public/fonts/manifest
 assert (config.GENERATORS_DIR / "remotion/render.mjs").is_file()
 assert (config.GENERATORS_DIR / "remotion/package-lock.json").is_file()
 assert (config.RESOURCE_ROOT / "docker/codex-agent/Dockerfile").is_file()
+for filename in ("Dockerfile", "package.json", "package-lock.json"):
+    assert (config.RESOURCE_ROOT / "docker/code-tools" / filename).is_file()
 assert (STATIC_DIR / "index.html").is_file()
 docs = job_lead._docs()
 assert all(path.is_file() for path in docs.values())
 assert (config.DOCS_DIR / "CANVAS.md").read_text().startswith("# Canvas")
 assert (config.DOCS_DIR / "DESKTOP_APPS.md").is_file()
 assert (config.DOCS_DIR / "MODEL_ACCESS.md").is_file()
+assert (config.DOCS_DIR / "CODE_INTELLIGENCE.md").is_file()
 from vwb.sandbox import model_client
 assert Path(model_client.__file__).is_file()
 assert {"model_providers", "model_catalog", "model_request"} <= set(build_registry().tools)
+assert {"repo_files", "repo_search", "repo_read", "repo_context", "repo_diff", "repo_history", "repo_lsp", "repo_status"} <= set(build_registry().tools)
+from vwb.code import worker, service, editor, fence
+assert worker.CodeWorker and service.Supervisor and editor.read_context and fence.HostFence
 from vwb.integrations import IntegrationService
 from vwb.integrations.blender_mcp import LOCK
 assert LOCK.is_file() and "mcp-for-blender==2.2.2" in LOCK.read_text()

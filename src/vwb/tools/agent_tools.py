@@ -62,7 +62,7 @@ TOOLS = [
          "concurrency and total count. Default worker is general-purpose. Roles only narrow inherited permissions. "
          "Shared work folder, separate conversation; provide explicit task/context and file ownership. Turn-local.",
          schema({"task": {"type": "string"}, "context": {"type": "object"}, "role": {"type": "string",
-            "enum": ["worker", "scene_miner", "planner_b", "composer", "critic"]}}, ["task"]),
+            "enum": ["worker", "scene_miner", "planner_b", "composer", "critic", "code_explorer"]}}, ["task"]),
          agent_spawn, "agent.manage", "agents"),
     Tool("agent_list", "Inspect your subtree: parent, role, depth, status, latest tool activity, result and limits.",
          schema({}), agent_list, "agent.manage", "agents"),

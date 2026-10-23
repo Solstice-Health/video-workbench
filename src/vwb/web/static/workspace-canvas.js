@@ -83,6 +83,47 @@ export function importedTabs(events, seen) {
 }
 export const fileTab = entry => ({id: `file:${entry.path}`, kind: 'file', title: entry.name || entry.path.split('/').at(-1), path: entry.path});
 export const studioTab = kind => ({id: `${kind}-studio`, kind: `${kind}-studio`, title: kind === 'video' ? 'Video studio' : 'Image studio'});
+
+// These are navigation hints, never instructions or a grant of file access.
+export function selectionLines(text, start, end) {
+  if (typeof text !== 'string' || !Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end > text.length) return null;
+  const line = offset => text.slice(0, offset).split('\n').length;
+  // A selection ending at the next line's first character belongs to the prior line.
+  const final = end > start && text[end - 1] === '\n' ? end - 1 : end;
+  const range = {start: line(start), end: line(final)};
+  return range.end - range.start < 2000 ? range : null;
+}
+
+export function previewSelection(element, selection) {
+  if (!element || !selection || selection.isCollapsed || selection.rangeCount !== 1) return null;
+  const range = selection.getRangeAt(0);
+  if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) return null;
+  const prefix = range.cloneRange(); prefix.selectNodeContents(element); prefix.setEnd(range.startContainer, range.startOffset);
+  const start = prefix.toString().length;
+  return selectionLines(element.textContent || '', start, start + range.toString().length);
+}
+
+// One serialized writer per conversation prevents an old, slow preview request
+// from landing after a newly focused tab. Coalesce changes while a write runs.
+const contextWriters = new Map();
+export function queueEditorContext(api, requestId, body) {
+  if (!requestId) return Promise.resolve();
+  let writer = contextWriters.get(requestId);
+  if (!writer) {writer = {pending: null, running: null}; contextWriters.set(requestId, writer);}
+  writer.pending = body;
+  if (!writer.running) writer.running = (async () => {
+    while (writer.pending) {
+      const next = writer.pending; writer.pending = null;
+      try {await api(`/api/requests/${encodeURIComponent(requestId)}/code/context`, {method:'PUT', body:JSON.stringify(next)});}
+      catch { /* A stale preview is not silently refreshed or promoted to context. */ }
+    }
+  })().finally(() => {
+    writer.running = null;
+    if (writer.pending) return queueEditorContext(api, requestId, writer.pending);
+    contextWriters.delete(requestId);
+  });
+  return writer.running;
+}
 function IconAction({name, label, ...props}) {
   return html`<${Tooltip} content=${label}><${Button} variant="text" iconOnly aria-label=${label} ...${props}><${Icon} name=${name} size=${16}/><//><//>`;
 }
@@ -173,14 +214,27 @@ function PdfPreview({api, requestId, path}) {
   </div>`;
 }
 
-function FilePreview({api, requestId, tab}) {
+function FilePreview({api, requestId, tab, focused}) {
   const [file, setFile] = useState(null), [error, setError] = useState(''), [revision, setRevision] = useState(0);
+  const textElement = useRef(null);
   useEffect(() => {
     let live = true; setFile(null); setError('');
     api(`/api/requests/${encodeURIComponent(requestId)}/workspace/file?path=${encodeURIComponent(tab.path)}`)
       .then(result => {if (live) setFile(result);}).catch(e => {if (live) setError(e.message);});
     return () => {live = false;};
   }, [api, requestId, tab.path, revision]);
+  useEffect(() => {
+    if (!focused || !requestId) return;
+    let timer = null;
+    const update = () => {
+      const active = !document.hidden && tab.path.startsWith('work/') && typeof file?.text === 'string';
+      const selected_lines = active ? previewSelection(textElement.current, document.getSelection()) : null;
+      queueEditorContext(api, requestId, active ? {path:tab.path, etag:file.etag, selected_lines} : {path:null});
+    };
+    const selection = () => {clearTimeout(timer); timer = setTimeout(update, 150);};
+    update(); document.addEventListener('selectionchange', selection); document.addEventListener('visibilitychange', update);
+    return () => {clearTimeout(timer); document.removeEventListener('selectionchange', selection); document.removeEventListener('visibilitychange', update); queueEditorContext(api, requestId, {path:null});};
+  }, [api, requestId, tab.path, file?.etag, focused]);
   const kind = file?.preview_kind, url = file?.url;
   return html`<section className="file-preview" aria-label=${`Preview ${tab.title}`}>
     <div className="file-preview-toolbar"><span title=${tab.path}>${tab.path}</span><div>${file && html`<span className="caption">${formatBytes(file.size)}</span>`}
@@ -192,7 +246,7 @@ function FilePreview({api, requestId, tab}) {
       : kind === 'image' && url ? html`<div className="file-media"><img src=${url} alt=${tab.title}/></div>`
       : kind === 'html' && url ? html`<iframe className="file-document" src=${url} sandbox="allow-scripts" referrerPolicy="no-referrer" title=${`HTML preview: ${tab.title}`}/>`
       : kind === 'pdf' ? html`<${PdfPreview} key=${`${tab.path}:${revision}`} api=${api} requestId=${requestId} path=${tab.path}/>`
-      : ['text', 'json', 'code', 'markdown'].includes(kind) || typeof file.text === 'string' ? html`<div className="file-text-view">${file.truncated && html`<p className="file-truncation">Showing a bounded preview. Open the file to read the rest.</p>`}<pre tabIndex="0">${file.text ?? ''}</pre></div>`
+      : ['text', 'json', 'code', 'markdown'].includes(kind) || typeof file.text === 'string' ? html`<div className="file-text-view">${file.truncated && html`<p className="file-truncation">Showing a bounded preview. Open the file to read the rest.</p>`}<pre ref=${textElement} tabIndex="0">${file.text ?? ''}</pre></div>`
       : html`<div className="canvas-empty"><${Icon} name="file" size=${18}/><h3>Preview unavailable</h3><p>This file type can be opened or downloaded.</p>${url && html`<a className="secondary-link" href=${url} download>Download ${tab.title}</a>`}</div>`}
   </section>`;
 }
@@ -218,6 +272,11 @@ function CanvasNewTab({onOpen, onExplore}) {
 }
 
 export function WorkspaceCanvas({api, requestId, state, dispatch, renderOutputs, onExplore, notice, visible = true}) {
+  const focusedGroup = state.groups.find(group => group.id === state.focused);
+  const focusedTab = focusedGroup?.tabs.find(tab => tab.id === focusedGroup.active);
+  useEffect(() => {
+    if (!visible || focusedTab?.kind !== 'file') queueEditorContext(api, requestId, {path:null});
+  }, [api, requestId, visible, focusedTab?.kind, focusedTab?.path]);
   const focusTab = (event, group, index) => {
     const next = {ArrowLeft: (index - 1 + group.tabs.length) % group.tabs.length, ArrowRight: (index + 1) % group.tabs.length, Home: 0, End: group.tabs.length - 1}[event.key];
     if (next === undefined) return;
@@ -238,7 +297,7 @@ export function WorkspaceCanvas({api, requestId, state, dispatch, renderOutputs,
           : tab?.kind === 'outputs' ? renderOutputs()
           : tab?.kind === 'artifact' ? html`<${ArtifactPanel} key=${`${requestId}:${tab.id}`} api=${api} requestId=${requestId} tab=${tab} onRevision=${revision => dispatch({type:'open',group:group.id,tab:{...tab,revision,automatic:false}})}/>`
           : tab?.kind === 'artifacts' ? html`<${ArtifactLibrary} api=${api} requestId=${requestId} onOpen=${item => dispatch({type:'open',group:group.id,tab:item})}/>`
-          : tab?.kind === 'file' ? html`<${FilePreview} key=${tab.id} api=${api} requestId=${requestId} tab=${tab}/>`
+          : tab?.kind === 'file' ? html`<${FilePreview} key=${tab.id} api=${api} requestId=${requestId} tab=${tab} focused=${visible && state.focused === group.id}/>`
           : ['image-studio','video-studio'].includes(tab?.kind) ? html`<${GenerationStudio} key=${`${requestId}:${tab.id}`} kind=${tab.kind === 'video-studio' ? 'video' : 'image'} api=${api} requestId=${requestId} onOpen=${item => dispatch({type:'open',group:group.id,tab:item})}/>`
           : html`<div className="canvas-empty"><${Icon} name="folder" size=${18}/><h3>A place for your work</h3><p>Open a file from the workspace, or bring the browser alongside your conversation.</p><div><${Button} variant="secondary" size="sm" onClick=${onExplore}>Browse workspace<//><${Button} variant="text" size="sm" onClick=${() => dispatch({type: 'open', group: group.id, tab: {id: 'browser', kind: 'browser', title: 'Browser'}})}>Open browser<//></div></div>`}
       </div></section>`;})}
