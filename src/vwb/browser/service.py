@@ -15,10 +15,12 @@ import math
 import os
 import re
 import secrets
-import shutil
+import stat
+import tempfile
 import threading
 import time
 from collections.abc import Iterator
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -31,12 +33,14 @@ from websockets.sync.client import connect
 from vwb.browser.driver import AgentBrowserDriver
 from vwb.browser.runtime import status as runtime_status
 from vwb.util.jsonio import append_jsonl, read_json, write_json
+from vwb.web.workspace_files import open_file
 from vwb.workspace import Workspace
 
 VIEWPORT = (1280, 800)
 REF = re.compile(r"@?e[0-9]+\Z")
 TAB = re.compile(r"t[0-9]+\Z")
 OBSERVATION_TTL = 120
+TRANSFER_MAX = 128 * 1024**2
 # Read-only instrumentation. Models cannot supply JavaScript. The nonce identifies
 # a document even when a reload has the same URL; scroll/viewport guard coordinates.
 DOCUMENT_STATE = """(() => {
@@ -107,6 +111,27 @@ def _url(value: Any) -> str:
 
 def _run(awaitable):
     return asyncio.run(awaitable)
+
+
+def _copy_transfer(source, target) -> tuple[int, str]:
+    """Bound and hash the pinned bytes, without reopening a public pathname."""
+    info = os.fstat(source.fileno())
+    if not stat.S_ISREG(info.st_mode) or info.st_size > TRANSFER_MAX:
+        raise ValueError("Browser transfers require a regular file no larger than 128 MB.")
+    size, digest = 0, hashlib.sha256()
+    while block := source.read(min(1024**2, TRANSFER_MAX - size + 1)):
+        size += len(block)
+        if size > TRANSFER_MAX:
+            raise ValueError("The browser transfer exceeds 128 MB.")
+        target.write(block)
+        digest.update(block)
+    return size, digest.hexdigest()
+
+
+def _same_directory(parent: int, name: str, descriptor: int) -> bool:
+    actual = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    expected = os.fstat(descriptor)
+    return stat.S_ISDIR(actual.st_mode) and (actual.st_dev, actual.st_ino) == (expected.st_dev, expected.st_ino)
 
 
 class _Viewer:
@@ -378,6 +403,79 @@ class BrowserSession:
         self._save(state)
         return result
 
+    def _upload(self, relative: str, ref: str) -> dict:
+        path = Path(relative)
+        if (path.is_absolute() or not path.parts or path.parts[0] not in {"work", "media", "assets"}
+                or ".." in path.parts or any(part.startswith(".") for part in path.parts)):
+            raise ValueError("Upload a named file inside work/, media/ or assets/.")
+        # The browser daemon accepts filenames, not our descriptors. Give it a
+        # private snapshot so an agent cannot swap a public path before it reads.
+        # Retain it after dispatch: a file input can read it on a later submit,
+        # including after this service instance or the turn worker has exited.
+        staging = Path(tempfile.mkdtemp(prefix="upload-", dir=self.private)).absolute()
+        snapshot = staging / path.name
+        prepared = False
+        try:
+            with open_file(self.ws, relative) as source, snapshot.open("xb") as target:
+                _copy_transfer(source, target)
+            prepared = True
+        except OSError:
+            raise ValueError("Upload an existing regular workspace file, without symlinks.") from None
+        finally:
+            if not prepared:
+                snapshot.unlink(missing_ok=True)
+                staging.rmdir()
+        return _run(self.driver.run(["upload", ref, str(snapshot)]))
+
+    def _download(self, name: str, ref: str) -> dict:
+        work_path = self.ws.work
+        private_download = self.private / "downloads" / f"{secrets.token_hex(8)}-{name}"
+        private_download.parent.mkdir(exist_ok=True, mode=0o700)
+        if private_download.parent.is_symlink():
+            raise ValueError("The browser download directory must not be a symlink.")
+        with ExitStack() as stack:
+            def pin(path, parent=None):
+                descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+                stack.callback(os.close, descriptor)
+                return descriptor
+
+            try:
+                root = pin(work_path.parent)
+                work = pin(work_path.name, root)
+                try:
+                    os.mkdir("browser-downloads", dir_fd=work)
+                except FileExistsError:
+                    pass
+                folder = pin("browser-downloads", work)
+            except OSError:
+                raise ValueError("The download destination must be a regular workspace directory, not a symlink.") from None
+            try:
+                _run(self.driver.run(["download", ref, str(private_download)], timeout_s=60))
+                try:
+                    source_fd = os.open(private_download, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                except OSError:
+                    raise ValueError("The download is missing or is not a regular file. It has not been imported.") from None
+                if not stat.S_ISREG(os.fstat(source_fd).st_mode):
+                    os.close(source_fd)
+                    raise ValueError("The download must be a regular file. It has not been imported.")
+                with os.fdopen(source_fd, "rb") as source:
+                    target_fd = os.open(private_download.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                        0o600, dir_fd=folder)
+                    try:
+                        with os.fdopen(target_fd, "wb") as target:
+                            size, digest = _copy_transfer(source, target)
+                        if (not _same_directory(root, work_path.name, work)
+                                or not _same_directory(work, "browser-downloads", folder)):
+                            raise ValueError("The workspace folder changed during download. Try again.")
+                    except BaseException:
+                        os.unlink(private_download.name, dir_fd=folder)
+                        raise
+            finally:
+                private_download.unlink(missing_ok=True)
+        return {"path": self.ws.rel(work_path / "browser-downloads" / private_download.name),
+                "bytes": size, "sha256": digest,
+                "notice": "Untrusted downloaded content. No licence or factual approval is implied."}
+
     def _command(self, state: dict[str, Any], body: dict[str, Any], *, actor: str) -> dict:
         action = body.get("action")
         if action == "navigate":
@@ -419,43 +517,14 @@ class BrowserSession:
         elif action == "drag":
             args = ["drag", self._ref(body.get("ref")), self._ref(body.get("target_ref"))]
         elif action == "upload":
-            relative = Path(_text(body.get("path"), "path", 1000))
-            if relative.is_absolute() or ".." in relative.parts or any(p.startswith(".") for p in relative.parts):
-                raise ValueError("Upload a named file inside work/, media/ or assets/.")
-            path = self.ws.root / relative
-            cursor = self.ws.root
-            for part in relative.parts:
-                cursor = cursor / part
-                if cursor.is_symlink():
-                    raise ValueError("Upload a regular workspace file, not a symlink.")
-            if (not relative.parts or relative.parts[0] not in {"work", "media", "assets"}
-                    or not path.resolve().is_relative_to(self.ws.root.resolve()) or not path.is_file()
-                    or path.stat().st_size > 128 * 1024**2):
-                raise ValueError("Upload an existing workspace file smaller than 128 MB.")
-            args = ["upload", self._ref(body.get("ref")), str(path.resolve())]
+            return self._upload(_text(body.get("path"), "path", 1000), self._ref(body.get("ref")))
         elif action == "download":
             name = _text(body.get("filename"), "filename", 160)
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_. -]*", name) or ".." in name:
                 raise ValueError("Use a simple download filename without directories.")
             if Path(name).suffix.lower() not in {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".mp4", ".webm", ".csv", ".json", ".txt", ".md", ".svg", ".zip"}:
                 raise ValueError("Choose a document, image, video or ZIP filename.")
-            folder = self.ws.work / "browser-downloads"
-            if (self.ws.work.is_symlink() or folder.is_symlink()
-                    or not folder.resolve().is_relative_to(self.ws.root.resolve())):
-                raise ValueError("The download destination must be a regular workspace directory, not a symlink.")
-            private_download = self.private / "downloads" / f"{secrets.token_hex(8)}-{name}"
-            private_download.parent.mkdir(exist_ok=True, mode=0o700)
-            if private_download.parent.is_symlink():
-                raise ValueError("The browser download directory must not be a symlink.")
-            _run(self.driver.run(["download", self._ref(body.get("ref")), str(private_download)], timeout_s=60))
-            if not private_download.is_file() or private_download.is_symlink() or private_download.stat().st_size > 128 * 1024**2:
-                raise ValueError("The download is missing or exceeds 128 MB. It has not been imported.")
-            folder.mkdir(exist_ok=True)
-            destination = folder / private_download.name
-            shutil.move(private_download, destination)
-            state["last_download"] = {"path": str(destination.relative_to(self.ws.root)), "bytes": destination.stat().st_size,
-                                      "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
-                                      "notice": "Untrusted downloaded content. No licence or factual approval is implied."}
+            state["last_download"] = self._download(name, self._ref(body.get("ref")))
             self._save(state)
             return state["last_download"]
         elif action == "click_at":

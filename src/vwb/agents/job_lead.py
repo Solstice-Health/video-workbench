@@ -42,6 +42,7 @@ from vwb.util.jsonio import append_jsonl, read_json, write_json
 from vwb.util.log import console, log
 from vwb.workspace import Workspace, flags
 from vwb.workspace.attachments import prompt as attachment_prompt
+from vwb.workspace.checkpoints import read_checkpoint
 from vwb.workspace.ledger import Ledger
 
 
@@ -52,6 +53,7 @@ def system_prompt(cfg: dict[str, Any] | None = None) -> str:
 def wake_context(ws: Workspace, *, full_chat: bool = False) -> str:
     """FULL wake: a stateless respawn reads the request, plan, outputs, asks and notes (spec D05)."""
     req = ws.load()
+    full_chat = full_chat or bool(read_checkpoint(ws))
     lines = [f"Request {req.id}. Source media: " + ", ".join(f"{s.ref} ({s.original_path})" for s in req.sources)]
     if not req.sources:
         lines.append("No source video is attached. Build from the brief and authorized design references; use a duration-based canvas, not source cuts.")
@@ -204,7 +206,9 @@ def run(ws: Workspace, message: str, first_turn: bool, *, cfg: dict[str, Any] | 
     path = ws.memory / SESSION_FILE
     session = read_json(path, {}) or {}
     ledger = Ledger(ws.ledger / "ledger.jsonl")
-    events = human_events(ledger.events(["human."]), int(session.get("seq", 0)))
+    checkpoint = read_checkpoint(ws)
+    baseline = max(int(session.get("seq", 0)), checkpoint.get("ledger_seq", 0))
+    events = human_events(ledger.events(["human."]), baseline)
     turn = ledger.append("chat.turn", "human", {"text": message})
     emit(ws, "turn.started", {"id": f"turn:{turn['seq']}", "text": message})
     try:
@@ -227,7 +231,7 @@ def run(ws: Workspace, message: str, first_turn: bool, *, cfg: dict[str, Any] | 
     ledger.append("chat.reply", "job_lead", {"text": reply[:4000], "host": session.get("key"),
                                              "thread": rec.get("thread_id")})
     if rec:
-        rec["replies"] = sum(t.role == "job_lead" for t in ws.load().chat)
+        rec["replies"] = sum(t.role in {"job_lead", "assistant"} for t in ws.load().chat)
     session.update(turns=int(session.get("turns", 0)) + 1, seq=turn["seq"])
     write_json(path, session)
     emit(ws, "turn.completed", {"id": f"turn:{turn['seq']}", "text": reply})
@@ -262,10 +266,10 @@ def missed_turns(chat: list[Any], replies_seen: int) -> list[Any]:
     for i, t in enumerate(chat):
         if seen == replies_seen:
             break
-        if t.role == "job_lead":
+        if t.role in {"job_lead", "assistant"}:
             seen, start = seen + 1, i + 1
     missed = chat[start:-1]
-    return missed if any(t.role == "job_lead" for t in missed) else []
+    return missed if any(t.role in {"job_lead", "assistant"} for t in missed) else []
 
 
 def _opening(ws: Workspace, message: str) -> str:
@@ -373,7 +377,9 @@ def _lead(ws: Workspace, registry: Registry, swarm: Swarm, message: str, first_t
 
 def _woken(ws: Workspace, message: str, first_turn: bool, fallback: bool, events: list[str] | None = None, *, full_chat: bool = False) -> str:
     """The turn for a host without the conversation's thread: the request's saved state, then the message."""
-    if first_turn and not fallback:
+    checkpoint = read_checkpoint(ws)
+    full_chat = full_chat or bool(checkpoint)
+    if first_turn and not fallback and not checkpoint:
         return _opening(ws, message)
     note = ("[harness] The conversation's own host was unavailable, so you continue it from the request's saved state."
             if fallback else f"[harness] Continuing request {ws.id}.")
@@ -387,6 +393,7 @@ def _run_host(ws: Workspace, registry: Registry, swarm: Swarm, message: str, fir
               ledger: Ledger, session: dict[str, Any], events: list[str], fallback: bool = False) -> str:
     c = direct_anthropic_route(c)
     host = c.get("host")
+    full_chat = bool(c.get("selection")) or bool(read_checkpoint(ws))
     current_refs = attachment_inputs.latest(ws)
     message += attachment_prompt(current_refs) + attachment_inputs.catalog_note(ws)
     from vwb.code.editor import read_context
@@ -408,7 +415,7 @@ def _run_host(ws: Workspace, registry: Registry, swarm: Swarm, message: str, fir
         initial = []
         if fresh:
             # A new model sees the full saved conversation, including reference selections.
-            initial = [{"role": "assistant" if t.role == "job_lead" else "user",
+            initial = [{"role": "assistant" if t.role in {"job_lead", "assistant"} else "user",
                         "content": attachment_inputs.content(t.text + reference_prompt(t.context) +
                                                              attachment_prompt(t.attachments), t.attachments)}
                        for t in chat[:-1]]
@@ -455,9 +462,9 @@ def _run_host(ws: Workspace, registry: Registry, swarm: Swarm, message: str, fir
     current_refs = attachment_inputs.unique([ref for t in missed for ref in t.attachments] + current_refs)[-12:]
     if rec.get("thread_id"):                       # the same conversation: the new message, and what it missed
         changes = surface_note(rec.get("surface"), now, since=None if rec.get("surface") else _last_reply_time(ledger), cfg=c)
-        text = _continued(ws, message, events, int(rec.get("replies", 0)), changes, full_chat=bool(c.get("selection")))
+        text = _continued(ws, message, events, int(rec.get("replies", 0)), changes, full_chat=full_chat)
     else:
-        text = _woken(ws, message, first_turn, fallback, events, full_chat=bool(c.get("selection")))
+        text = _woken(ws, message, first_turn, fallback, events, full_chat=full_chat)
 
     if host == "codex":
         def turn(t: str, thread: str | None) -> str:

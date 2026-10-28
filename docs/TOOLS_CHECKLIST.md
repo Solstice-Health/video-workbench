@@ -92,6 +92,8 @@ Spec references: D = decision, X = experiment, R/S = sources (see the spec and t
 - [ ] Rendered option previews (short clips) on cards
 
 ## F. The edit index (video indexing, built from scratch)
+- [x] Multi-source editing routes caption words/claims, crop dimensions, person-matte faces, QC, verification rules and review sidecars by explicit media refs. Clip/focus/reframe/copy/asset helpers accept `media_id` and reject ambiguous omissions. Video layers follow matching timeline sources; silent spans and different native FPS keep audio on the canvas clock. Bounded regressions include actual two-video rendering/review without paid calls.
+- [x] Every attached or explicitly selected workspace video is registered before the lead, with independent immutable snapshots and SHA-256 deduplication. `media_register(path)` registers agent downloads from safe relative work paths through Registry (`media.register`); `index_build(media_id)` separately gates indexing. Folder references remain lazy. Each additional source has its own index/cache; index tools accept `media_id`, and media tools accept `target="source:<ref>"`.
 - [x] Source profile: streams, colour tags, keyframe/GOP map, VFR check (`media.probe`)
 - [x] Frame-exact decode through ffmpeg with explicit BT.709 (half-frame seek), verified against sequential decode
 - [x] Shots (PySceneDetect adaptive) with frame-exact half-open spans

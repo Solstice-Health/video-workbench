@@ -21,6 +21,7 @@ from vwb.canvas.anim import active, all_values, value_at
 from vwb.canvas.model import Canvas, CaptionsLayer, ImageLayer, TextLayer, VideoLayer
 from vwb.index.asr import word_key
 from vwb.index.ocr import Reader2, agree_key, similar
+from vwb.index.paths import SourceIndexes, store_for
 from vwb.index.store import IndexStore
 from vwb.media.decode import read_frames
 from vwb.qc.findings import Finding
@@ -64,20 +65,21 @@ def content_layers(canvas: Canvas) -> list[VideoLayer]:
     return [l for l in canvas.layers if isinstance(l, VideoLayer) and l.role != "background" and l.effects.blur < 4]
 
 
-def typeset_tracks(canvas: Canvas) -> tuple[set[int], list[str]]:
+def typeset_tracks(canvas: Canvas) -> tuple[set[tuple[str, int]], list[tuple[str | None, str]]]:
     """Source text tracks the output carries as typeset copy (by track id, and the copy texts)."""
-    ids: set[int] = set()
-    texts: list[str] = []
+    ids: set[tuple[str, int]] = set()
+    texts: list[tuple[str | None, str]] = []
     copy = canvas.copy_by_id()
     for l in canvas.layers:
         if isinstance(l, TextLayer) and l.copy_id in copy:
             c = copy[l.copy_id]
-            ids.update(int(t) for t in c.source.get("tracks", []) or [])
-            texts.append(c.text)
+            media = c.source.get("media")
+            ids.update((media, int(t)) for t in c.source.get("tracks", []) or [])
+            texts.append((media or ("unknown" if c.source.get("kind") in {"ocr", "asr"} else None), c.text))
     return ids, texts
 
 
-def source_pixel_strips(ws: Any, canvas: Canvas) -> list[tuple[int, list[float]]]:
+def source_pixel_strips(ws: Any, canvas: Canvas) -> list[tuple[str | None, int, list[float]]]:
     """Image layers that show unaltered source pixels (matte or recovered cut-outs, not redrawn ones):
     (source frame, box in source pixels) for each, from the asset's registry row."""
     if ws is None:
@@ -103,7 +105,7 @@ def source_pixel_strips(ws: Any, canvas: Canvas) -> list[tuple[int, list[float]]
             x, y, w, h = (float(v) for v in placed)
             if fit.get("placed_frame") != "source" and src[0].get("crop"):   # rows written before placements
                 x, y = x + src[0]["crop"][0], y + src[0]["crop"][1]          # were made source-relative
-            out.append((int(src[0]["frame"]), [x, y, w, h]))
+            out.append((src[0].get("media"), int(src[0]["frame"]), [x, y, w, h]))
     return out
 
 
@@ -136,32 +138,49 @@ def image_scales(ws: Any, canvas: Canvas) -> list[dict[str, Any]]:
         if placed and src and fit.get("placed_frame") != "source" and src[0].get("crop"):
             placed = [placed[0] + src[0]["crop"][0], placed[1] + src[0]["crop"][1], placed[2], placed[3]]
         out.append({"layer": l.id, "asset": l.asset, "min_scale": min(scales), "max_scale": max(scales),
-                    "frame": int(src[0]["frame"]) if src else None, "placed": placed})
+                    "frame": int(src[0]["frame"]) if src else None, "media": src[0].get("media") if src else None, "placed": placed})
     return out
 
 
-def declared(canvas: Canvas, store: IndexStore, profile: dict[str, Any], step: int = 3, ws: Any = None) -> list[Finding]:
+def declared(canvas: Canvas, store: SourceIndexes | IndexStore, profile: dict[str, Any], step: int = 3, ws: Any = None) -> list[Finding]:
     """Replay every source window over the index (kept, cut, size, faces, motion) and account for the
     regulated text of the kept span: shown in a window, carried in a strip of source pixels, rebuilt as
     typeset copy, or dropped."""
     out: list[Finding] = []
+    unknown = [c.id for c in canvas.copy_deck if c.source.get("kind") in {"ocr", "asr"} and not c.source.get("media")]
+    if unknown:
+        out.append(Finding("t1.source_identity", "cannot_tell", "CHECK-UNQUALIFIED",
+                           "Source-derived copy is missing its media reference; remint it with an explicit media_id.",
+                           {"copies": unknown}, tier="T1"))
     layers = content_layers(canvas)
     tm = TimeMap([(s.src_in, s.src_out) for s in canvas.time_map])
-    m = store.media() if canvas.time_map else None
-    sw, sh = (float(m["width"]), float(m["height"])) if m else (0.0, 0.0)
-    tracks = [t for t in store.all("SELECT * FROM text_tracks") if t["role"] != "logo_text"]
-    faces = store.all("SELECT * FROM faces ORDER BY f")
-    seen: dict[int, int] = {}
-    vis_n: dict[int, int] = {}
-    cut_n: dict[int, int] = {}
-    small: dict[int, float] = {}
+    refs = list(dict.fromkeys(s.media for s in canvas.time_map))
+    scales = image_scales(ws, canvas)
+    for sc in scales:
+        if sc["media"] and sc["media"] not in refs:
+            refs.append(sc["media"])
+    stores = {ref: store_for(store, ref) for ref in refs}
+    media = {ref: st.media() for ref, st in stores.items()}
+    tracks = [{**t, "media": ref, "_key": (ref, t["id"])} for ref, st in stores.items()
+              for t in st.all("SELECT * FROM text_tracks") if t["role"] != "logo_text"]
+    faces = [{**fc, "media": ref} for ref, st in stores.items() for fc in st.all("SELECT * FROM faces ORDER BY f")]
+    timeline, offset = [], 0
+    for span in canvas.time_map:
+        timeline.append((offset, offset + span.src_out - span.src_in, span))
+        offset += span.src_out - span.src_in
+    seen: dict[tuple[str, int], int] = {}
+    vis_n: dict[tuple[str, int], int] = {}
+    cut_n: dict[tuple[str, int], int] = {}
+    small: dict[tuple[str, int], float] = {}
     face_cut = face_n = 0
     max_scale = 0.0
     motion = {l.id: 0.0 for l in layers}
     prev: dict[str, tuple] = {}
     for f in range(0, tm.length, step):
-        sf = tm.to_source(f)
-        live = [l for l in layers if active(l.span, f) and float(value_at(l.opacity, f)) > 0.05]
+        start, _, span = next(row for row in timeline if row[0] <= f < row[1])
+        ref, sf = span.media, span.src_in + f - start
+        sw, sh = float(media[ref]["width"]), float(media[ref]["height"])
+        live = [l for l in layers if l.source == ref and active(l.span, f) and float(value_at(l.opacity, f)) > 0.05]
         wins = []
         for l in live:
             win = (0.0, 0.0, sw, sh) if l.crop == "full" else tuple(float(v) for v in value_at(l.crop, f))
@@ -174,22 +193,22 @@ def declared(canvas: Canvas, store: IndexStore, profile: dict[str, Any], step: i
             prev[l.id] = win
             wins.append((l, win, scale))
         for t in tracks:
-            if not (t["f0"] <= sf < t["f1"]):
+            if t["media"] != ref or not (t["f0"] <= sf < t["f1"]):
                 continue
             tb = (t["x"], t["y"], t["w"], t["h"])
-            seen[t["id"]] = seen.get(t["id"], 0) + 1
+            seen[t["_key"]] = seen.get(t["_key"], 0) + 1
             best = 0.0
             for l, win, scale in wins:
                 v = _vis_masked(win, tb, l.mask.shape)
                 best = max(best, v)
                 if 0.02 < v < 0.96:
-                    cut_n[t["id"]] = cut_n.get(t["id"], 0) + 1
+                    cut_n[t["_key"]] = cut_n.get(t["_key"], 0) + 1
                 if v >= 0.96 and t["cap_h"]:
-                    small[t["id"]] = min(small.get(t["id"], 1e9), t["cap_h"] * scale)
+                    small[t["_key"]] = min(small.get(t["_key"], 1e9), t["cap_h"] * scale)
             if best > 0.02:
-                vis_n[t["id"]] = vis_n.get(t["id"], 0) + 1
+                vis_n[t["_key"]] = vis_n.get(t["_key"], 0) + 1
         for fc in faces:
-            if abs(fc["f"] - sf) <= 2:
+            if fc["media"] == ref and abs(fc["f"] - sf) <= 2:
                 fb = (fc["x"], fc["y"], fc["w"], fc["h"])
                 for l, win, _ in wins:
                     v = _vis_masked(win, fb, l.mask.shape)
@@ -197,7 +216,7 @@ def declared(canvas: Canvas, store: IndexStore, profile: dict[str, Any], step: i
                         face_n += 1
                         if v < 0.7:
                             face_cut += 1
-    by_id = {t["id"]: t for t in tracks}
+    by_id = {t["_key"]: t for t in tracks}
     fps = canvas.fps
     clipped = [by_id[i] for i, n in cut_n.items() if n / max(1, vis_n.get(i, 1)) > 0.25]
     for group, level in ((lambda t: t["role"] in CLAIM_ROLES, "HOLD"), (lambda t: t["role"] in HOLD_ROLES, "HOLD"),
@@ -206,26 +225,28 @@ def declared(canvas: Canvas, store: IndexStore, profile: dict[str, Any], step: i
         if items:
             out.append(Finding("t1.text_clipped", "fail", "TEXT-CLIPPED",
                                f"{len(items)} {'regulated ' if level == 'HOLD' else ''}text line(s) cut by a window edge",
-                               {"tracks": [{"id": t["id"], "role": t["role"], "text": t["text"][:140]} for t in items[:20]]},
+                               {"tracks": [{"id": t["id"], "media": t["media"], "role": t["role"], "text": t["text"][:140]} for t in items[:20]]},
                                level=level, tier="T1"))
     dropped = [by_id[i] for i, n in seen.items() if vis_n.get(i, 0) == 0 and n * step >= fps * 0.5
                and (by_id[i]["regulated"] or by_id[i]["role"] in CLAIM_ROLES | HOLD_ROLES)]
     typeset_ids, typeset_texts = typeset_tracks(canvas)
-    typeset_keys = [agree_key(t) for t in typeset_texts]
+    typeset_keys = [(ref, agree_key(text)) for ref, text in typeset_texts]
     strips = source_pixel_strips(ws, canvas)
 
     def in_strip(t: dict[str, Any]) -> bool:
         tb = (t["x"], t["y"], t["w"], t["h"])
-        return any(t["f0"] <= f < t["f1"] and _vis_masked(tuple(box), tb, "rect") >= 0.9 for f, box in strips)
+        return any(ref == t["media"] and t["f0"] <= f < t["f1"] and _vis_masked(tuple(box), tb, "rect") >= 0.9
+                   for ref, f, box in strips)
 
-    dropped = [t for t in dropped if t["id"] not in typeset_ids and not in_strip(t)
-               and not any(agree_key(t["text"]) in k or similar(agree_key(t["text"]), k) > 0.85 for k in typeset_keys)]
+    dropped = [t for t in dropped if t["_key"] not in typeset_ids and not in_strip(t)
+               and not any((ref is None or ref == t["media"]) and
+                           (agree_key(t["text"]) in k or similar(agree_key(t["text"]), k) > 0.85) for ref, k in typeset_keys)]
     if dropped:
         roles = sorted({t["role"] for t in dropped})
         out.append(Finding("t1.text_dropped", "fail", "TEXT-DROPPED",
                            f"{len(dropped)} regulated text line(s) in the kept span appear neither in a source window nor "
                            f"as typeset copy ({', '.join(roles)})",
-                           {"tracks": [{"id": t["id"], "role": t["role"], "text": t["text"][:160]} for t in dropped[:40]]},
+                           {"tracks": [{"id": t["id"], "media": t["media"], "role": t["role"], "text": t["text"][:160]} for t in dropped[:40]]},
                            level="HOLD", tier="T1"))
     floor = profile["legibility"]["min_cap_height_px"]
     shown = [i for i in small if by_id[i]["role"] in ("body", "claim", "title")]
@@ -242,13 +263,12 @@ def declared(canvas: Canvas, store: IndexStore, profile: dict[str, Any], step: i
     out.append(Finding("t1.faces", "fail" if fr > 0.05 else "pass", "FACE-CUT" if fr > 0.05 else None,
                        f"faces cut in {fr:.0%} of face samples" if face_n else "no faces shown",
                        {"cut": face_cut, "samples": face_n}, tier="T1"))
-    scales = image_scales(ws, canvas)
     strip_text = []
     for sc in scales:
         if sc["frame"] is None or not sc["placed"]:
             continue
         for t in tracks:
-            if t["f0"] <= sc["frame"] < t["f1"] and t["cap_h"] and \
+            if t["media"] == sc["media"] and t["f0"] <= sc["frame"] < t["f1"] and t["cap_h"] and \
                     _vis_masked(tuple(sc["placed"]), (t["x"], t["y"], t["w"], t["h"]), "rect") >= 0.9:
                 strip_text.append((round(t["cap_h"] * sc["min_scale"], 1), sc["layer"], t["text"][:60], t["role"]))
     fine = profile["legibility"].get("min_fineprint_cap_px", floor)
@@ -288,16 +308,17 @@ def declared(canvas: Canvas, store: IndexStore, profile: dict[str, Any], step: i
     return out
 
 
-def boundaries(canvas: Canvas, store: IndexStore) -> list[Finding]:
-    fps = canvas.fps
-    words = store.all("SELECT * FROM words ORDER BY t0")
+def boundaries(canvas: Canvas, store: SourceIndexes | IndexStore) -> list[Finding]:
     bad = []
     for s in canvas.time_map:
+        st = store_for(store, s.media)
+        fps = float(st.media()["fps"])
+        words = st.all("SELECT * FROM words ORDER BY t0")
         for edge, f in (("in", s.src_in), ("out", s.src_out)):
             t = f / fps
             w = next((w for w in words if w["t0"] + 0.02 < t < w["t1"] - 0.02), None)
             if w:
-                bad.append({"edge": edge, "t": round(t, 3), "word": w["text"]})
+                bad.append({"media": s.media, "edge": edge, "frame": f, "t": round(t, 3), "word": w["text"]})
     return [Finding("t1.boundary_words", "fail" if bad else "pass", "BOUNDARY-WORD" if bad else None,
                     f"{len(bad)} cut(s) inside a word" if bad else "every cut sits in a speech gap", {"cuts": bad}, tier="T1")]
 
@@ -405,7 +426,7 @@ def attest(comp_factory, render: Path, length: int, n: int = 24) -> Finding:
                     "bad": bad_tiles}, tier="T1")
 
 
-def audio_readback(canvas: Canvas, store: IndexStore, render: Path) -> list[Finding]:
+def audio_readback(canvas: Canvas, store: SourceIndexes | IndexStore, render: Path) -> list[Finding]:
     """Transcribe the output's audio and compare with the words the plan keeps."""
     if not canvas.time_map:
         return [Finding("t1.audio_readback", "info", summary="No source narration on this authored timeline; source speech comparison does not apply.", tier="T1")]
@@ -415,15 +436,13 @@ def audio_readback(canvas: Canvas, store: IndexStore, render: Path) -> list[Find
         wav = Path(tmp) / "out.wav"
         ffmpeg("-i", str(render), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav), expect=[wav])
         heard = transcribe_reader1(wav, "")
-    expected = []
-    off = 0
-    for s in canvas.time_map:
-        for w in store.all("SELECT * FROM words WHERE f0 >= ? AND f1 <= ? ORDER BY t0", (s.src_in, s.src_out + 1)):
-            expected.append({"text": w["text"], "t0": (off + w["f0"] - s.src_in) / fps})
-        off += s.src_out - s.src_in
+    from vwb.canvas.compile import output_words
+    expected = output_words(store, canvas)
     ek = [word_key(w["text"]) for w in expected if word_key(w["text"])]
     hk = [word_key(w["text"]) for w in heard if word_key(w["text"])]
     ratio = difflib.SequenceMatcher(a=ek, b=hk, autojunk=False).ratio() if ek else 0.0
+    if not ek and not hk:
+        return [Finding("t1.audio_readback", "pass", summary="No source speech expected or heard.", tier="T1")]
     first_ok = bool(ek) and bool(hk) and ek[0] in hk[:3]
     last_ok = bool(ek) and bool(hk) and ek[-1] in hk[-3:]
     out = [Finding("t1.audio_readback", "pass" if ratio >= 0.85 else "fail", None if ratio >= 0.85 else "VO-DIVERGE",

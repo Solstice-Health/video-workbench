@@ -22,7 +22,7 @@ from vwb.canvas.model import font_library
 from vwb.canvas.paths import output_id, read_record, version_number
 from vwb.canvas.store import CanvasStore
 from vwb.config import DOCS_DIR, load_profile
-from vwb.index.store import IndexStore
+from vwb.index.paths import SourceIndexes, source
 from vwb.media.decode import read_frames
 from vwb.media.frames import contact_sheet, jpeg_bytes, resize_to_width
 from vwb.qc import inspect, lint
@@ -56,12 +56,13 @@ def layout_facts(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     prof = _profile(ctx)
     W, H = prof["width"], prof["height"]
     sz = prof["safe_zone"]
-    st = IndexStore(ctx.ws.index / "index.sqlite")
-    styles = [json.loads(r["json"]).get("style") for r in st.all("SELECT json FROM readings WHERE scope='video'")]
+    src = source(ctx.ws, a.get("media_id"), require_explicit=True) if ctx.ws.load().sources else None
+    st = SourceIndexes(ctx.ws).for_media(src.ref) if src else None
+    styles = [json.loads(r["json"]).get("style") for r in st.all("SELECT json FROM readings WHERE scope='video'")] if st else []
     from vwb.workspace.registry import Registry
     assets = [{"ref": f"slot:{r['slot']}@{r['rev']}", "kind": r["kind"], "prov": r["prov"],
                "size": json.loads(r["fit"]).get("native_size")} for r in Registry(ctx.ws.assets).list()]
-    m = st.media() if ctx.ws.load().sources else None
+    m = st.media() if st else None
     return ToolResult.json({
         "canvas": [W, H], "fps": prof["fps"], "max_duration_s": prof["max_duration_s"],
         "safe_zone": {"x": sz["left"], "y": sz["top"], "w": W - sz["left"] - sz["right"], "h": H - sz["top"] - sz["bottom"],
@@ -73,7 +74,7 @@ def layout_facts(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
         "fonts": {fam: {"category": f["category"], "weights": f["weights"], "italic": f["italic"]}
                   for fam, f in font_library().items()},
         "fonts_note": "Open-licence library; no family is a default. Match the source's typeface where you can.",
-        "source": {"size": [m["width"], m["height"]], "fps": m["fps"]} if m else None,
+        "source": {"media": src.ref, "size": [m["width"], m["height"]], "fps": m["fps"]} if m else None,
         "timeline": "source_spans" if m else "authored_duration",
         "timeline_note": "Use source frame spans." if m else "Use canvas_new with duration_s. Imported designs are references; no source video or narration is required.",
         "brand_style_from_readings": [s for s in styles if s],
@@ -89,21 +90,34 @@ def canvas_new(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     prof = _profile(ctx)
     req = ctx.ws.load()
     spans = parse_json_arg(a.get("spans") or [])
+    explicit_map = parse_json_arg(a.get("time_map") or [])
     duration = a.get("duration_s")
     if duration is not None:
-        if spans:
+        if spans or explicit_map:
             return ToolResult.error("Choose duration_s for a new video or spans for a source edit, not both.")
         if (type(duration) not in (int, float) or not math.isfinite(duration)
                 or not 0 < duration <= prof["max_duration_s"] or round(duration * prof["fps"]) < 1):
             return ToolResult.error(f"duration_s must cover at least one frame and be at most {prof['max_duration_s']} seconds.")
         n, src, time_map = round(duration * prof["fps"]), None, []
+    elif explicit_map:
+        if spans or a.get("media_id"):
+            return ToolResult.error("Choose time_map with explicit media per span, or spans with media_id.")
+        time_map = []
+        for row in explicit_map:
+            if (not isinstance(row, dict) or set(row) != {"media", "src_in", "src_out"}
+                    or not isinstance(row["media"], str) or not row["media"]
+                    or type(row["src_in"]) is not int or type(row["src_out"]) is not int
+                    or not 0 <= row["src_in"] < row["src_out"]):
+                return ToolResult.error("time_map needs {media, src_in, src_out} with explicit sources and 0 <= src_in < src_out.")
+            time_map.append({**row, "media": source(ctx.ws, row["media"]).ref})
+        n, src = sum(row["src_out"] - row["src_in"] for row in time_map), None
     else:
         if not req.sources or not spans:
             return ToolResult.error("For a new video without source cuts, pass duration_s. For a source edit, attach a video and pass spans.")
         if (not isinstance(spans, list) or any(not isinstance(pair, list) or len(pair) != 2
                 or any(type(v) is not int for v in pair) or not 0 <= pair[0] < pair[1] for pair in spans)):
             return ToolResult.error("spans must contain [start, end] frame pairs with 0 <= start < end.")
-        src = req.source()
+        src = source(ctx.ws, a.get("media_id"), require_explicit=True)
         time_map = [{"media": src.ref, "src_in": x, "src_out": y} for x, y in spans]
         n = sum(y - x for x, y in spans)
     doc = {"schema": "vwb.canvas/2", "profile": prof["id"],
@@ -112,14 +126,15 @@ def canvas_new(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
            "intent": a.get("intent", ""), "layers": []}
     write_json(p, doc)
     return ToolResult.json({"path": str(p.relative_to(ctx.ws.work)), "frames": n, "seconds": round(n / prof["fps"], 2),
-                            "media": src.ref if src else None, "note": "Add layers by editing this file (see canvas_schema). Nothing is "
+                            "media": src.ref if src else None, "sources": list(dict.fromkeys(s["media"] for s in time_map)),
+                            "note": "Add layers by editing this file (see canvas_schema). Nothing is "
                                                       "placed for you: you design the composition."})
 
 
 def copy_add(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     e = copydeck.mint(ctx.ws, copy_id=a["id"], role=a.get("role", "title"), source=a["source"], shot=a.get("shot"),
                       tracks=parse_json_arg(a.get("tracks")), sentences=parse_json_arg(a.get("sentences")), text=a.get("text"),
-                      note=a.get("note"))
+                      note=a.get("note"), media_id=a.get("media_id"))
     level = flags.text_unverified_severity(bool(e.agree), e.regulated)
     return ToolResult.json({**e.model_dump(), "unverified_level": level,
                             "note": "Cite it in a text layer as copy_id. Until a person confirms it, it carries "
@@ -141,7 +156,7 @@ def canvas_check(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     measures = []
     if not errors:
         c = expand(ctx.ws, c)
-        st = IndexStore(ctx.ws.index / "index.sqlite")
+        st = SourceIndexes(ctx.ws)
         measures = [{"check": f.check, "status": f.status, "maps_to": f.kind, "summary": f.summary,
                      **({"detail": f.evidence} if f.status == "fail" else {})}
                     for f in inspect.declared(c, st, _profile(ctx), ws=ctx.ws) + inspect.boundaries(c, st)]
@@ -382,7 +397,7 @@ def qc_run(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
         return ToolResult.error("render the output first (render_output)")
     mp4 = Path(rec["file"])
     prof = load_profile(c.profile)
-    st = IndexStore(ctx.ws.index / "index.sqlite")
+    st = SourceIndexes(ctx.ws)
     found = lint.lint(mp4, c.length, prof) + inspect.declared(c, st, prof, ws=ctx.ws) + inspect.boundaries(c, st)
     if a.get("readback", True):
         found += inspect.text_readback(c, mp4, prof["legibility"]["min_cap_height_px"])
@@ -548,3 +563,13 @@ TOOLS = [
          "flags and the triage colour, and writes the cue sheet, delivery note and signed manifest.",
          schema(OUT), deliver_submit, "render", "deliver"),
 ]
+
+for tool in TOOLS:
+    if tool.name == "canvas_new":
+        tool.schema["properties"]["time_map"] = {"type": "array", "items": schema({
+            "media": {"type": "string"}, "src_in": {"type": "integer"}, "src_out": {"type": "integer"}},
+            ["media", "src_in", "src_out"])}
+        tool.description += " For multi-source edits, pass time_map=[{media, src_in, src_out}, ...] instead of spans."
+    if tool.name in {"layout_facts", "canvas_new", "copy_add"}:
+        tool.schema["properties"]["media_id"] = {"type": "string", "description": "Source ID or immutable ref; required for source-backed operations when multiple videos are registered."}
+        tool.description += " Use media_id to select a source when multiple videos are registered."

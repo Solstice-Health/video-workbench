@@ -119,14 +119,14 @@ def execute(row: dict, *, registry=None, gateway=None) -> dict:
     artifacts = []
     for index, ref in enumerate(refs):
         asset = asset_registry.get(ref)
-        source = Path(asset['path']).relative_to(ws.root).as_posix()
+        source = ws.rel(asset['path'])
         target = staging / f'output-{index + 1}{Path(source).suffix.lower()}'
         with open_file(ws, source) as handle, target.open('xb') as out:
             shutil.copyfileobj(handle, out)
         info = media_info(target, 'video' if row['kind'] == 'video' else 'image', verify_frames=row['kind'] == 'video')
         if row['kind'] == 'video' and (info['seconds'] <= 0 or info['width'] <= 0 or info['height'] <= 0):
             raise RuntimeError('The generated video did not have valid media metadata.')
-        public_path = (folder / target.name).relative_to(ws.root).as_posix()
+        public_path = ws.rel(folder / target.name)
         publish(ws, public_path, target)
         artifacts.append({'path': public_path, 'ref': ref,
                           'sha256': sha256_file(target), 'size': target.stat().st_size,
@@ -139,10 +139,10 @@ def execute(row: dict, *, registry=None, gateway=None) -> dict:
                'tool': name, 'requested': row['input'], 'inputs': row['prepared'],
                'artifacts': artifacts, 'background_mask': mask, 'tool_result': result.data}
     receipt_path = folder / 'receipt.json'
-    publish(ws, receipt_path.relative_to(ws.root).as_posix(), canonical_json(receipt).encode())
+    publish(ws, ws.rel(receipt_path), canonical_json(receipt).encode())
     Ledger(ws.ledger / 'ledger.jsonl').append('studio.generated', 'studio',
         {'job_id': row['id'], 'tool': name, 'artifacts': artifacts, 'background_mask': mask,
-         'receipt_path': receipt_path.relative_to(ws.root).as_posix()})
+         'receipt_path': ws.rel(receipt_path)})
     warnings = []
     for key in ('warnings', 'notes'):
         values = (result.data or {}).get(key, [])
@@ -154,7 +154,7 @@ def execute(row: dict, *, registry=None, gateway=None) -> dict:
             warnings.append('No editable background was detected. Paint a mask manually if needed.')
     elif row['operation'] == 'remove_background':
         warnings.append('This model-generated cutout may be redrawn; no source-aligned background mask is inferred from it.')
-    return {'artifacts': artifacts, 'receipt_path': receipt_path.relative_to(ws.root).as_posix(),
+    return {'artifacts': artifacts, 'receipt_path': ws.rel(receipt_path),
             'model': 'local-matte' if local_matte else row['input']['model'], 'background_mask': mask,
             'warnings': list(dict.fromkeys(warnings)),
             'tool_result': result.data}

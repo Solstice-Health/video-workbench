@@ -16,6 +16,25 @@ Work on `outputs/<id>/canvas.json` in the work folder, check it with `canvas_che
   Several spans are joined in order. The audio (the narration) follows the time map, and it is the clock of
   every layer, whatever the layer shows.
 
+For multiple videos, each span names its immutable source ref. A `video` layer
+appears only while the active span names that layer's `source`; use a layer per
+source, with its own crop and placement. Captions, copy provenance, matting, QC
+and review sidecars use the corresponding source index. Independent simultaneous
+source clocks are not represented by `time_map`; use registry `clip` layers for
+independent playback.
+
+The clock plays one source frame per output frame. If native and output FPS differ,
+playback speed changes; audio is retimed to the same clock. Convert sources to the
+output FPS first when normal-speed playback is required. Source timestamps in
+inspection and cue sheets retain the native FPS.
+
+`canvas_new(time_map=[{media, src_in, src_out}, ...])` creates a timeline from
+multiple explicit sources. Single-source helpers (`spans`, `copy_add`, clip/focus/
+reframe tools, mark recovery and `video_matte`) accept `media_id`; they require it
+when more than one video is registered. Bare track, shot and word IDs are local
+to that source. Image/generation references can use `source:<ref>#t=<seconds>` or
+`source:<ref>#f=<frame>`; bare `t:`/`f:` references require a single source.
+
 ## New videos without a source video
 
 A source recording is optional. Use `canvas_new(output="short-01", duration_s=30)`

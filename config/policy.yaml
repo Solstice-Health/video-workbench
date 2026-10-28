@@ -31,6 +31,7 @@ capabilities:
   agent.manage: allow             # supervised, permission-inheriting subagents; bounded tree per turn
   artifact.publish: allow         # request-local HTML artifacts and explicit review selections
   media.inspect: allow            # bounded image crop/zoom, with source coordinate mapping
+  media.register: allow           # snapshot explicit videos under ws.work; indexing uses index.build separately
   document.read: allow            # bounded PDF examination and durable chat file inspection/memory
   sandbox.run: allow              # Docker only; code.run stays blocked on the host
   sandbox.network: allow          # opt-in public HTTP(S) proxy; no private/host destinations or vendor keys

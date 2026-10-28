@@ -69,7 +69,7 @@ def prepare(ws, spec: JobInput, job_id: str) -> dict:
             raise ValueError('Set a source placement inside the larger output canvas to outpaint.')
         public['place'] = [(W - w) // 2, (H - h) // 2, w, h]
     return {'input': public, 'prepared': {'inputs': inputs, 'mask': mask},
-            'output_folder': folder.parent.relative_to(ws.root).as_posix()}
+            'output_folder': ws.rel(folder.parent)}
 
 
 def worker_environment() -> dict[str, str]:

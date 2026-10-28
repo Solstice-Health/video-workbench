@@ -32,7 +32,7 @@ from vwb.util.procs import ToolError, which
 from vwb.workspace import Workspace
 from vwb.workspace.registry import Registry
 
-COMPOSITOR_VERSION = "2.1"
+COMPOSITOR_VERSION = "2.2"
 
 
 def hex_rgba(value: str | None) -> tuple[int, int, int, int]:
@@ -243,13 +243,13 @@ class Compositor:
                         if span.media == l.source and (span.media, span.src_in, span.src_out) not in self.mattes:
                             arr = matting.matte_span(Path(self.media[span.media]), shas[span.media], span.src_in,
                                                      span.src_out, ws.plates / "mattes",
-                                                     faces=matting.faces_by_frame(self._index(), span.src_in, span.src_out))
+                                                     faces=matting.faces_by_frame(self._index(span.media), span.src_in, span.src_out))
                             self.mattes[(span.media, span.src_in, span.src_out)] = arr
                             self.media_size[span.media] = (arr.shape[1] * 2, arr.shape[2] * 2)
 
-    def _index(self):
-        from vwb.index.store import IndexStore
-        return IndexStore(self.ws.index / "index.sqlite")
+    def _index(self, media: str):
+        from vwb.index.paths import SourceIndexes
+        return SourceIndexes(self.ws).for_media(media)
 
     def plate_path(self, step: Step) -> Path:
         return self.ws.plates / f"{step.plate_id}.mov"
@@ -422,6 +422,8 @@ class Compositor:
             bx, by, bw, bh = (float(v) for v in value_at(l.box, f))
             iw, ih = max(1, int(round(bw))), max(1, int(round(bh)))
             if isinstance(l, VideoLayer):
+                if where is None or l.source != where[0]:
+                    continue
                 tile = self._tile(src, l, f, iw, ih)
                 alpha = self._matte(*where) if (l.matte == "person" and where) else None
                 if alpha is not None:

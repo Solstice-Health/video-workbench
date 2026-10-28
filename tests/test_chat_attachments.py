@@ -111,7 +111,8 @@ def test_orchestrator_keeps_nonvideo_refs_and_video_legacy_behavior(ws, tmp_path
     orchestrator.chat("Follow up", request_id=str(ws.root), attachment_refs=refs, skip_index=True)
     assert len(ws.load().sources) == 1
     assert ws.load().chat[-1].attachments == refs
-    assert messages == ["", "Follow up"]
+    assert [message.split("\n\n[harness]", 1)[0] for message in messages] == ["", "Follow up"]
+    assert all(req.sources[0].ref in message for message in messages)
 
 
 def test_palette_transparency_survives_provider_payload(ws, tmp_path):

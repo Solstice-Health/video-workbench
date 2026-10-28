@@ -24,14 +24,14 @@ from vwb.gen import qa
 from vwb.gen import video as omni
 from vwb.gen.refs import resolve, save_png
 from vwb.index.ocr import agree_key, similar
-from vwb.index.store import IndexStore
+from vwb.index.paths import SourceIndexes, source
 from vwb.media.decode import read_frames
 from vwb.media.frames import contact_sheet, jpeg_bytes
 from vwb.tools.base import Tool, ToolContext, ToolResult, parse_json_arg, schema
 from vwb.util.hashing import new_id
 from vwb.workspace.registry import Registry
 
-REF = {"type": "string", "description": "t:<seconds> or f:<frame> (source frame), or slot:<name>@<rev> (asset; "
+REF = {"type": "string", "description": "source:<media ref>#t=<seconds> or #f=<frame>; t:<seconds>/f:<frame> only with one source; or slot:<name>@<rev> (asset; "
                                         "slot:<name>@<rev>#t=<s> for a frame of a clip)"}
 BOX = {"type": "array", "items": {"type": "number"}, "description": "[x, y, w, h] in the pixels of what it applies to"}
 QUALITY = {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]}
@@ -156,9 +156,11 @@ def _mask_from(ctx: ToolContext, a: dict[str, Any], src_ref: str, shape: tuple[i
     pad = float(spec.get("pad", 6))
     boxes = [list(b) for b in spec.get("boxes", [])]
     if spec.get("text_tracks") or spec.get("blocks"):
-        if not src_ref.startswith(("t:", "f:")):
-            raise ValueError("text_tracks and blocks come from the index, so the source must be a source frame (t: or f:)")
-        st = IndexStore(ctx.ws.index / "index.sqlite")
+        if not src_ref.startswith(("t:", "f:", "source:")):
+            raise ValueError("text_tracks and blocks require a source frame: source:<ref>#t=<seconds> or #f=<frame>.")
+        media = src_ref[7:].partition("#")[0] if src_ref.startswith("source:") else None
+        src = source(ctx.ws, media, require_explicit=True)
+        st = SourceIndexes(ctx.ws).for_media(src.ref)
         for tid in spec.get("text_tracks", []):
             r = st.one("SELECT x, y, w, h FROM text_tracks WHERE id=?", (int(tid),))
             if r:
@@ -402,12 +404,12 @@ def asset_trace(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
 
 def video_matte(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     from vwb.gen import matting
-    src = ctx.ws.load().source()
-    fps = float(IndexStore(ctx.ws.index / "index.sqlite").media()["fps"])
+    src = source(ctx.ws, a.get("media_id"), require_explicit=True)
+    store = SourceIndexes(ctx.ws).for_media(src.ref)
+    fps = float(store.media()["fps"])
     f0, f1 = int(round(float(a["t0"]) * fps)), int(round(float(a["t1"]) * fps))
     if f1 - f0 < 2:
         return ToolResult.error("give a span of at least two frames (t0 < t1, source seconds)")
-    store = IndexStore(ctx.ws.index / "index.sqlite")
     arr = matting.matte_span(Path(src.path), src.sha256, f0, f1, ctx.ws.plates / "mattes",
                              faces=matting.faces_by_frame(store, f0, f1))
     st = matting.stats([arr])
@@ -422,7 +424,7 @@ def video_matte(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
         notes.append("almost no person found in this span")
     if st["flicker"] > 0.02:
         notes.append(f"matte flicker {st['flicker']}: edges may boil; keep the speaker small or add a soft shadow")
-    return ToolResult.json({"span_frames": [f0, f1], "coverage": st["coverage"], "flicker": st["flicker"], "notes": notes,
+    return ToolResult.json({"media": src.ref, "span_frames": [f0, f1], "coverage": st["coverage"], "flicker": st["flicker"], "notes": notes,
                             "use": "A video layer with matte='person' shows only the people of the source, in sync with "
                                    "the time map (this span is now cached; uncached spans are matted at render)."},
                            images=[jpeg_bytes(qa.preview(shown, height=360))])
@@ -529,7 +531,8 @@ TOOLS = [
     Tool("video_matte", "Cut the people out of the source footage between t0 and t1 (source seconds) with a video "
          "matting model, cache it and preview it (coverage and flicker measured). Then a video layer with "
          "matte='person' shows the speaker without their background, in sync with the narration, on a designed page.",
-         schema({"t0": {"type": "number"}, "t1": {"type": "number"}}, ["t0", "t1"]), video_matte, "gen.image", "gen"),
+         schema({"t0": {"type": "number"}, "t1": {"type": "number"},
+                 "media_id": {"type": "string", "description": "Source ID/ref, required when multiple videos are registered."}}, ["t0", "t1"]), video_matte, "gen.image", "gen"),
     Tool("asset_view", "Look at a registry asset: a still on a checkerboard (alpha visible) or six frames of a clip, with "
          "its provenance, lineage and measurements.", schema({"ref": {"type": "string"}}, ["ref"]), asset_view, "tool", "gen"),
 ]

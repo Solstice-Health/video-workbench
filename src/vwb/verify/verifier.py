@@ -16,6 +16,7 @@ from typing import Any
 from vwb.canvas.model import Canvas, ClipLayer, ImageLayer, ShapeLayer, TextLayer, VideoLayer
 from vwb.canvas.store import CanvasStore
 from vwb.config import lever, lever_serves, load_profile
+from vwb.index.paths import SourceIndexes, store_for
 from vwb.index.store import IndexStore
 from vwb.qc import inspect, lint
 from vwb.qc.findings import Finding
@@ -29,26 +30,48 @@ from vwb.workspace import Workspace, flags
 from vwb.workspace.ledger import Ledger, sign
 from vwb.workspace.registry import Registry
 
-VERIFIER_VERSION = "1.0"
+VERIFIER_VERSION = "1.1"
 
 
-def standing_findings(ws: Workspace, canvas: Canvas, store: IndexStore) -> list[Finding]:
+def _asset_sources(ws: Workspace, ref: str, seen: set[str] | None = None) -> set[str]:
+    """Follow explicit source provenance; local frame/track numbers alone are ambiguous."""
+    seen = seen if seen is not None else set()
+    if ref in seen or len(seen) >= 64:
+        return set()
+    seen.add(ref)
+    row = Registry(ws.assets).get(ref)
+    refs = set()
+    for item in json.loads(row["derived_from"]):
+        if item.get("media"):
+            refs.add(item["media"])
+        elif item.get("kind") == "asset" and item.get("ref"):
+            refs.update(_asset_sources(ws, item["ref"], seen))
+    return refs
+
+
+def standing_findings(ws: Workspace, canvas: Canvas, store: SourceIndexes | IndexStore) -> list[Finding]:
     """Rules that hold for this output whatever the render looks like."""
     out: list[Finding] = []
-    hz = store.all("SELECT * FROM hazards WHERE status='fact'")
+    refs = set(s.media for s in canvas.time_map)
+    refs.update(c.source["media"] for c in canvas.copy_deck if c.source.get("media"))
+    for layer in canvas.layers:
+        if isinstance(layer, (ImageLayer, ClipLayer)) or isinstance(layer, ShapeLayer) and layer.asset:
+            refs.update(_asset_sources(ws, layer.asset))
+    hz = [{**h, "media": ref} for ref in sorted(refs)
+          for h in store_for(store, ref).all("SELECT * FROM hazards WHERE status='fact'")]
     usage = [h for h in hz if h["kind"] == "usage_terms"]
     if usage:
         quote = max((h["quote"] or h["text"] for h in usage), key=len)
         out.append(Finding("rule.source_terms", "fail", "SOURCE-TERMS",
                            "The source says it is for US healthcare professionals and must be viewed in its entirety; "
                            "an excerpt for a public channel may break those terms. Needs a Regulatory Affairs ruling.",
-                           {"quote": quote, "where": [{"t0": fmt(h["t0"]), "t1": fmt(h["t1"])} for h in usage]},
+                           {"quote": quote, "where": [{"media": h["media"], "t0": fmt(h["t0"]), "t1": fmt(h["t1"])} for h in usage]},
                            bumps=["regulated"], tier="rule"))
     codes = sorted({h["text"] for h in hz if h["kind"] == "job_code"})
     if codes:
         out.append(Finding("rule.job_code", "fail", "REG-RULE",
                            f"The source carries job code {codes[0]}. A derivative needs its own code from MLR; this output "
-                           "shows none.", {"source_codes": codes}, tier="rule"))
+                           "shows none.", {"source_codes": codes, "media": sorted({h["media"] for h in hz if h["kind"] == "job_code"})}, tier="rule"))
     out += asset_findings(ws, canvas)
     copy = canvas.copy_deck
     retyped = [c for c in copy if c.role != "caption" and c.source.get("kind") == "ocr"]
@@ -182,7 +205,7 @@ def verify(ws: Workspace, output: str, version: int | None = None, actor: str = 
         raise RuntimeError(f"{output} v{canvas.version} has no render; render it before verifying")
     mp4 = Path(receipt["file"])
     profile = load_profile(canvas.profile)
-    index = IndexStore(ws.index / "index.sqlite")
+    index = SourceIndexes(ws)
     findings: list[Finding] = []
     findings += lint.lint(mp4, canvas.length, profile)
     findings += inspect.declared(canvas, index, profile, ws=ws)

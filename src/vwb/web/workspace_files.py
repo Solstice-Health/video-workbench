@@ -99,7 +99,11 @@ def _open(ws: Workspace, parts: tuple[str, ...], *, directory: bool) -> Iterator
     descriptors: list[int] = []
     try:
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY
-        descriptors.append(os.open(ws.root, flags))
+        # Only the public work subtree is shared. Private state and other roots
+        # remain scoped to the conversation, with no filesystem symlink bridge.
+        root = ws.work if parts and parts[0] == "work" else ws.root
+        parts = parts[1:] if parts and parts[0] == "work" else parts
+        descriptors.append(os.open(root, flags))
         for index, part in enumerate(parts):
             last = index == len(parts) - 1
             child_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK

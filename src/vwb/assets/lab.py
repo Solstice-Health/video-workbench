@@ -10,7 +10,6 @@ Every recovered mark still raises NEEDS-SOURCE:logo until a master file is uploa
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 import cv2
@@ -18,7 +17,7 @@ import numpy as np
 from PIL import Image
 
 from vwb.index.layout import background_color
-from vwb.index.store import IndexStore
+from vwb.index.paths import SourceIndexes, source
 from vwb.media.decode import read_frames
 from vwb.workspace import Workspace
 from vwb.workspace.registry import Registry
@@ -45,13 +44,12 @@ def _key(crop: np.ndarray) -> tuple[np.ndarray, list[int]]:
     return rgba, bg.tolist()
 
 
-def recover_mark(ws: Workspace, mark_id: int, slot: str | None = None, pad: float = 0.18) -> dict[str, Any]:
-    store = IndexStore(ws.index / "index.sqlite")
+def recover_mark(ws: Workspace, mark_id: int, slot: str | None = None, pad: float = 0.18, *, media_id: str | None = None) -> dict[str, Any]:
+    src = source(ws, media_id, require_explicit=True)
+    store = SourceIndexes(ws).for_media(src.ref)
     mark = store.one("SELECT * FROM marks WHERE id=?", (mark_id,))
     if mark is None:
         raise KeyError(f"No mark {mark_id}")
-    req = ws.load()
-    src = req.source()
     if mark["best_frame"] is not None and mark["best_box"]:
         frame_idx, box = int(mark["best_frame"]), json.loads(mark["best_box"])
         rung = "asset_lab.rung0"
@@ -86,7 +84,7 @@ def recover_mark(ws: Workspace, mark_id: int, slot: str | None = None, pad: floa
     keyed_path = tmp_dir / f"{slot}-keyed.png"
     Image.fromarray(keyed, "RGBA").save(keyed_path)
     sharp = float(cv2.Laplacian(cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY), cv2.CV_64F).var())
-    derived = [{"media": src.ref, "frame": frame_idx, "box": [x0, y0, x1 - x0, y1 - y0], "fused_frames": len(same)}]
+    derived = [{"kind": "source_frame", "media": src.ref, "frame": frame_idx, "box": [x0, y0, x1 - x0, y1 - y0], "fused_frames": len(same)}]
     fit = {"native_size": [ww, hh], "sharpness": round(sharp, 1), "bound": None,
            "note": "no bound until X06 reports (spec D16)"}
     reg = Registry(ws.assets)
@@ -94,5 +92,5 @@ def recover_mark(ws: Workspace, mark_id: int, slot: str | None = None, pad: floa
                              notes=f"mark {mark_id} '{mark['name']}' on its own background, rounded")
     keyed_ref = reg.register(keyed_path, slot=f"{slot}-keyed", kind="mark.keyed", receipt=rung, derived_from=derived,
                              fit={**fit, "key_bg": bg}, notes="background-keyed variant (edges estimated)")
-    return {"slot": slot, "badge": badge_ref, "keyed": keyed_ref, "rung": rung, "frame": frame_idx,
+    return {"media": src.ref, "slot": slot, "badge": badge_ref, "keyed": keyed_ref, "rung": rung, "frame": frame_idx,
             "native_size": [ww, hh], "fused_frames": len(same), "name": mark["name"]}

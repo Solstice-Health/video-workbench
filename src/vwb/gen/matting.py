@@ -20,7 +20,7 @@ from vwb.media.decode import FrameReader
 
 MODEL_URL = "https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/rvm_mobilenetv3_fp32.onnx"
 MODEL = Path.home() / ".cache" / "vwb" / "models" / "rvm_mobilenetv3_fp32.onnx"
-VERSION = "rvm-mbv3-2"
+VERSION = "rvm-mbv3-3"  # source-specific face guidance; invalidate masks made with another source's index
 _lock = threading.Lock()
 _session = None
 

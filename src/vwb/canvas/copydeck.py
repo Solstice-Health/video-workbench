@@ -15,6 +15,8 @@ from filelock import FileLock
 
 from vwb.canvas.model import CopyEntry
 from vwb.index.ocr import CLAIM_HINT
+from vwb.index.paths import SourceIndexes
+from vwb.index.paths import source as selected_source
 from vwb.index.store import IndexStore
 from vwb.util.hashing import sha256_json
 from vwb.util.jsonio import read_json, write_json
@@ -57,10 +59,10 @@ def _save(ws: Workspace, entry: CopyEntry) -> CopyEntry:
     return entry
 
 
-def _regulated(store: IndexStore, text: str, f0: int | None = None, f1: int | None = None) -> bool:
+def _regulated(store: IndexStore | None, text: str, f0: int | None = None, f1: int | None = None) -> bool:
     if CLAIM_HINT.search(text):
         return True
-    if f0 is not None and f1 is not None:
+    if store is not None and f0 is not None and f1 is not None:
         hit = store.one("SELECT COUNT(*) AS n FROM hazards WHERE kind LIKE 'claim%' AND f0 < ? AND f1 > ?", (f1, f0))
         return bool(hit and hit["n"])
     return False
@@ -68,12 +70,14 @@ def _regulated(store: IndexStore, text: str, f0: int | None = None, f1: int | No
 
 def mint(ws: Workspace, *, copy_id: str, role: str, source: str, shot: int | None = None,
          tracks: list[int] | None = None, sentences: list[int] | None = None, text: str | None = None,
-         note: str | None = None) -> CopyEntry:
-    store = IndexStore(ws.index / "index.sqlite")
+         note: str | None = None, media_id: str | None = None) -> CopyEntry:
+    store = None
     req = ws.load()
     if not req.sources and source != "authored":
         raise ValueError("No source video is attached. Use authored copy with a note citing the Figma file/node or brief; it remains unverified.")
-    media = req.source().ref if req.sources else None
+    media = selected_source(ws, media_id, require_explicit=True).ref if source != "authored" else None
+    if media:
+        store = SourceIndexes(ws).for_media(media)
     if source == "shot_title":
         rows = store.all("SELECT * FROM text_tracks WHERE shot=? AND role='title' ORDER BY y, x", (shot,))
         if not rows:
@@ -102,6 +106,8 @@ def mint(ws: Workspace, *, copy_id: str, role: str, source: str, shot: int | Non
             raise ValueError("give sentence ids")
         words = store.all(f"SELECT * FROM words WHERE sentence IN ({','.join('?' * len(sentences))}) ORDER BY i",
                           tuple(sentences))
+        if not words:
+            raise ValueError("No transcript words for those sentence IDs in the selected source.")
         raw = " ".join(w["text"] for w in words)
         alts = [f"{w['text']}→{w['alt']}" for w in words if not w["agree"] and w["alt"] is not None]
         entry = CopyEntry(id=copy_id, text=raw, role=role,
