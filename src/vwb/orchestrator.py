@@ -51,15 +51,30 @@ def ensure_review(ws: Workspace) -> list[dict[str, Any]]:
     return done
 
 
-def _turn_lock(ws: Workspace) -> FileLock:
+class _TurnLocks:
+    def __init__(self, locks: list[FileLock]):
+        self.locks = locks
+
+    def release(self) -> None:
+        for lock in reversed(self.locks):
+            lock.release()
+
+
+def _turn_lock(ws: Workspace) -> _TurnLocks:
     """One turn at a time per conversation: a message sent while the main agent is still answering is refused."""
-    lock = FileLock(str(ws.root / "turn.lock"))
+    paths = [ws.root / "turn.lock"]
+    if ws.project_root:
+        paths.append(ws.project_root / "turn.lock")
+    locks = []
     try:
-        lock.acquire(timeout=0)
+        for path in sorted(paths):
+            lock = FileLock(str(path))
+            lock.acquire(timeout=0)
+            locks.append(lock)
     except Timeout:
-        raise SystemExit(f"{ws.id}: the main agent is still answering the last message; send this one when it "
-                         "replies.") from None
-    return lock
+        _TurnLocks(locks).release()
+        raise SystemExit(f"{ws.id}: a conversation or project turn is still running; queue this message until it finishes.") from None
+    return _TurnLocks(locks)
 
 
 def chat(message: str, attach: list[Path] | None = None, request_id: str | None = None,

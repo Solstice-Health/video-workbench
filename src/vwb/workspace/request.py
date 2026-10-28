@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,7 @@ class JobSpec(BaseModel):
 
 
 class ChatTurn(BaseModel):
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     role: str                     # human | job_lead
     text: str
     context: dict[str, list[str]] = Field(default_factory=dict)
@@ -80,6 +82,8 @@ class Request(BaseModel):
     status: str = "open"          # open | working | in_review | accepted
     chat: list[ChatTurn] = Field(default_factory=list)
     outputs: list[str] = Field(default_factory=list)  # output ids, in order
+    project_id: str | None = None
+    history_revision: int = 0
 
     def source(self, media_id: str | None = None) -> SourceRef:
         if not self.sources:
@@ -104,9 +108,24 @@ class Workspace:
 
     # ---- paths ----
     def __getattr__(self, name: str) -> Path:
+        if name == "work":
+            project = self.project_root
+            return project / "work" if project else self.root / "work"
         if name in SUBDIRS:
             return self.root / name
         raise AttributeError(name)
+
+    @property
+    def project_root(self) -> Path | None:
+        from vwb.workspace.projects import workspace_project
+        return workspace_project(self)
+
+    def path(self, relative: str | Path) -> Path:
+        """Map a logical public work path; callers still enforce path policy."""
+        path = Path(relative)
+        if path.parts and path.parts[0] == "work":
+            return self.work.joinpath(*path.parts[1:])
+        return self.root / path
 
     @property
     def request_path(self) -> Path:
@@ -165,9 +184,18 @@ class Workspace:
 
     # ---- request record ----
     def load(self) -> Request:
-        return Request.model_validate(read_json(self.request_path))
+        data = read_json(self.request_path)
+        # Deterministic legacy identities survive reads until the next normal save.
+        for index, turn in enumerate(data.get("chat", [])):
+            if not turn.get("id"):
+                turn["id"] = uuid.uuid5(uuid.NAMESPACE_URL, f"vwb:{data['id']}:{index}:{turn.get('ts', '')}:{turn.get('role', '')}").hex
+        return Request.model_validate(data)
 
     def save(self, req: Request) -> None:
+        if self.request_path.exists():
+            previous = self.load()
+            if previous.chat != req.chat:
+                req.history_revision = max(req.history_revision, previous.history_revision + 1)
         write_json(self.request_path, req.model_dump(mode="json"))
 
     def update(self, **changes: Any) -> Request:
@@ -184,7 +212,10 @@ class Workspace:
         self.save(req)
 
     def rel(self, path: Path | str) -> str:
+        resolved = Path(path).resolve()
+        if self.project_root and resolved.is_relative_to(self.work.resolve()):
+            return (Path("work") / resolved.relative_to(self.work.resolve())).as_posix()
         try:
-            return str(Path(path).resolve().relative_to(self.root.resolve()))
+            return str(resolved.relative_to(self.root.resolve()))
         except ValueError:
             return str(path)

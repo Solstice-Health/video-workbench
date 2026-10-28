@@ -43,15 +43,15 @@ PLATE_TYPES = (TextLayer, CaptionsLayer, ShapeLayer)
 
 
 def working_path(ws: Workspace, output: str) -> Path:
-    return checked_path(ws.root, "work", "outputs", output_id(output), "canvas.json")
+    return checked_path(ws.work, "outputs", output_id(output), "canvas.json")
 
 
 def load_working(ws: Workspace, output: str) -> Canvas:
-    data = read_record(ws.root, "work", "outputs", output_id(output), "canvas.json")
+    data = read_record(ws.work, "outputs", output_id(output), "canvas.json")
     if data is None:
         raise FileNotFoundError(f"no working canvas for {output}; create it with canvas_new")
     req = ws.load()
-    data.setdefault("request", req.id)
+    data["request"] = req.id
     data["output"] = output
     data.setdefault("profile", "youtube_shorts")
     if "format" not in data:
