@@ -101,6 +101,29 @@ class TurnQueue:
         lock.release()
         return False
 
+    def _project_busy(self, ws: Workspace) -> bool:
+        """Serialize editor conversations sharing work/, without claiming their turn.
+
+        The process map covers the gap between spawning a worker and its acquiring
+        the project lock. The lock also covers turns launched outside this server.
+        This is a dispatch gate only: Stop/Send now still target this conversation.
+        """
+        project = getattr(ws, "project_root", None)
+        if project is None:
+            return False
+        project = Path(project).resolve()
+        if any(rid != ws.id and getattr(self.workspaces[rid], "project_root", None) is not None
+               and Path(self.workspaces[rid].project_root).resolve() == project
+               for rid in self.processes):
+            return True
+        lock = FileLock(str(project / "turn.lock"))
+        try:
+            lock.acquire(timeout=0)
+        except Timeout:
+            return True
+        lock.release()
+        return False
+
     def snapshot(self, ws: Workspace) -> dict[str, Any]:
         with self.lock:
             state = self._state(ws)
@@ -128,7 +151,7 @@ class TurnQueue:
                 attachments: list[str] | None = None, attachment_refs: list[dict[str, Any]] | None = None,
                 skip_index: bool = True,
                 context: dict[str, list[str]] | None = None, main_config: dict[str, Any] | None = None,
-                idempotency_key: str | None = None) -> dict[str, Any]:
+                idempotency_key: str | None = None, turn_lock_held: bool = False) -> dict[str, Any]:
         from vwb.workspace.references import validate
         context = validate(context, ws)
         from vwb.workspace.attachments import validate_refs
@@ -156,7 +179,7 @@ class TurnQueue:
                     if previous.get("submission_digest") != signature:
                         raise QueueConflict("This submission key already belongs to a different message.")
                     return dict(previous)
-            if mode == "now" and ws.id not in self.processes and self._external_turn(ws):
+            if mode == "now" and not turn_lock_held and ws.id not in self.processes and self._external_turn(ws):
                 raise QueueConflict("This turn was started outside the UI. Stop it in its terminal, or queue your message.")
             job = {"id": uuid.uuid4().hex, "kind": kind, "message": message.strip(), "status": "queued",
                    "created_at": now_iso(), "attachments": attachments or [], "attachment_refs": attachment_refs, "skip_index": skip_index,
@@ -204,6 +227,31 @@ class TurnQueue:
             self._interrupt(ws)
             self._save(ws)
             return self.snapshot(ws)
+
+    def submitted(self, ws: Workspace, idempotency_key: str) -> dict | None:
+        """Recover an accepted submission even while it is active or paused."""
+        with self.lock:
+            job = next((job for job in self._state(ws)["jobs"] if job.get("idempotency_key") == idempotency_key), None)
+            return dict(job) if job else None
+
+    def reset(self, ws: Workspace, *, turn_lock_held: bool = False) -> None:
+        """Forget queued jobs and resume links after an explicit history rewind.
+
+        Rewind callers must hold their mutation/turn locks across the history edit
+        and this reset. Pass turn_lock_held=True only when holding this workspace's
+        turn.lock; otherwise this method checks for a terminal-owned turn itself.
+        Worker receipts remain on disk for diagnostics, but cannot launch work.
+        """
+        with self.lock:
+            if self.closed.is_set():
+                raise QueueConflict("The UI server is shutting down.")
+            state = self._state(ws)
+            if (ws.id in self.processes
+                    or any(j["status"] in {"running", "stopping"} for j in state["jobs"])
+                    or not turn_lock_held and self._external_turn(ws)):
+                raise QueueConflict("Stop the active turn before resetting its queue.")
+            state.update(jobs=[], paused=True)
+            self._save(ws)
 
     def resume(self, ws: Workspace, *, job_id: str | None = None,
                main_config: dict[str, Any] | None = None,
@@ -342,7 +390,7 @@ class TurnQueue:
                         self._signal_group(proc, signal.SIGKILL if elapsed > 35 else signal.SIGTERM)
                 if not proc and not state["paused"] and not self.closed.is_set():
                     job = next((j for j in state["jobs"] if j["status"] == "queued"), None)
-                    if job and not self._external_turn(ws):
+                    if job and not self._external_turn(ws) and not self._project_busy(ws):
                         try:
                             self._start(ws, job)
                         except Exception as exc:

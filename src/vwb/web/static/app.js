@@ -6,6 +6,7 @@ import {IntegrationsControl} from './integrations-control.js';
 import {COMPACT_WIDTH, paneLayout, panePreferences} from './pane-layout.js';
 import {LocalImportDialog, localPath} from './local-import-control.js';
 import {QCPanel} from './qc-panel.js';
+import {ProjectNavigation, MessageActions, HistoryDialog} from './conversation-controls.js';
 
 // Eeva and React are local, versioned assets. No network service is needed to open the UI.
 const {createElement, useState, useEffect, useRef, useCallback, useMemo} = window.React;
@@ -102,6 +103,13 @@ export function coalesceEvents(...batches) {
 }
 
 export function mergeEventPage(before, page, {older = false, snapshot = false} = {}) {
+  const epoch = page.history_epoch ?? before?.history_epoch ?? 0;
+  if (before && epoch < (before.history_epoch ?? 0)) return before;
+  if (before && epoch > (before.history_epoch ?? 0)) {
+    // Event sequence numbers restart after a history change. A reset response
+    // is a fresh snapshot even when the request asked for an older page.
+    before = null; older = false; snapshot = true;
+  }
   const events = page.events?.length ? coalesceEvents(before?.events, page.events) : before?.events || [];
   if (older) return {...before, events, events_before: page.events_before,
     events_has_more: !!page.events_has_more};
@@ -256,7 +264,7 @@ export function ContextUsage({usage, active, pending, compact, busy}) {
   </div>`;
 }
 
-function QuestionQueue({questions, index, setIndex, answer, setAnswer, hidden, setHidden}) {
+export function QuestionQueue({questions, index, setIndex, answer, setAnswer, hidden, setHidden, answering, onMode}) {
   if (!questions.length) return null;
   const q = questions[Math.min(index, questions.length - 1)];
   return html`<section className="question-queue" aria-label="Questions from the agent">
@@ -266,6 +274,10 @@ function QuestionQueue({questions, index, setIndex, answer, setAnswer, hidden, s
         <${IconButton} name="chevron-left" label="Previous question" disabled=${index === 0} onClick=${() => setIndex(index - 1)}/>
         <${IconButton} name="chevron-right" label="Next question" disabled=${index >= questions.length - 1} onClick=${() => setIndex(index + 1)}/></div></div>
     ${!hidden && html`<h3>${q.question}</h3>${q.why && html`<p className="question-why">${q.why}</p>`}
+      <div role="group" aria-label="Composer purpose" className="question-options">
+        <button className=${`question-option ${answering ? 'selected' : ''}`} aria-pressed=${answering} onClick=${() => onMode('answer')}>Answer question</button>
+        <button className=${`question-option ${!answering ? 'selected' : ''}`} aria-pressed=${!answering} onClick=${() => onMode('message')}>New instruction</button>
+      </div>
       ${q.status === 'defaulted' && html`<p className="caption">The agent used its recommended option while waiting. You can change it.</p>`}
       ${questionWaiting(q) && html`<p className="caption">Your answer resumes the waiting agent. Other helpers can keep working.</p>`}
       <div role="group" aria-label=${q.question} className="question-options">
@@ -277,8 +289,15 @@ function QuestionQueue({questions, index, setIndex, answer, setAnswer, hidden, s
   </section>`;
 }
 
-function questionWaiting(q) {
+export function questionWaiting(q) {
   return q?.status === 'open' && Object.values(q.waiters || {}).some(w => w.expires_at * 1000 > Date.now());
+}
+
+export function SteeringAction({active, answering, waiting, disabled, onSend}) {
+  if (!(answering && waiting) && (!active || active.can_stop === false)) return null;
+  return html`<button className="send-now" disabled=${disabled} onClick=${onSend}
+    title=${answering && waiting ? 'Resume the waiting agent with this answer' : `Stop the current turn and continue with your ${answering ? 'answer' : 'instruction'}`}>
+    ${answering ? 'Answer now' : 'Send now'} <${Icon} name="arrow-up" size=${12}/></button>`;
 }
 
 function OutputPanel({data, outputId, setOutputId, notice, onClose}) {
@@ -309,6 +328,8 @@ function OutputPanel({data, outputId, setOutputId, notice, onClose}) {
 
 function App() {
   const [requests, setRequests] = useState([]), [selected, setSelected] = useState(null), [data, setData] = useState(null);
+  const [projects, setProjects] = useState([]), [historyAction, setHistoryAction] = useState(null), [historyError, setHistoryError] = useState('');
+  const projectKeys = useRef(new Map()), historyKeys = useRef(new Map());
   const [text, setText] = useState(''), [drafts, setDrafts] = useState({}), [uploads, setUploads] = useState([]);
   const [references, setReferences] = useState([]), [features, setFeatures] = useState({skills: [], folders: [], files: []});
   const [picker, setPicker] = useState(null), [pickIndex, setPickIndex] = useState(0), [featuresLoading, setFeaturesLoading] = useState(false);
@@ -349,10 +370,12 @@ function App() {
     onPointerUp=${finishResize} onPointerCancel=${finishResize} onLostPointerCapture=${() => {paneDrag.current=null; setResizingPane(null);}}></div>`;
   useEffect(() => {try {localStorage.setItem('vwb-pane-sizes', JSON.stringify(paneSizes));} catch (_) {}}, [paneSizes]);
   const [qIndex, setQIndex] = useState(0), [answers, setAnswers] = useState({}), [questionDrafts, setQuestionDrafts] = useState({}), [questionsHidden, setQuestionsHidden] = useState(false);
+  const [questionModes, setQuestionModes] = useState({});
   const [query, setQuery] = useState(''), [compactBusy, setCompactBusy] = useState(false), [isNearBottom, setIsNearBottom] = useState(true);
   const [historyBusy, setHistoryBusy] = useState(false), [visibleMessages, setVisibleMessages] = useState(40);
   const csrf = useRef(''), selection = useRef(null), feed = useRef(null), fileInput = useRef(null), composer = useRef(null);
   const snapshot = useRef(null), pollCount = useRef(0), historyPending = useRef(false);
+  const eventGeneration = useRef(0);
   const resumePending = useRef(false);
   const [narrow, setNarrow] = useState(() => window.innerWidth < COMPACT_WIDTH);
   const [mobile, setMobile] = useState(() => window.innerWidth < 640);
@@ -375,27 +398,48 @@ function App() {
     if (!res.ok) throw new Error(result.error || result.detail || `Request failed (${res.status}). Try again.`);
     return result;
   }, []);
+  const invalidateHistory = useCallback(() => {
+    eventGeneration.current++;
+    snapshot.current = null; setData(null);
+    historyPending.current = false; setHistoryBusy(false);
+  }, []);
+  const acceptEventPage = useCallback((id, generation, page, options = {}) => {
+    if (selection.current !== id || eventGeneration.current !== generation) return null;
+    const before = snapshot.current, epoch = before?.history_epoch ?? 0;
+    if ((page.history_epoch ?? epoch) < epoch) return null;
+    const reset = !!before && (page.history_epoch ?? epoch) > epoch;
+    if (reset) {
+      // Invalidate outstanding refreshes and older-page requests in this tab.
+      eventGeneration.current++;
+      historyPending.current = false; setHistoryBusy(false);
+    }
+    const merged = mergeEventPage(before, page, options);
+    snapshot.current = merged; setData(merged);
+    return {reset, snapshot: merged};
+  }, []);
   const refresh = useCallback(async id => {
     if (!id) return;
+    const generation = eventGeneration.current;
     const metadataOnly = selection.current === id && !!snapshot.current;
-    const result = await api(`/api/requests/${encodeURIComponent(id)}${metadataOnly ? '?events=0' : ''}`);
-    if (selection.current === id) {
-      const merged = mergeEventPage(snapshot.current, result, {snapshot: !metadataOnly});
-      snapshot.current = merged; setData(merged);
+    const query = metadataOnly ? `?events=0&history_epoch=${snapshot.current.history_epoch ?? 0}` : '';
+    try {
+      const result = await api(`/api/requests/${encodeURIComponent(id)}${query}`);
+      if (acceptEventPage(id, generation, result, {snapshot: !metadataOnly})) return result;
+    } catch (error) {
+      if (selection.current === id && eventGeneration.current === generation) throw error;
     }
-    return result;
-  }, [api]);
-  const choose = useCallback(id => {
-    if (busy || importPending || (id && id === selection.current)) return;
+  }, [api, acceptEventPage]);
+  const choose = useCallback((id, force = false) => {
+    if ((!force && busy) || importPending || (id && id === selection.current)) return;
     setDrafts(prev => ({...prev, [selection.current || 'new']: {text, uploads, references}}));
     setReferences(drafts[id || 'new']?.references || []); setPicker(null);
     setText(drafts[id || 'new']?.text || ''); setUploads(drafts[id || 'new']?.uploads || []); selection.current = id;
-    setSelected(id); setMobileView('chat'); setChatShown(true); setData(null); setError(''); setInfo(''); setQIndex(0); setOutputId(null); setSidebar(false);
-    snapshot.current = null; setIsNearBottom(true);
+    setSelected(id); setMobileView('chat'); setChatShown(true); setData(null); setError(''); setInfo(''); setQIndex(0); setOutputId(null); setSidebar(false); setHistoryAction(null);
+    invalidateHistory(); setIsNearBottom(true);
     setVisibleMessages(40); setHistoryBusy(false); historyPending.current = false;
     if (id) {location.hash = id; setLoading(true); refresh(id).catch(e => setError(e.message)).finally(() => setLoading(false));}
     else {history.replaceState(null, '', location.pathname); setLoading(false); composer.current?.focus();}
-  }, [text, uploads, references, drafts, refresh, busy, importPending]);
+  }, [text, uploads, references, drafts, refresh, busy, importPending, invalidateHistory]);
   const featureQuery = picker?.kind === 'path' ? picker.query : '';
   useEffect(() => {
     let live = true;
@@ -416,6 +460,7 @@ function App() {
       const bootstrap = await api('/api/bootstrap'); csrf.current = bootstrap.csrf_token;
       const result = await api('/api/requests'); if (!live) return;
       setRequests(result.requests || []);
+      setProjects(result.projects || []);
       const hash = decodeURIComponent(location.hash.slice(1));
       const id = result.requests?.find(r => r.id === hash)?.id || result.requests?.[0]?.id;
       if (id) {selection.current = id; setSelected(id); await refresh(id);}
@@ -427,41 +472,41 @@ function App() {
     let live = true, timer, catchingUp = false;
     const controller = new AbortController();
     const poll = async () => {
+      const generation = eventGeneration.current;
       try {
         if (!document.hidden) {
           pollCount.current++;
           if (selected && selection.current === selected && snapshot.current) {
             const before = snapshot.current;
-            const next = await api(`/api/requests/${encodeURIComponent(selected)}/events?after=${before.cursor || 0}`, {signal: controller.signal});
+            const next = await api(`/api/requests/${encodeURIComponent(selected)}/events?after=${before.cursor || 0}&history_epoch=${before.history_epoch ?? 0}`, {signal: controller.signal});
             if (live && selection.current === selected) {
-              const merged = mergeEventPage(snapshot.current, next);
-              snapshot.current = merged; setData(merged);
-              catchingUp = !!next.events_after_has_more;
-              if (before?.active?.id !== next.active?.id || before?.last_job?.id !== next.last_job?.id || pollCount.current % 8 === 0) await refresh(selected);
+              const accepted = acceptEventPage(selected, generation, next);
+              catchingUp = !!accepted && !!next.events_after_has_more;
+              if (accepted && (before?.active?.id !== next.active?.id || before?.last_job?.id !== next.last_job?.id || pollCount.current % 8 === 0)) await refresh(selected);
             }
-          }
-          if (pollCount.current % 4 === 0) {const result = await api('/api/requests', {signal: controller.signal}); if (live) setRequests(result.requests || []);}
+          } else if (selected && selection.current === selected) await refresh(selected);
+          if (pollCount.current % 4 === 0) {const result = await api('/api/requests', {signal: controller.signal}); if (live) {setRequests(result.requests || []); setProjects(result.projects || []);}}
           if (live) setError(previous => previous.startsWith('Connection interrupted.') ? '' : previous);
         } else catchingUp = false;
-      } catch (e) {if (live) setError(`Connection interrupted. Retrying automatically. ${e.message}`);}
+      } catch (e) {if (live && selection.current === selected && eventGeneration.current === generation) setError(`Connection interrupted. Retrying automatically. ${e.message}`);}
       if (live) timer = setTimeout(poll, catchingUp ? 200 : 1800);
     };
     timer = setTimeout(poll, 1800);
     return () => {live = false; clearTimeout(timer); controller.abort();};
-  }, [selected, api, refresh]);
+  }, [selected, api, refresh, acceptEventPage]);
   const loadEarlierActivity = async () => {
     const id = selection.current, before = snapshot.current?.events_before;
     if (!id || !before || historyPending.current) return;
+    const generation = eventGeneration.current, epoch = snapshot.current.history_epoch ?? 0;
     historyPending.current = true; setHistoryBusy(true); setIsNearBottom(false);
     const height = feed.current?.scrollHeight || 0, top = feed.current?.scrollTop || 0;
     try {
-      const page = await api(`/api/requests/${encodeURIComponent(id)}/events?before=${before}&limit=300`);
-      if (selection.current !== id) return;
-      const merged = mergeEventPage(snapshot.current, page, {older: true});
-      snapshot.current = merged; setData(merged);
-      requestAnimationFrame(() => {if (selection.current === id && feed.current) feed.current.scrollTop = top + feed.current.scrollHeight - height;});
-    } catch (error) {if (selection.current === id) setError(`Earlier activity could not be loaded. ${error.message}`);}
-    finally {if (selection.current === id) {historyPending.current = false; setHistoryBusy(false);}}
+      const page = await api(`/api/requests/${encodeURIComponent(id)}/events?before=${before}&limit=300&history_epoch=${epoch}`);
+      const accepted = acceptEventPage(id, generation, page, {older: true});
+      if (!accepted || accepted.reset) return;
+      requestAnimationFrame(() => {if (selection.current === id && eventGeneration.current === generation && feed.current) feed.current.scrollTop = top + feed.current.scrollHeight - height;});
+    } catch (error) {if (selection.current === id && eventGeneration.current === generation) setError(`Earlier activity could not be loaded. ${error.message}`);}
+    finally {if (selection.current === id && eventGeneration.current === generation) {historyPending.current = false; setHistoryBusy(false);}}
   };
   useEffect(() => {
     if (!selected) return;
@@ -507,8 +552,9 @@ function App() {
     .map(message => [message, blocks(message.text)])), [data?.request?.chat]);
   const questions = (data?.asks || []).filter(q => ['open', 'defaulted'].includes(q.status));
   const question = questions[Math.min(qIndex, questions.length - 1)];
-  const answer = question && !questionsHidden ? answers[question.id] : null;
-  const answering = !!question && !questionsHidden;
+  const answering = !!question && !questionsHidden && questionModes[question.id] !== 'message';
+  const answer = answering ? answers[question.id] : null;
+  const waitingForAnswer = answering && questionWaiting(question);
   const composerText = answering ? questionDrafts[question.id] || '' : text;
   const syncPicker = (value = composerText, caret = composer.current?.selectionStart ?? value.length) => {
     setPicker(answering ? null : triggerAt(value, caret)); setPickIndex(0);
@@ -539,7 +585,7 @@ function App() {
     const raw = event.dataTransfer.getData('application/x-vwb-workspace-file');
     if (!raw) return false;
     event.preventDefault();
-    if (answering) {setError('Collapse the question to reference workspace files in a message.'); return true;}
+    if (answering) {setError('Choose New instruction to reference workspace files in a message.'); return true;}
     const option = workspaceReference(raw, selected);
     if (!option) {setError('Choose a file or folder inside this conversation’s work/ workspace.'); return true;}
     if (addReference(option)) {setPicker(null); composer.current?.focus();}
@@ -557,7 +603,7 @@ function App() {
     const result = await api('/api/workspaces', {method: 'POST', body: '{}'});
     const id = result.request_id;
     if (!id) throw new Error('The workspace could not be prepared. Try importing again.');
-    selection.current = id; setSelected(id); setData(null); snapshot.current = null;
+    selection.current = id; setSelected(id); invalidateHistory();
     location.hash = id; await refresh(id);
     const list = await api('/api/requests'); setRequests(list.requests || []);
     return id;
@@ -611,6 +657,58 @@ function App() {
     catch (e) {setError(e.message); return null;}
     finally {setBusy(false);}
   };
+  const refreshNavigation = async () => {
+    const result = await api('/api/requests');
+    setRequests(result.requests || []); setProjects(result.projects || []);
+    return result;
+  };
+  const createProject = async ({name}) => {
+    if (!projectKeys.current.has(name)) projectKeys.current.set(name, crypto.randomUUID());
+    const result = await api('/api/projects', {method:'POST', body:JSON.stringify({name, operation_id:projectKeys.current.get(name)})});
+    projectKeys.current.delete(name);
+    await refreshNavigation();
+    return result;
+  };
+  const createConversation = async projectId => {
+    setBusy(true);
+    try {
+      const result = await api('/api/workspaces', {method:'POST', body:JSON.stringify({project_id:projectId})});
+      await refreshNavigation(); choose(result.request_id, true);
+      return result;
+    } finally {setBusy(false);}
+  };
+  const moveConversation = async (requestId, projectId) => {
+    setBusy(true);
+    try {
+      const result = await api(`/api/requests/${encodeURIComponent(requestId)}/project`, {method:'POST', body:JSON.stringify({project_id:projectId})});
+      await refreshNavigation();
+      if (selection.current === requestId) {invalidateHistory(); setCanvases(previous => ({...previous, [requestId]:initialCanvas()})); await refresh(requestId); setFeaturesVersion(value => value + 1);}
+      return result;
+    } finally {setBusy(false);}
+  };
+  const openHistory = (operation, message) => {
+    setHistoryError('');
+    setHistoryAction({operation, message, requestId:selected, revision:data?.request?.history_revision});
+  };
+  const submitHistory = async payload => {
+    const target = historyAction;
+    if (!target || target.requestId !== selection.current || busy) return false;
+    const signature = JSON.stringify([target.requestId, target.revision, payload]);
+    if (!historyKeys.current.has(signature)) historyKeys.current.set(signature, crypto.randomUUID());
+    setBusy(true); setHistoryError('');
+    try {
+      const result = await api(`/api/requests/${encodeURIComponent(target.requestId)}/history`, {method:'POST', body:JSON.stringify({
+        ...payload, expected_revision:target.revision, operation_id:historyKeys.current.get(signature)})});
+      if ((result.request_id || target.requestId) === selection.current) invalidateHistory();
+      historyKeys.current.delete(signature);
+      await refreshNavigation(); setHistoryAction(null);
+      const id = result.request_id || target.requestId;
+      if (id !== selection.current) choose(id, true);
+      else {await refresh(id); setIsNearBottom(true);}
+      return result;
+    } catch (failure) {setHistoryError(failure.message); return false;}
+    finally {setBusy(false);}
+  };
   const resume = async body => {
     if (busy || resumePending.current || active) return;
     resumePending.current = true;
@@ -634,7 +732,10 @@ function App() {
     const delivery = mode === 'queue' && data?.paused && !active && queue.length === 0 ? 'now' : mode;
     const result = await mutate(isAnswer ? '/answers' : '/messages', isAnswer ? {ticket: question.id, option: answer || null, text: value.trim(), mode: delivery} : {message: value.trim(), mode: delivery, attachments: uploads.map(u => u.id), context: toContext(references)});
     if (result && !isAnswer) setReferences(previous => previous.filter(r => !references.some(sent => sent.kind === r.kind && sent.id === r.id)));
-    if (result) {if (isAnswer) setQuestionDrafts(prev => ({...prev, [question.id]: (prev[question.id] || '').trim() === value.trim() ? '' : prev[question.id]})); else {setText(previous => previous.trim() === value.trim() ? '' : previous); setUploads(previous => previous.filter(item => !uploads.some(sent => sent.id === item.id)));} setIsNearBottom(true); if (question) setAnswers(prev => ({...prev, [question.id]: prev[question.id] === answer ? null : prev[question.id]}));}
+    if (result) {if (isAnswer) {setQuestionDrafts(prev => ({...prev, [question.id]: (prev[question.id] || '').trim() === value.trim() ? '' : prev[question.id]})); setAnswers(prev => ({...prev, [question.id]: prev[question.id] === answer ? null : prev[question.id]}));} else {setText(previous => previous.trim() === value.trim() ? '' : previous); setUploads(previous => previous.filter(item => !uploads.some(sent => sent.id === item.id)));} setIsNearBottom(true);}
+    if (result?.delivery === 'waiting_tool') setInfo('Answer delivered to the waiting agent.');
+    else if (result?.delivery === 'interrupt_then_resume') setInfo('Continuing with your answer after the current turn stops.');
+    else if (result && isAnswer) setInfo('Answer saved and queued.');
   };
   const upload = async files => {
     if (busy || importPending || !files.length) return;
@@ -661,7 +762,6 @@ function App() {
   const notice = error || interrupted || failure ? {tone: error || recovery.job?.status === 'failed' || failure ? 'error' : 'info', text: html`<span>${error || interrupted || failure}${recoveryActions}</span>`} : recovery.queueCount ? {tone: 'info', text: html`<span>Queue paused.${recoveryActions}</span>`} : info ? {tone: 'info', text: info} : active ? {tone: 'progress', text: active.kind === 'compact' ? 'Compacting your conversation…' : questions.some(questionWaiting) ? 'An agent is waiting for your answer. Other work can continue.' : 'The agent is working. You can keep writing.'} : questions.length ? {tone: 'info', text: `${questions.length} ${questions.length === 1 ? 'choice is' : 'choices are'} ready for your input.`} : null;
   const messageEvents = useMemo(() => activityIndex(data?.events), [data?.events]);
   const latestHuman = [...chat].reverse().find(m => m.role === 'human');
-  const rows = requests.filter(r => `${r.title} ${r.id}`.toLowerCase().includes(query.toLowerCase()));
   // Eeva Surface does not forward style, so pane variables belong on a native element.
   return html`<${Surface} theme="editorial" background="chat">
     <div className=${`workbench canvas-workbench ${navigatorOpen ? 'navigator-open' : ''} ${sidebar ? 'nav-open' : ''} ${chatShown ? 'chat-shown' : 'chat-hidden'} mobile-view-${mobileView}`} style=${{'--chat-width': `${layout.chat}px`, '--navigator-width': `${layout.navigator}px`}}>
@@ -677,12 +777,9 @@ function App() {
     ${narrow && sidebar && html`<button className="nav-scrim" aria-label="Close navigator" onClick=${() => setSidebar(false)}></button>`}
     <nav className="sidebar workspace-navigator" aria-label=${navigator === 'workspace' ? 'Workspace navigator' : 'Conversations navigator'} inert=${(narrow ? !sidebar : !navigatorOpen) ? '' : undefined}>
       ${navigator === 'conversations' ? html`<div className="navigator-heading"><h2>Conversations</h2><${IconButton} name="panel-right-close" label="Collapse navigator" onClick=${() => narrow ? setSidebar(false) : setNavigatorOpen(false)}/></div>
-      <${Button} variant="secondary" size="sm" className="new-chat" onClick=${() => choose(null)}><${Icon} name="plus" size=${14}/> New conversation<//>
       <label className="conversation-search"><${Icon} name="search" size=${14}/><input value=${query} onChange=${e => setQuery(e.target.value)} placeholder="Find a conversation" aria-label="Find a conversation"/></label>
-      <div className="section-label conversation-label">Conversations</div>
-      <div className="conversation-list">${rows.map(r => html`<button key=${r.id} className=${`conversation-row ${selected === r.id ? 'current' : ''}`} onClick=${() => choose(r.id)} aria-current=${selected === r.id ? 'page' : undefined}>
-        <span className="conversation-name">${title(r.title)}</span><span className="conversation-meta">${date(r.created)}<span>${r.active ? 'Working' : r.output_count ? `${r.output_count} outputs` : 'Conversation'}</span></span>
-      </button>`)}${!rows.length && html`<p className="caption search-empty">${query ? 'No conversations match.' : 'Your conversations will appear here.'}</p>`}</div>
+      <${ProjectNavigation} projects=${projects} requests=${requests} selected=${selected} query=${query} busy=${busy || importPending}
+        onChoose=${choose} onCreateConversation=${createConversation} onCreateProject=${createProject} onMoveConversation=${moveConversation}/>
       <div className="sidebar-footer"><span className="local-dot"></span><span>Local workspace</span><${Tooltip} content="Your videos and conversation stay in this workbench’s local files."><span tabIndex="0" aria-label="Local workspace information"><${Icon} name="info" size=${13}/></span><//></div>
 
       ` : html`<${WorkspaceExplorer} api=${api} requestId=${selected} activePath=${activeCanvasPath} onOpen=${openCanvas} onOutputs=${() => openCanvas({id:'outputs',kind:'outputs',title:'Outputs'})} onBrowser=${() => openCanvas({id:'browser',kind:'browser',title:'Browser'})}/>`}
@@ -708,8 +805,8 @@ function App() {
               ${chat.length > visibleMessages && html`<button className="text-action" onClick=${() => {setIsNearBottom(false); setVisibleMessages(count => count + 40);}}>Show earlier messages</button>`}
               ${data?.events_has_more && html`<button className="text-action" disabled=${historyBusy} onClick=${loadEarlierActivity}>${historyBusy ? 'Loading earlier activity…' : 'Load earlier activity'}</button>`}
             </div></div>`}
-            ${chat.slice(-visibleMessages).map((m, index) => {const i = Math.max(0, chat.length - visibleMessages) + index; return m.role === 'human' ? html`<div key=${`chat-${i}`}><${ReferenceTags} context=${m.context}/><${ChatAttachments} items=${m.attachments} onOpen=${openCanvas}/><${UserMessage} time=${time(m.ts)}>${m.text}<//>${((chat[i + 1] && chat[i + 1].role === 'human') || (!chat[i + 1] && !active)) && html`<${Activity} events=${messageEvents(m.ts, chat[i + 1]?.ts)} state=${data?.last_job?.status === 'failed' ? 'failed' : 'stopped'}/>`}</div>` : html`<div className="agent-turn" key=${`chat-${i}`}>
-              <${Activity} events=${messageEvents(chat[i - 1]?.ts, m.ts)}/><${AgentMessage} blocks=${chatBlocks.get(m) || []} time=${time(m.ts)}/></div>`;})}
+            ${chat.slice(-visibleMessages).map((m, index) => {const i = Math.max(0, chat.length - visibleMessages) + index; return m.role === 'human' ? html`<div key=${m.id || `chat-${i}`}><${ReferenceTags} context=${m.context}/><${ChatAttachments} items=${m.attachments} onOpen=${openCanvas}/><${UserMessage} time=${time(m.ts)}>${m.text}<//><${MessageActions} message=${m} disabled=${busy || !!active || queue.length > 0} onAction=${openHistory}/>${((chat[i + 1] && chat[i + 1].role === 'human') || (!chat[i + 1] && !active)) && html`<${Activity} events=${messageEvents(m.ts, chat[i + 1]?.ts)} state=${data?.last_job?.status === 'failed' ? 'failed' : 'stopped'}/>`}</div>` : html`<div className="agent-turn" key=${m.id || `chat-${i}`}>
+              <${Activity} events=${messageEvents(chat[i - 1]?.ts, m.ts)}/><${AgentMessage} blocks=${chatBlocks.get(m) || []} time=${time(m.ts)}/><${MessageActions} message=${m} disabled=${busy || !!active || queue.length > 0} onAction=${openHistory}/></div>`;})}
             ${active && html`<${Activity} events=${messageEvents(latestHuman?.ts)} working started=${active.started_at || active.created_at}/>`}
             ${queue.map(j => html`<div key=${j.id}><${ReferenceTags} context=${j.context}/><${ChatAttachments} items=${j.attachment_refs} onOpen=${openCanvas}/><${UserMessage} queued onRemoveQueued=${() => mutate(`/queue/${j.id}`, {}, 'DELETE')}>${j.message || j.text}<//></div>`)}
           `}</div>
@@ -737,17 +834,17 @@ function App() {
           <${Composer} ref=${composer} value=${composerText} onValueChange=${setComposerText} onSend=${value => send(value)} working=${!!active}
             canSend=${!busy && !importPending && (!picker || answering) && (!!composerText.trim() || !!answer || (!answering && uploads.length > 0))} onStop=${active?.can_stop === false ? undefined : () => mutate('/stop')} onAttach=${answering || busy || importPending ? undefined : () => fileInput.current?.click()}
             label=${answering ? 'Your answer to the selected question' : 'Message the agent'}
-            placeholder=${question && !questionsHidden ? 'Choose an option, or write your answer…' : active ? 'Add a message to the queue…' : selected ? 'What would you like to change?' : 'Describe a video or paste a Figma link…'}
-            question=${questions.length ? html`<${QuestionQueue} questions=${questions} index=${qIndex} setIndex=${setQIndex} answer=${answer} setAnswer=${value => setAnswers(prev => ({...prev, [question.id]: value}))} hidden=${questionsHidden} setHidden=${setQuestionsHidden}/>` : undefined}
+            placeholder=${answering ? 'Choose an option, or write your answer…' : active ? 'Write a new instruction…' : selected ? 'What would you like to change?' : 'Describe a video or paste a Figma link…'}
+            question=${questions.length ? html`<${QuestionQueue} questions=${questions} index=${qIndex} setIndex=${setQIndex} answer=${answers[question.id]} setAnswer=${value => {setAnswers(prev => ({...prev, [question.id]: value})); setQuestionModes(prev => ({...prev, [question.id]: 'answer'}));}} hidden=${questionsHidden} setHidden=${setQuestionsHidden} answering=${answering} onMode=${mode => {setQuestionModes(prev => ({...prev, [question.id]: mode})); setPicker(null); composer.current?.focus();}}/>` : undefined}
             attachments=${uploads.length ? html`<div className="staged-files">${uploads.map(u => html`<span className="staged-file" key=${u.id}>${u.kind === 'image' && u.url ? html`<img className="staged-image" src=${u.url} alt=""/>` : html`<${Icon} name="file" size=${14}/>`}${u.name}<${IconButton} name="x" label=${`Remove ${u.name}`} onClick=${() => setUploads(prev => prev.filter(x => x.id !== u.id))}/></span>`)}</div>` : answer ? html`<span className="selected-answer"><${Icon} name="check" size=${12}/> Answer selected. Send to confirm.</span>` : undefined}
             className="workbench-composer"/>
           <div className="composer-footer"><div className="composer-model"><${ModelControl} api=${api} requestId=${selected} onNotice=${notice => {if (notice.tone === 'error') setError(notice.text); else setInfo(notice.text);}}/><${IntegrationsControl} api=${api} disabled=${answering || busy} selected=${references.filter(r => r.kind === 'plugin')} onToggle=${item => {
               if (!references.some(r => r.kind === 'plugin' && r.id === item.id) && references.length >= referenceLimit) {setError(`Choose up to ${referenceLimit} references. Select a folder to include its files as one reference.`); return;}
               setReferences(previous => previous.some(r => r.kind === 'plugin' && r.id === item.id) ? previous.filter(r => r.kind !== 'plugin' || r.id !== item.id) : [...previous,item]);
-            }}/>${active && html`<span className="queue-label">Send queues</span>`}</div>
-            <div className="composer-footer-actions">${active && active.can_stop !== false && !(answering && questionWaiting(question)) && html`<button className="send-now" disabled=${busy || importPending || (picker && !answering) || (!composerText.trim() && !answer && (!uploads.length || answering))} onClick=${() => send(composerText, 'now')}>Send now <${Icon} name="arrow-up" size=${12}/></button>`}
+            }}/>${(active || waitingForAnswer) && html`<span className="queue-label">${waitingForAnswer ? 'Send answers now' : answering ? 'Send queues answer' : 'Send queues instruction'}</span>`}</div>
+            <div className="composer-footer-actions"><${SteeringAction} active=${active} answering=${answering} waiting=${waitingForAnswer} disabled=${busy || importPending || (picker && !answering) || (!composerText.trim() && !answer && (!uploads.length || answering))} onSend=${() => send(composerText, 'now')}/>
               <${ContextUsage} usage=${data?.usage} active=${active} pending=${queue.length > 0} compact=${compact} busy=${compactBusy}/></div></div>
-        </div><div className="composer-help"><span>${busy ? 'Saving…' : answering ? (uploads.length ? 'Your attached files are kept for your next general message.' : 'Answering this question. Collapse it to write another message.') : active ? (active.can_stop === false ? 'This turn is running in a terminal. Your message will queue.' : 'Send now stops the current turn and continues with your message.') : 'Enter to send · Shift + Enter for a new line'}</span><span>${selected ? 'Changes stay in this conversation' : 'Source video optional'}</span></div></div></div>
+        </div><div className="composer-help"><span>${busy ? 'Saving…' : answering ? `${waitingForAnswer ? 'Send resumes the waiting agent immediately.' : active ? (active.can_stop === false ? 'Send queues your answer behind the terminal turn.' : 'Send queues your answer. Answer now stops the turn and continues with your answer.') : 'Send continues with your answer.'}${uploads.length ? ' Attached files stay staged for New instruction.' : ''}` : active ? (active.can_stop === false ? 'This turn is running in a terminal. Your instruction will queue.' : 'Send now stops the current turn and continues with your instruction.') : 'Enter to send · Shift + Enter for a new line'}</span><span>${selected ? 'Changes stay in this conversation' : 'Source video optional'}</span></div></div></div>
         <input ref=${fileInput} className="visually-hidden" type="file" multiple onChange=${e => {upload([...e.target.files]); e.target.value = '';}} aria-label="Attach files"/>
         <//>
         <${TabPanel} value="qc" forceMount hidden=${chatTab !== 'qc'} className="chat-mode-panel">
@@ -761,6 +858,7 @@ function App() {
       </div>
     </main>
     <${LocalImportDialog} open=${!!localImport} initialPath=${localImport?.path || ''} initialJob=${localImport?.job || null} api=${api} ensureWorkspace=${ensureImportWorkspace} onReady=${importedReference} onPending=${setImportPending} onClose=${() => setLocalImport(null)}/>
+    <${HistoryDialog} operation=${historyAction?.operation} message=${historyAction?.message} busy=${busy || !!active || queue.length > 0} error=${historyError} onSubmit=${submitHistory} onClose=${() => setHistoryAction(null)}/>
     </div>
   <//>`;
 }

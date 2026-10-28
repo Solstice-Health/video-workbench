@@ -7,6 +7,7 @@ are remembered by key and lane in asks/memory.jsonl (brand preferences, brief am
 from __future__ import annotations
 
 import math
+import os
 import re
 import threading
 import time
@@ -128,7 +129,24 @@ class Broker:
     def active_waiters(ticket: dict[str, Any]) -> list[dict[str, Any]]:
         """Leases expire after a worker crash; an old question never swallows a new chat turn."""
         now = time.time()
-        return [w for w in ticket.get("waiters", {}).values() if w.get("expires_at", 0) > now]
+        active = []
+        for waiter in ticket.get("waiters", {}).values():
+            if waiter.get("expires_at", 0) <= now:
+                continue
+            # Detect killed workers immediately, before their last lease expires.
+            # Older tickets without process ownership retain the bounded lease.
+            pid = waiter.get("pid")
+            if pid is not None:
+                if type(pid) is not int or pid <= 0:
+                    continue
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    continue
+                except PermissionError:
+                    pass  # A live process owned by another user is still alive.
+            active.append(waiter)
+        return active
 
     def wait(self, tid: str, *, asker: str, timeout_s: float = 1800,
              cancel: threading.Event | None = None) -> dict[str, Any]:
@@ -167,7 +185,7 @@ class Broker:
                     if time.monotonic() >= heartbeat:
                         ticket["waiters"] = {k: w for k, w in ticket.get("waiters", {}).items()
                                              if w.get("expires_at", 0) > time.time()}
-                        ticket["waiters"][token] = {"actor": asker, "expires_at": time.time() + 15}
+                        ticket["waiters"][token] = {"actor": asker, "pid": os.getpid(), "expires_at": time.time() + 15}
                         write_json(self._path(tid), ticket)
                         if heartbeat == 0:
                             emit(self.ws, "ask.waiting", {"ticket": tid, "question": ticket["question"]}, actor=asker)

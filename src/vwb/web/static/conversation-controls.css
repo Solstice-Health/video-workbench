@@ -1,0 +1,31 @@
+/* Standalone conversation controls share Eeva's editorial surfaces and typography. */
+.cc-navigation {display:flex; flex-direction:column; gap:20px; min-height:0; overflow:auto; padding:4px; color:var(--ds-text-primary);}
+.cc-navigation-actions {display:flex; flex-direction:column; align-items:stretch; gap:4px;}
+.cc-nav-section {min-width:0;}
+.cc-section-heading {display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:4px; margin-bottom:8px;}
+.cc-section-heading h3 {margin:0; font-size:11px; line-height:16px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:var(--ds-text-secondary);}
+.cc-project {margin-bottom:12px; padding:8px; border-radius:8px; background:var(--ds-surface-sunken);}
+.cc-project h4 {font-size:13px; line-height:20px; font-weight:600; margin:0 0 4px; overflow-wrap:anywhere;}
+.cc-conversation-list {list-style:none; padding:0; margin:0; display:flex; flex-direction:column; gap:4px;}
+.cc-conversation-list li {min-width:0;}
+.cc-navigation .cc-conversation-row {width:100%; height:auto; min-height:44px; padding:8px; display:flex; flex-direction:column; align-items:flex-start; gap:4px; text-align:left; white-space:normal; border-radius:8px;}
+.cc-navigation .cc-conversation-row.is-current {background:var(--ds-surface-default); box-shadow:var(--ds-elevation-edge);}
+.cc-conversation-name {font-size:13px; line-height:20px; overflow-wrap:anywhere; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden;}
+.cc-conversation-meta, .cc-caption {font-size:12px; line-height:18px; color:var(--ds-text-secondary); overflow-wrap:anywhere;}
+.cc-caption {margin:8px 0;}
+.cc-message-actions {display:flex; flex-wrap:wrap; align-items:center; gap:4px; margin-top:8px;}
+.cc-message-actions button {min-height:32px;}
+.cc-dialog {width:min(560px, calc(100vw - 32px)); max-height:calc(100dvh - 48px); overflow:auto; box-sizing:border-box; border:0; border-radius:14px; padding:24px; margin:auto; font:14px/21px var(--ds-font-ui, Aileron, sans-serif); color:var(--ds-text-primary); background:var(--ds-surface-default, #fff); box-shadow:var(--ds-elevation-modal);}
+.cc-dialog::backdrop {background:rgba(29,28,26,.26);}
+.cc-dialog h2 {font:600 17px/24px var(--ds-font-ui, Aileron, sans-serif); margin:0 0 12px;}
+.cc-dialog p {margin:12px 0; overflow-wrap:anywhere;}
+.cc-workspace-note {padding:12px; border-radius:8px; background:var(--ds-surface-sunken); color:var(--ds-text-secondary);}
+.cc-message-preview {margin:16px 0; padding:12px; border-left:2px solid var(--ds-border-divider); max-height:160px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere;}
+.cc-field {display:flex; flex-direction:column; gap:8px; margin:16px 0; font-weight:600;}
+.cc-field :is(input, select, textarea) {box-sizing:border-box; width:100%; min-width:0; min-height:40px; padding:8px 12px; font:400 14px/21px var(--ds-font-ui, Aileron, sans-serif); color:var(--ds-text-primary); background:var(--ds-surface-default, #fff); border:1px solid var(--ds-border-divider, #ccc); border-radius:8px;}
+.cc-field textarea {resize:vertical;}
+.cc-dialog-actions {display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; margin-top:20px;}
+.cc-error {font-size:13px; line-height:20px; padding:8px 12px; border-radius:6px; color:var(--ds-status-required); background:var(--ds-status-required-bg); overflow-wrap:anywhere;}
+:is(.cc-navigation, .cc-dialog, .cc-message-actions) :is(button, input, select, textarea):focus-visible {outline:2px solid var(--ds-text-accent, #675b46); outline-offset:2px; box-shadow:var(--ds-focus-ring);}
+:is(.cc-navigation, .cc-dialog, .cc-message-actions) :disabled {cursor:not-allowed; opacity:.5;}
+@media (max-width:479px) {.cc-dialog {padding:16px;} .cc-dialog-actions {flex-direction:column;} .cc-dialog-actions > button {width:100%; min-height:44px;}}

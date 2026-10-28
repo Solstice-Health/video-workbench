@@ -85,19 +85,21 @@ def test_registry_ask_modes_and_later_wait(ws):
     assert registry.call(ctx, "human_wait", {"ticket": "../../request", "timeout_s": 0}).is_error
 
 
-def test_live_wait_answer_does_not_interrupt_or_enqueue_another_turn(ws, monkeypatch):
+@pytest.mark.parametrize("mode", ["queue", "now"])
+@pytest.mark.parametrize("active", [None, {"kind": "external"}, {"kind": "message", "can_stop": True}])
+def test_live_wait_answer_does_not_interrupt_or_enqueue_another_turn(ws, monkeypatch, mode, active):
     broker = Broker(ws)
     ticket = ask(broker, mode="blocking")
     queue = TurnQueue(ws.root.parent)
     app = Workbench(ws.root.parent, queue=queue)
-    monkeypatch.setattr(queue, "snapshot", lambda _ws: {"active": {"kind": "external"}, "queue": []})
+    monkeypatch.setattr(queue, "snapshot", lambda _ws: {"active": active, "queue": []})
     monkeypatch.setattr(queue, "enqueue", lambda *a, **k: pytest.fail("answer must resume the waiting tool"))
     monkeypatch.setattr("vwb.web.server.models.explicit_runtime", lambda *a: pytest.fail("no new model turn"))
     try:
         with ThreadPoolExecutor() as pool:
             waiter = pool.submit(broker.wait, ticket["id"], asker="job_lead", timeout_s=3)
             wait_for(lambda: broker.active_waiters(broker.tickets()[0]))
-            response = app.answer(ws, {"ticket": ticket["id"], "option": "no", "mode": "now"})
+            response = app.answer(ws, {"ticket": ticket["id"], "option": "no", "mode": mode})
             assert response["job"] is None and response["delivery"] == "waiting_tool"
             assert waiter.result(timeout=2)["answer"]["delivery"] == "waiting_tool"
     finally:
@@ -117,6 +119,28 @@ def test_expired_wait_lease_queues_answer_normally(ws, monkeypatch):
         response = app.answer(ws, {"ticket": ticket["id"], "option": "yes"})
         assert response["job"]["status"] == "queued"
         assert "delivery" not in read_json(broker._path(ticket["id"]))["answer"]
+    finally:
+        queue.close()
+
+
+def test_killed_waiter_does_not_swallow_answer_before_lease_expiry(ws, monkeypatch):
+    broker = Broker(ws)
+    ticket = ask(broker, mode="blocking")
+    ticket["waiters"] = {"killed": {"actor": "job_lead", "pid": 123456, "expires_at": time.time() + 15}}
+    write_json(broker._path(ticket["id"]), ticket)
+    def killed(pid, sig):
+        assert pid == 123456 and sig == 0
+        raise ProcessLookupError
+    monkeypatch.setattr("vwb.ask.broker.os.kill", killed)
+    monkeypatch.setattr("vwb.web.server.models.explicit_runtime", lambda *a: None)
+    queue = TurnQueue(ws.root.parent)
+    queue.stop(ws)
+    app = Workbench(ws.root.parent, queue=queue)
+    try:
+        response = app.answer(ws, {"ticket": ticket["id"], "option": "no"})
+        assert response["delivery"] == "queued"
+        assert response["job"]["status"] == "queued"
+        assert not broker.active_waiters(ticket)
     finally:
         queue.close()
 

@@ -16,13 +16,15 @@ import shutil
 import threading
 import uuid
 import webbrowser
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlsplit
+
+from filelock import FileLock, Timeout
 
 from vwb import models, prompts
 from vwb.agents.events import context_usage, event_page
@@ -39,7 +41,9 @@ from vwb.web.history import request_ids, resolve_request
 from vwb.web.queue import QueueConflict, TurnQueue
 from vwb.workspace import Workspace, references
 from vwb.workspace import attachments as chat_attachments
+from vwb.workspace.checkpoints import HistoryConflict, read_checkpoint
 from vwb.workspace.local_imports import LocalImports
+from vwb.workspace.projects import ProjectConflict, ProjectStore
 from vwb.workspace.request import SUBDIRS, Request, now_iso
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -89,6 +93,98 @@ class Workbench:
         self.mutation_lock = threading.RLock()
         self.studio = StudioJobs()
         self.local_imports = LocalImports()
+
+    @property
+    def projects(self) -> ProjectStore:
+        return ProjectStore(self.runs_dir)
+
+    def require_idle(self, ws: Workspace) -> None:
+        state = self.queue.snapshot(ws)
+        if state["active"] or state["queue"]:
+            raise QueueConflict("Stop the active turn and remove queued messages before changing conversation history or project.")
+        from vwb.web.qc import workspace as qc_workspace
+        if (ws.root / ".qc-chat/runtime/request.json").exists():
+            qc_state = self.queue.snapshot(qc_workspace(ws))
+            if qc_state["active"] or qc_state["queue"]:
+                raise QueueConflict("Stop QC and remove its queued messages before changing conversation history or project.")
+        for jobs in (self.local_imports.list(ws)["jobs"], self.studio.list(ws)["jobs"]):
+            if any(job["status"] in {"queued", "running", "preparing"} for job in jobs):
+                raise QueueConflict("Wait for file imports and media generation to finish first.")
+
+    def move_project(self, ws: Workspace, body: dict) -> dict:
+        with self.mutation_lock, self.queue.lock:
+            self.require_idle(ws)
+            target = self.projects.folder(body.get("project_id"))
+            for rid in request_ids(self.runs_dir):
+                other = self.workspace(rid)
+                if other.project_root in {target, ws.project_root} and other.project_root:
+                    self.require_idle(other)
+            return self.projects.move(ws, body.get("project_id"))
+
+    def change_history(self, ws: Workspace, body: dict) -> dict:
+        from vwb.workspace import conversations
+        from vwb.workspace.checkpoints import checked_path, durable_json
+        operation = body.get("operation_id")
+        if not isinstance(operation, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", operation):
+            raise ValueError("History changes need a stable operation_id.")
+        if type(body.get("expected_revision")) is not int or body["expected_revision"] < 0:
+            raise ValueError("Reload the conversation before changing its history.")
+        receipt = checked_path(ws.root / ".conversation-history/http" / f"{operation}.json")
+        signature = json.dumps(body, sort_keys=True, separators=(",", ":"))
+        with self.mutation_lock, self.queue.lock:
+            saved = read_json(receipt)
+            if saved and saved["signature"] != signature:
+                raise HistoryConflict("That operation already belongs to a different history change.")
+            if saved and saved.get("response"):
+                return saved["response"]
+            if saved and saved.get("history"):
+                target = self.workspace(saved["history"]["request_id"])
+                job = self.queue.submitted(target, f"history:{operation}")
+                if job or saved["history"].get("edited_message") is None:
+                    response = {"request_id": target.id, "history": saved["history"], "job": job}
+                    saved["response"] = response
+                    durable_json(receipt, saved)
+                    return response
+                if target.load().history_revision != saved["history"]["history_revision"]:
+                    raise HistoryConflict("History changed after this edit was prepared. Its backup is retained; choose the current message again.")
+            self.require_idle(ws)
+            locks = [ws.root / "turn.lock"]
+            if ws.project_root:
+                locks.append(ws.project_root / "turn.lock")
+            try:
+                with ExitStack() as stack:
+                    for path in sorted(locks):
+                        stack.enter_context(FileLock(str(path), timeout=0))
+                    main_config = models.explicit_runtime(ws, self.runs_dir)
+                    if body.get("action") == "edit" and not saved:
+                        selected = next((turn for turn in ws.load().chat if turn.id == body.get("message_id")), None)
+                        if selected:
+                            references.validate(selected.context, ws)
+                            chat_attachments.validate_refs(ws, selected.attachments)
+                    destination = self.runs_dir / ("r-" + uuid.uuid5(uuid.NAMESPACE_URL, f"{ws.id}:{operation}").hex[:16])
+                    saved = saved or {"signature": signature, "stage": "prepared"}
+                    durable_json(receipt, saved)
+                    changed = conversations.apply(ws, destination, body)
+                    target, result = changed["workspace"], changed["result"]
+                    if saved["stage"] == "prepared":
+                        if target.id == ws.id:
+                            self.queue.reset(ws, turn_lock_held=True)
+                        saved["stage"] = "reset"
+                        saved["history"] = result
+                        durable_json(receipt, saved)
+                    job = None
+                    edited = result.get("edited_message")
+                    if edited is not None:
+                        job = self.queue.enqueue(target, message=edited["text"], mode="now",
+                            attachment_refs=edited["attachments"], context=edited["context"],
+                            skip_index=not any(ref["kind"] == "video" for ref in edited["attachments"]),
+                            main_config=main_config, idempotency_key=f"history:{operation}", turn_lock_held=target.id == ws.id)
+                    response = {"request_id": target.id, "history": result, "job": job}
+                    saved["response"] = response
+                    durable_json(receipt, saved)
+                    return response
+            except Timeout:
+                raise QueueConflict("Stop the active conversation or project turn before changing its history.") from None
 
     def studio_entry(self, ws: Workspace, row: dict) -> dict:
         """Public studio records use the same capability-scoped file previews."""
@@ -165,6 +261,7 @@ class Workbench:
                 output_count = len(list(ws.canvas.glob("*/HEAD")))
                 title = (req.spec.summary if req.spec else "") or req.message
                 requests.append({"id": ws.id, "title": " ".join(title.split())[:140], "created": req.created,
+                                 "project_id": ws.project_root.name if ws.project_root else None,
                                  "updated": req.chat[-1].ts if req.chat else req.created,
                                  "status": "working" if state["active"] else ("in_review" if output_count else "open"),
                                  "source_count": len(req.sources), "output_count": output_count,
@@ -220,24 +317,33 @@ class Workbench:
                          "review_url": self.file_url(ws, review_path)})
         return rows
 
-    def snapshot(self, ws: Workspace, *, after: int | None = None, full: bool = True,
-                 include_events: bool = True) -> dict[str, Any]:
-        payload = {"asks": self.asks(ws), "usage": context_usage(ws), **self.queue.snapshot(ws)}
-        if include_events:
-            payload.update(event_page(ws, after=after))
-        if full:
-            req = ws.load().model_dump(mode="json")
-            for source in req["sources"]:
-                source["name"] = Path(source["original_path"]).name
-                source["url"] = self.file_url(ws, Path(source["path"]))
-                source.pop("original_path", None)
-                source.pop("path", None)
-            for turn in req["chat"]:
-                turn["attachments"] = [self.attachment_entry(ws, ref) for ref in turn.get("attachments", [])]
-            payload.update(request=req, outputs=self.outputs(ws))
-        for job in [*payload.get("queue", []), *([payload["active"]] if payload.get("active") else [])]:
-            job["attachment_refs"] = [self.attachment_entry(ws, ref) for ref in job.get("attachment_refs", [])]
-        return payload
+    def snapshot(self, ws: Workspace, *, after: int | None = None, before: int | None = None,
+                 limit: int = 300, full: bool = True, include_events: bool = True,
+                 history_epoch: int | None = None) -> dict[str, Any]:
+        if history_epoch is not None and (type(history_epoch) is not int or history_epoch < 0):
+            raise ValueError("Choose a nonnegative history epoch.")
+        # Keep the epoch, event file and public chat on the same side of a reset.
+        with self.mutation_lock:
+            epoch = read_checkpoint(ws).get("history_revision", 0)
+            reset = history_epoch is not None and history_epoch != epoch
+            payload = {"history_epoch": epoch, "asks": self.asks(ws), "usage": context_usage(ws),
+                       **self.queue.snapshot(ws)}
+            if include_events or reset:
+                payload.update(event_page(ws, after=None if reset else after,
+                                          before=None if reset else before, limit=limit))
+            if full or reset:
+                req = ws.load().model_dump(mode="json")
+                for source in req["sources"]:
+                    source["name"] = Path(source["original_path"]).name
+                    source["url"] = self.file_url(ws, Path(source["path"]))
+                    source.pop("original_path", None)
+                    source.pop("path", None)
+                for turn in req["chat"]:
+                    turn["attachments"] = [self.attachment_entry(ws, ref) for ref in turn.get("attachments", [])]
+                payload.update(request=req, outputs=self.outputs(ws))
+            for job in [*payload.get("queue", []), *([payload["active"]] if payload.get("active") else [])]:
+                job["attachment_refs"] = [self.attachment_entry(ws, ref) for ref in job.get("attachment_refs", [])]
+            return payload
 
     @staticmethod
     def attachment_entry(ws: Workspace, ref: dict) -> dict:
@@ -285,10 +391,13 @@ class Workbench:
         try:
             for sub in SUBDIRS:
                 (ws.root / sub).mkdir()
+            ws.save(Request(id=rid, message=message))
+            if body.get("project_id") is not None:
+                self.projects.move(ws, body["project_id"])
             refs = chat_attachments.ingest(ws, paths)
             sources = [ws.add_source(path, f"src{i}") for i, (_, path) in enumerate(chat_attachments.source_paths(ws, refs), 1)]
             # The worker adds the first chat message under the turn lock.
-            ws.save(Request(id=rid, message=message, sources=sources))
+            ws.update(sources=sources)
             if main_config:
                 models.set_selection(ws, main_config["selection"], self.runs_dir)
             prompts.set_selection(ws, prompts.selection(runs_dir=self.runs_dir))
@@ -298,7 +407,7 @@ class Workbench:
             raise
         return {"request": {"id": rid}, "request_id": rid, "job": job}
 
-    def draft_workspace(self) -> dict[str, Any]:
+    def draft_workspace(self, body: dict | None = None) -> dict[str, Any]:
         """Create a place for imported files without submitting a model turn."""
         rid = f"r-{uuid.uuid4().hex[:16]}"
         ws = Workspace(self.runs_dir / rid)
@@ -307,6 +416,8 @@ class Workbench:
             for sub in SUBDIRS:
                 (ws.root / sub).mkdir()
             ws.save(Request(id=rid, message=""))
+            if body and body.get("project_id") is not None:
+                self.projects.move(ws, body["project_id"])
             prompts.set_selection(ws, prompts.selection(runs_dir=self.runs_dir))
         except BaseException:
             shutil.rmtree(ws.root)
@@ -336,7 +447,10 @@ class Workbench:
                 raise QueueConflict("The UI server is shutting down.")
             # Verify a steer can be accepted before signing the answer.
             active = self.queue.snapshot(ws)["active"]
-            waiting = bool(active and broker.active_waiters(ticket))
+            # A live wait lease is authoritative even before queue activity is
+            # visible (or for a helper/terminal waiter). Queueing here duplicates
+            # the continuation after the tool has already consumed the answer.
+            waiting = bool(broker.active_waiters(ticket))
             if mode == "now" and active and active.get("kind") == "external" and not waiting:
                 raise QueueConflict("This turn was started outside the UI. Queue the answer, or stop it in its terminal.")
             # Check the selected provider before signing a human answer. Queue jobs
@@ -354,7 +468,8 @@ class Workbench:
                 # Preserve it in the ticket/ledger; do not race request.json writers.
                 return {"ticket": answered, "job": None, "delivery": "waiting_tool"}
             job = self.queue.enqueue(ws, message=message.strip(), mode=mode, main_config=main_config)
-            return {"ticket": answered, "job": job}
+            return {"ticket": answered, "job": job,
+                    "delivery": "interrupt_then_resume" if mode == "now" and active else "queued"}
 
     def compact(self, ws: Workspace) -> dict[str, Any]:
         with self.queue.lock:
@@ -542,7 +657,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._file(Path(row["name"]), artifact=True, handle=handle,
                                       download=row["kind"] not in {"image", "video", "audio", "pdf"})
             if parts == ["api", "requests"]:
-                return self._json({"requests": self.app.requests()})
+                return self._json({"requests": self.app.requests(), "projects": self.app.projects.list()})
+            if parts == ["api", "projects"]:
+                return self._json({"projects": self.app.projects.list()})
             if len(parts) >= 4 and parts[:2] == ["api", "requests"] and parts[3] == "qc":
                 from vwb.web import qc as qc_chat
                 ws = self.app.workspace(parts[2])
@@ -614,16 +731,19 @@ class Handler(BaseHTTPRequestHandler):
                     return self._browser_stream(session)
             if len(parts) in {3, 4} and parts[:2] == ["api", "requests"]:
                 ws = self.app.workspace(parts[2])
+                epoch = int(query["history_epoch"][0]) if "history_epoch" in query else None
                 if len(parts) == 3:
-                    return self._json(self.app.snapshot(ws, include_events=query.get("events", ["1"])[0] != "0"))
+                    return self._json(self.app.snapshot(ws, include_events=query.get("events", ["1"])[0] != "0",
+                                                        history_epoch=epoch))
                 if parts[3] == "events":
                     if "before" in query:
                         if "after" in query:
                             raise ValueError("Choose either newer or older activity.")
-                        return self._json(event_page(ws, before=int(query["before"][0]),
-                                                     limit=int(query.get("limit", ["300"])[0])))
+                        return self._json(self.app.snapshot(ws, before=int(query["before"][0]), full=False,
+                                                           limit=int(query.get("limit", ["300"])[0]),
+                                                           history_epoch=epoch))
                     after = max(0, int(parse_qs(url.query).get("after", ["0"])[0]))
-                    return self._json(self.app.snapshot(ws, after=after, full=False))
+                    return self._json(self.app.snapshot(ws, after=after, full=False, history_epoch=epoch))
                 if parts[3] == "features":
                     return self._json(references.catalog(ws, query=query.get("q", [""])[0]))
                 if parts[3] == "model":
@@ -648,10 +768,11 @@ class Handler(BaseHTTPRequestHandler):
                 if self.headers.get("Transfer-Encoding"):
                     raise ValueError("Chunked uploads are not supported.")
                 ws = self.app.workspace(parts[2])
-                result = studio_assets.upload(ws, self.rfile, int(self.headers.get("Content-Length", "0")),
-                                              name=unquote(self.headers.get("X-Filename", "input.png")),
-                                              kind=self.headers.get("X-Upload-Kind", "image"))
-                return self._json(self.app.studio_entry(ws, result), 201)
+                with self.app.mutation_lock:
+                    result = studio_assets.upload(ws, self.rfile, int(self.headers.get("Content-Length", "0")),
+                                                  name=unquote(self.headers.get("X-Filename", "input.png")),
+                                                  kind=self.headers.get("X-Upload-Kind", "image"))
+                    return self._json(self.app.studio_entry(ws, result), 201)
             body = self._body()
             if len(parts) >= 5 and parts[:2] == ["api", "requests"] and parts[3] == "qc":
                 from vwb.web import qc as qc_chat
@@ -712,7 +833,8 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) in {5, 7} and parts[:2] == ["api", "requests"] and parts[3:5] == ["studio", "jobs"]:
                 ws = self.app.workspace(parts[2])
                 if len(parts) == 5:
-                    return self._json(self.app.studio_entry(ws, self.app.studio.submit(ws, body)), 202)
+                    with self.app.mutation_lock:
+                        return self._json(self.app.studio_entry(ws, self.app.studio.submit(ws, body)), 202)
                 if parts[6] == "cancel":
                     return self._json(self.app.studio_entry(ws, self.app.studio.cancel(ws, parts[5])))
             if parts == ["api", "integrations", "figma", "connect"]:
@@ -738,15 +860,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"providers": update_provider(parts[2], body)})
             if parts == ["api", "requests"]:
                 return self._json(self.app.create(body), 201)
+            if parts == ["api", "projects"]:
+                return self._json({"project": self.app.projects.create(body.get("name"), operation_id=body.get("operation_id"))}, 201)
             if parts == ["api", "workspaces"]:
-                return self._json(self.app.draft_workspace(), 201)
+                return self._json(self.app.draft_workspace(body), 201)
             if len(parts) == 4 and parts[:2] == ["api", "requests"]:
                 ws = self.app.workspace(parts[2])
                 action = parts[3]
+                if action == "project":
+                    return self._json(self.app.move_project(ws, body))
+                if action == "history":
+                    return self._json(self.app.change_history(ws, body))
                 if action == "imports":
-                    return self._json({"import": self.app.local_imports.start(ws, body.get("path"))}, 202)
+                    with self.app.mutation_lock:
+                        return self._json({"import": self.app.local_imports.start(ws, body.get("path"))}, 202)
                 if action == "browser":
-                    return self._json(BrowserSession(ws).ui_action(body))
+                    with self.app.mutation_lock:
+                        return self._json(BrowserSession(ws).ui_action(body))
                 if action == "model":
                     return self._json({"selection": models.set_selection(ws, body.get("selection"), self.app.runs_dir),
                                        "applies_to": "next_turn"})
@@ -756,15 +886,16 @@ class Handler(BaseHTTPRequestHandler):
                     prompts.set_selection(ws, body["profile_id"])
                     return self._json(prompts.status(ws, self.app.queue.snapshot(ws).get("active"), self.app.runs_dir))
                 if action == "messages":
-                    message = self.app.message(body)
-                    attachments = self.app.attachment_paths(body.get("attachments", []))
-                    refs = chat_attachments.ingest(ws, attachments)
-                    job = self.app.queue.enqueue(ws, message=message, mode=body.get("mode", "queue"),
-                                                 attachment_refs=refs,
-                                                 skip_index=not any(ref["kind"] == "video" for ref in refs),
-                                                 context=body.get("context"),
-                                                 main_config=models.explicit_runtime(ws, self.app.runs_dir))
-                    return self._json({"job": job}, 202)
+                    with self.app.mutation_lock:
+                        message = self.app.message(body)
+                        attachments = self.app.attachment_paths(body.get("attachments", []))
+                        refs = chat_attachments.ingest(ws, attachments)
+                        job = self.app.queue.enqueue(ws, message=message, mode=body.get("mode", "queue"),
+                                                     attachment_refs=refs,
+                                                     skip_index=not any(ref["kind"] == "video" for ref in refs),
+                                                     context=body.get("context"),
+                                                     main_config=models.explicit_runtime(ws, self.app.runs_dir))
+                        return self._json({"job": job}, 202)
                 if action == "stop":
                     return self._json(self.app.queue.stop(ws))
                 if action == "resume":
@@ -978,7 +1109,7 @@ class Handler(BaseHTTPRequestHandler):
         except PermissionError as exc:
             self.close_connection = True
             self._json({"error": str(exc)}, HTTPStatus.FORBIDDEN)
-        except (QueueConflict, BrowserConflict) as exc:
+        except (QueueConflict, BrowserConflict, ProjectConflict, HistoryConflict) as exc:
             self.close_connection = True
             self._json({"error": str(exc)}, HTTPStatus.CONFLICT)
         except IntegrationError as exc:
