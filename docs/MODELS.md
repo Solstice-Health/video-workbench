@@ -70,13 +70,26 @@ Direct Anthropic/OpenRouter calls also perform a conservative history-size
 preflight, reserving space for output. Text is conservatively counted, and inline
 images are estimated from their dimensions rather than base64 transport size.
 Anthropic uses its visual patch formula; custom OpenRouter image accounting is
-approximate because encoders differ. These estimates are not measured usage, and
-providers may reject a request that passes preflight. If the estimate exceeds the
-budget for a supported Anthropic model with native compaction, the harness first
-uses Anthropic's token-counting endpoint. It proceeds only when the measured
-context fits, or when native compaction can reduce it at the configured trigger.
-Other oversized requests are rejected before generation. Choose a larger supported
-budget or start a new conversation when the request cannot fit.
+approximate because encoders differ. After a successful Anthropic response, the
+harness records input/output usage against hashes of the effective message prefix
+and request settings. When that exact prefix is reused, only new messages and tool
+results receive the conservative estimate, with an extra framing allowance. Opaque
+reasoning signatures are not repeatedly charged as text. Changed prompts, tools,
+settings, history or hydrated images invalidate that measurement. Native summaries
+get a new prefix receipt; the complete saved history stays intact. Legacy histories
+without receipts use the full conservative estimate until a call succeeds.
+
+These estimates are not measured usage, and providers may reject a request that
+passes preflight. If the estimate exceeds the selected or native budget, Anthropic
+requests use the token-counting endpoint with the same effective messages, tools,
+thinking, effort and speed settings. The harness proceeds only when the count fits,
+or when configured native compaction can reduce it at the trigger. A count rejection
+does not authorize generation or replay completed tools. The error reports a safe
+validation category and request ID when available, without copying arbitrary
+upstream text that could contain private content. Unknown errors remain explicitly
+unclassified. "The next generation was not sent" describes that next call, not
+earlier work in the turn. Other oversized requests are rejected before generation.
+Choose a larger supported budget or shorten the conversation when it cannot fit.
 
 ## When selections apply
 

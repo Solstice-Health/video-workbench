@@ -372,7 +372,11 @@ def _lead(ws: Workspace, registry: Registry, swarm: Swarm, message: str, first_t
             return _run_host(ws, registry, swarm, message, first_turn, c, ledger, session, events, fallback=i > 0)
         except Exception as exc:  # the next host in the chain continues
             last = exc
-    raise RuntimeError(f"every main agent host failed; last error: {last}") from last
+    if len(chain) == 1:
+        provider = cfg.get("provider") or cfg.get("host") or "unknown host"
+        raise RuntimeError(f"main agent failed on its only configured host "
+                           f"({provider}/{cfg.get('model', 'unknown model')}): {last}") from last
+    raise RuntimeError(f"all {len(chain)} attempted main agent hosts failed; last error: {last}") from last
 
 
 def _woken(ws: Workspace, message: str, first_turn: bool, fallback: bool, events: list[str] | None = None, *, full_chat: bool = False) -> str:

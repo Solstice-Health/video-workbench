@@ -176,7 +176,8 @@ def test_partial_stream_has_failed_snapshot_but_no_saved_assistant(ctx, monkeypa
 
 def test_context_preflight_prevents_oversized_network_call_and_preserves_user(ctx, monkeypatch):
     monkeypatch.setattr(loop, "_post", lambda *_: pytest.fail("Network should not be reached"))
-    with pytest.raises(loop.ProviderError, match="No model call was sent"):
+    monkeypatch.setattr(loop, "_count_anthropic_tokens", lambda _: 400000)
+    with pytest.raises(loop.ProviderError, match="The next generation was not sent"):
         loop.run(ctx, registry(), cfg(context_window=500), "System", "Huge" * 100, turn_id="1")
     assert read_json(loop.history_path(ctx, "anthropic", "test-model"))["messages"][0]["content"] == "Huge" * 100
 
@@ -216,7 +217,8 @@ def test_image_budget_depends_on_dimensions_and_text_still_enforces_context(ctx,
         message(jpeg.getvalue()), provider="anthropic")
     assert loop._image_tokens((1024, 1024), "anthropic") == 37 * 37 + 512
     monkeypatch.setattr(loop, "_post", lambda *_: pytest.fail("Oversized text must not reach the network"))
-    with pytest.raises(loop.ProviderError, match="No model call was sent"):
+    monkeypatch.setattr(loop, "_count_anthropic_tokens", lambda _: 400000)
+    with pytest.raises(loop.ProviderError, match="Anthropic counted 400,000 input tokens"):
         loop.run(ctx, registry(), cfg(), "System", "Long text " * 40000, turn_id="1")
 
 
@@ -651,8 +653,183 @@ def test_compaction_threshold_headers_counting_and_budget(monkeypatch):
         monkeypatch.setattr(loop, "_count_anthropic_tokens", lambda _, count=actual: count)
         assert loop._check_context(body, selected) == actual
     monkeypatch.setattr(loop, "_count_anthropic_tokens", lambda _: 1000001)
-    with pytest.raises(loop.ProviderError, match="No model call was sent"):
+    with pytest.raises(loop.ProviderError, match="Anthropic counted 1,000,001 input tokens"):
         loop._check_context(body, selected)
+
+
+def count_transport(monkeypatch, response, captured):
+    client = httpx.Client
+    def handle(request):
+        captured.append(request)
+        return response
+    monkeypatch.setattr(loop.httpx, "Client", lambda **kwargs: client(
+        **kwargs, transport=httpx.MockTransport(handle)))
+    monkeypatch.setattr(loop, "secrets", lambda: SimpleNamespace(require=lambda _: "test-count-key"))
+
+
+def test_count_request_preserves_effective_options_and_signed_history(monkeypatch):
+    selected = cfg(model="claude-opus-5-5", speed="fast")
+    signed = {"type": "thinking", "thinking": "Reasoning", "signature": "OPAQUE_SIGNATURE"}
+    messages = [{"role": "user", "content": "First"},
+                {"role": "assistant", "content": [signed, {"type": "text", "text": "Reply"}]},
+                {"role": "user", "content": "Continue"}]
+    body = loop._request("anthropic", selected, "System", messages, loop._tools(registry(), "job_lead", "anthropic"))
+    before = copy.deepcopy(body)
+    captured = []
+    count_transport(monkeypatch, httpx.Response(200, json={"input_tokens": 321}), captured)
+    assert loop._count_anthropic_tokens(body) == 321
+    request = captured[0]
+    assert request.url.path == "/v1/messages/count_tokens"
+    sent = json.loads(request.content)
+    assert sent == {key: value for key, value in body.items() if key not in {"max_tokens", "stream"}}
+    assert sent["output_config"] == {"effort": "max"} and sent["speed"] == "fast"
+    assert sent["messages"][1]["content"][0] == signed
+    assert request.headers["anthropic-beta"] == "fast-mode-2026-02-01,compact-2026-01-12"
+    assert body == before
+
+
+@pytest.mark.parametrize("payload", [None, [], {}, {"input_tokens": True}, {"input_tokens": -1},
+                                     {"input_tokens": "123"}, {"input_tokens": 12.5}])
+def test_invalid_count_never_authorizes_generation(monkeypatch, payload):
+    count_transport(monkeypatch, httpx.Response(200, content=json.dumps(payload)), [])
+    with pytest.raises(loop.ProviderError, match="invalid token-count response"):
+        loop._count_anthropic_tokens({"model": "test", "messages": []})
+
+
+def test_non_json_count_failure_is_safe(monkeypatch):
+    count_transport(monkeypatch, httpx.Response(200, text="<html>PRIVATE upstream content</html>"), [])
+    with pytest.raises(loop.ProviderError, match="token-count check") as error:
+        loop._count_anthropic_tokens({"model": "test", "messages": []})
+    assert "PRIVATE" not in str(error.value)
+
+
+def test_count_rejection_preserves_safe_diagnostic_without_generation_or_retry(ctx, monkeypatch):
+    captured = []
+    count_transport(monkeypatch, httpx.Response(400, headers={"request-id": "req_count_fixture"}, json={
+        "error": {"type": "invalid_request_error", "message":
+                  "messages.2.content.0: Invalid signature in thinking block. PRIVATE transcript test-count-key"}
+    }), captured)
+    monkeypatch.setattr(loop, "_post", lambda *_: pytest.fail("Failed preflight must not generate"))
+    with pytest.raises(loop.ProviderError, match="thinking signature mismatch at messages.2.content.0") as error:
+        loop.run(ctx, registry(), cfg(context_window=500), "System", "Brief", turn_id="1")
+    assert len(captured) == 1
+    assert "req_count_fixture" in str(error.value)
+    assert "PRIVATE" not in str(error.value) and "test-count-key" not in str(error.value)
+    state = read_json(loop.history_path(ctx, "anthropic", "test-model"))
+    assert len(state["messages"]) == 1 and "finished_turn" not in state
+
+
+def test_measured_prefix_avoids_false_overflow_and_survives_resume(ctx, monkeypatch):
+    # The previous actual input is ~328K. Counting its entire transport plus an
+    # opaque signature as text pushes the byte estimate over 1M on the next step.
+    selected = cfg(model="claude-opus-5-5", context_window=1000000, max_output_tokens=128000)
+    signed = {"type": "thinking", "thinking": "Inspect the output", "signature": "opaque" * 40000}
+    tool = {"type": "tool_use", "id": "t1", "name": "file_read", "input": {}}
+    usage = {"input_tokens": 327755, "output_tokens": 1000}
+    replies = [anthropic([signed, tool], "tool_use", usage=usage), anthropic(usage=usage), anthropic(usage=usage)]
+    calls = []
+    fake_calls(monkeypatch, replies, calls)
+    monkeypatch.setattr(loop, "_count_anthropic_tokens", lambda _: pytest.fail("Measured unchanged prefix fits"))
+    reg = registry(lambda *_: ToolResult(text="Evidence " * 5000))
+    assert loop.run(ctx, reg, selected, "System", "Brief " * 120000, turn_id="1") == "Done."
+    assert loop.estimate_tokens(calls[1], provider="anthropic") + selected["max_output_tokens"] > 1000000
+    assert calls[1]["messages"][1]["content"][0] == signed
+    state = read_json(loop.history_path(ctx, "anthropic", selected["model"]))
+    assert state["context_receipt"]["tokens"] == 328755
+    assert "opaque" not in json.dumps(state["context_receipt"])
+    assert loop.run(ctx, reg, selected, "System", "Continue", turn_id="2") == "Done."
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("changed", ["system", "tools", "model", "thinking", "output_config", "speed",
+                                      "context_management", "message", "image"])
+def test_measured_prefix_is_invalidated_by_changed_content_or_settings(monkeypatch, changed):
+    body = {"model": "test", "system": "System", "thinking": {"type": "adaptive"},
+            "tools": [], "output_config": {"effort": "max"}, "speed": "fast",
+            "context_management": {}, "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "Original"}, {"type": "image", "source": {"data": "original"}}]}]}
+    assistant = {"role": "assistant", "content": [{"type": "text", "text": "Reply"}]}
+    receipt = loop._context_receipt(body, assistant, {"input_tokens": 100, "output_tokens": 20})
+    following = {**copy.deepcopy(body), "messages": [*copy.deepcopy(body["messages"]), assistant,
+                                                    {"role": "user", "content": "Continue"}]}
+    monkeypatch.setattr(loop, "estimate_tokens", lambda value, **_: 500000 if isinstance(value, dict) else 50)
+    assert loop._context_estimate(following, cfg(), receipt) == 100 + 20 + 1024 + 50
+    if changed == "message":
+        following["messages"][0]["content"][0]["text"] = "Rewritten"
+    elif changed == "image":
+        following["messages"][0]["content"][1]["source"]["data"] = "new hydration"
+    else:
+        following[changed] = "changed"
+    assert loop._context_estimate(following, cfg(), receipt) == 500000
+
+
+@pytest.mark.parametrize("usage", [{}, {"input_tokens": True, "output_tokens": 1},
+                                   {"input_tokens": 10}, {"input_tokens": 10, "output_tokens": -1}])
+def test_invalid_usage_cannot_create_a_measured_anchor(usage):
+    assert loop._context_receipt({"messages": []}, {"role": "assistant", "content": "Reply"}, usage) is None
+
+
+def test_native_compaction_anchors_only_the_current_effective_prefix(monkeypatch):
+    selected = cfg(model="claude-opus-5-5", context_window=1000000)
+    body = loop._request("anthropic", selected, "System", [{"role": "user", "content": "Earlier history"}], [])
+    assistant = {"role": "assistant", "content": [{"type": "compaction", "content": "Native summary"},
+                                                  {"type": "text", "text": "Reply"}]}
+    receipt = loop._context_receipt(body, assistant, {"input_tokens": 200, "output_tokens": 30})
+    following = loop._request("anthropic", selected, "System", [*body["messages"], assistant,
+                                                               {"role": "user", "content": "Continue"}], [])
+    monkeypatch.setattr(loop, "estimate_tokens", lambda *_args, **_kwargs: 50)
+    assert receipt["messages"] == 1
+    assert loop._context_estimate(following, selected, receipt) == 230 + 1024 + 50
+    assert body["messages"][0]["content"] == "Earlier history"
+
+
+def test_output_reservation_is_rechecked_even_with_unchanged_measured_prefix(monkeypatch):
+    selected = cfg(context_window=300000, max_output_tokens=10000)
+    body = loop._request("anthropic", selected, "System", [{"role": "user", "content": "Brief"}], [])
+    assistant = {"role": "assistant", "content": [{"type": "text", "text": "Reply"}]}
+    receipt = loop._context_receipt(body, assistant, {"input_tokens": 270000, "output_tokens": 100})
+    body["messages"].extend([assistant, {"role": "user", "content": "Continue"}])
+    counted = []
+    def count(body):
+        counted.append(body)
+        return 271000
+    monkeypatch.setattr(loop, "_count_anthropic_tokens", count)
+    assert loop._check_context(body, selected, receipt) < 280000
+    assert not counted
+    body["max_tokens"] = 128000
+    with pytest.raises(loop.ProviderError, match="128,000 reserved for output"):
+        loop._check_context(body, {**selected, "max_output_tokens": 128000}, receipt)
+    assert len(counted) == 1
+
+
+def test_exact_count_checks_budget_without_compaction_and_respects_native_limit(monkeypatch):
+    selected = cfg(context_window=1000000, native_context_window=300000, max_output_tokens=16384)
+    body = loop._request("anthropic", selected, "System", [{"role": "user", "content": "Brief"}], [])
+    monkeypatch.setattr(loop, "estimate_tokens", lambda *_args, **_kwargs: 400000)
+    monkeypatch.setattr(loop, "_count_anthropic_tokens", lambda _: 200000)
+    assert loop._check_context(body, selected) == 200000
+    monkeypatch.setattr(loop, "_count_anthropic_tokens", lambda _: 290000)
+    with pytest.raises(loop.ProviderError, match="native limit 300,000"):
+        loop._check_context(body, selected)
+
+
+def test_new_large_tool_result_still_requires_exact_count(ctx, monkeypatch):
+    selected = cfg(model="claude-opus-5-5", context_window=1000000, max_output_tokens=128000)
+    tool = {"type": "tool_use", "id": "t1", "name": "file_read", "input": {}}
+    usage = {"input_tokens": 850000, "output_tokens": 1000}
+    calls, counted = [], []
+    fake_calls(monkeypatch, [anthropic([tool], "tool_use", usage=usage)], calls)
+    def reject(body):
+        counted.append(body)
+        raise loop.ProviderError("Anthropic rejected the token-count request (HTTP 400). Request ID: req_fixture.")
+    monkeypatch.setattr(loop, "_count_anthropic_tokens", reject)
+    with pytest.raises(loop.ProviderError, match="req_fixture"):
+        loop.run(ctx, registry(lambda *_: ToolResult(text="X" * 60000)), selected, "System", "Brief", turn_id="1")
+    assert len(calls) == len(counted) == 1
+    assert counted[0]["messages"][-1]["content"][0]["type"] == "tool_result"
+    state = read_json(loop.history_path(ctx, "anthropic", selected["model"]))
+    assert len(state["messages"]) == 3 and "pending" not in state
+    assert "finished_turn" not in state
 
 
 def test_compaction_billing_sums_iterations_but_context_uses_final_message():
