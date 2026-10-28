@@ -204,7 +204,10 @@ Spec references: D = decision, X = experiment, R/S = sources (see the spec and t
 - [x] QC chat foundation: separate API conversation/queue and restricted `qc_lead`; version-pinned findings,
   human-sent immutable editor batches, audit filtering, append-only review events, and new-version invalidation.
   `qc_targets`, `qc_view`, `qc_frames`, `qc_items_read`, `qc_item_create` pass through Registry. See `QC_CHAT.md`.
-- [ ] Fresh-context automatic recheck verdicts, tracked annotations and a multi-lane QC review board.
+- [x] Explicit fresh-context rechecks with paired version windows, host-recorded sampled coverage,
+  private result history and human-owned resolution. `qc_recheck_report` uses the `qc.recheck`
+  capability and a dedicated four-tool reviewer role; observations remain unqualified.
+- [ ] Qualified automatic rechecks, tracked annotations and a multi-lane QC review board.
 - [x] T0 lint: delivery, black spans, frozen share, silence, loudness, channel balance, bars, flash frames
 - [x] T1 declared: what every content window keeps, cuts (TEXT-CLIPPED) and drops (TEXT-DROPPED), type size, faces (masks honoured), upscale, camera motion, safe zone
 - [x] Cut boundaries against words (BOUNDARY-WORD)

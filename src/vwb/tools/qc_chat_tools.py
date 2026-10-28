@@ -1,6 +1,7 @@
 """Shared inspection tools and an explicit, filtered findings handoff."""
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from vwb.media.decode import read_frames
@@ -32,7 +33,7 @@ def _target(ctx: ToolContext, target: str) -> tuple[dict, Any]:
     reviewer_family = family(ctx.state.get("qc_model", ""))
     same_model = (bool(row.get("author_model"))
                   and model_identity(row["author_model"]) == model_identity(ctx.state.get("qc_model", "")))
-    if ctx.role == "qc_lead" and (same_model or author_family and reviewer_family == author_family):
+    if ctx.role in {"qc_lead", "qc_rechecker"} and (same_model or author_family and reviewer_family == author_family):
         raise ValueError("This version was authored by the QC model's family. Configure a different QC model family.")
     try:
         current = QCStore(_parent(ctx)).verify_target(target)
@@ -52,16 +53,30 @@ def _frame(value: Any, maximum: int, name: str) -> int:
 
 def _record(ctx: ToolContext, data: dict) -> None:
     append_jsonl(ctx.ws.memory / "qc_inspections.jsonl", {"ts": now_iso(), "actor": ctx.agent, **data})
+    if "qc_recheck" in ctx.state:
+        ctx.state["qc_inspections"].append({**data, "response_index": ctx.state.get("provider_response_index", -1)})
+
+
+def _window(ctx: ToolContext, target: str, f0: int, f1: int) -> None:
+    if "qc_recheck" not in ctx.state:
+        return
+    if len(ctx.state["qc_inspections"]) >= 64:
+        raise ValueError("This recheck reached its 64-inspection limit. Report the evidence collected so far.")
+    record = ctx.state["qc_recheck"]
+    window = next((record[key] for key in ("before", "after") if record[key]["target"] == target), None)
+    if window is None or not window["f0"] <= f0 < f1 <= window["f1"]:
+        raise ValueError("Recheck inspection must stay inside the selected before/after windows.")
 
 
 def qc_view(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     row, path = _target(ctx, args["target"])
     frame = _frame(args.get("frame", 0), row["frames"], "frame")
+    _window(ctx, row["target"], frame, frame + 1)
     pixels = read_frames(path, [frame])[frame]
     _target(ctx, args["target"])
     images = [jpeg_bytes(pixels)]
     region = args.get("region")
-    receipt = {"target": row["target"], "sha256": row["sha256"], "frames": [frame],
+    receipt = {"target": row["target"], "sha256": row["sha256"], "canvas_file_sha256": row["canvas_file_sha256"], "frames": [frame],
                "width": pixels.shape[1], "height": pixels.shape[0], "region": region,
                "author_model": row.get("author_model"), "coverage": "one frame"}
     if region is not None:
@@ -75,8 +90,9 @@ def qc_view(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         box = [region[0] * width, region[1] * height, region[2] * width, region[3] * height]
         images.append(jpeg_bytes(crop(pixels, box)))
         receipt["crop_pixels"] = box
+    result = ToolResult.json(receipt, images=images, artifacts=[row["sha256"]])
     _record(ctx, receipt)
-    return ToolResult.json(receipt, images=images, artifacts=[row["sha256"]])
+    return result
 
 
 def qc_frames(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
@@ -85,6 +101,7 @@ def qc_frames(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     f1 = args["f1"]
     if type(f1) is not int or not f0 < f1 <= row["frames"]:
         raise ValueError("f1 is exclusive and must be after f0 within the video.")
+    _window(ctx, row["target"], f0, f1)
     count = args.get("count", 8)
     if type(count) is not int or not 2 <= count <= 12:
         raise ValueError("Choose 2–12 frames per inspection window.")
@@ -94,10 +111,13 @@ def qc_frames(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     if set(pixels) != set(frames):
         raise ValueError("The decoder did not return every requested frame.")
     sheet = contact_sheet([(f"frame {f} · {f / row['fps']:.3f}s", pixels[f]) for f in frames], cols=3, cell_width=480)
-    receipt = {"target": row["target"], "sha256": row["sha256"], "frames": frames,
+    receipt = {"target": row["target"], "sha256": row["sha256"], "canvas_file_sha256": row["canvas_file_sha256"], "frames": frames,
                "f0": f0, "f1": f1, "coverage": "sampled frames only", "sample_count": len(frames)}
+    # An encoding/result-construction failure must not become evidence that the
+    # model saw these frames on a later provider response.
+    result = ToolResult.json(receipt, images=[jpeg_bytes(sheet)], artifacts=[row["sha256"]])
     _record(ctx, receipt)
-    return ToolResult.json(receipt, images=[jpeg_bytes(sheet)], artifacts=[row["sha256"]])
+    return result
 
 
 def qc_items_read(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
@@ -118,8 +138,41 @@ def qc_item_create(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     return ToolResult.json({"item": item}, artifacts=[item["id"]])
 
 
+def qc_recheck_report(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    if ctx.role != "qc_rechecker" or "qc_recheck" not in ctx.state:
+        raise ValueError("Only a fresh-context recheck can report this assessment.")
+    if set(args) != {"assessment", "summary"}:
+        raise ValueError("Report assessment and summary; inspection coverage is recorded by the host.")
+    if args["assessment"] not in {"persists", "not_observed", "inconclusive"}:
+        raise ValueError("Choose persists, not_observed, or inconclusive.")
+    summary = args["summary"]
+    if not isinstance(summary, str) or not summary.strip() or len(summary) > 4000:
+        raise ValueError("Explain the assessment in 1–4000 characters.")
+    # A model cannot claim it saw images returned by another tool in the same
+    # response. Those pixels first reach it on the NEXT provider request.
+    response = ctx.state.get("provider_response_index", -1)
+    evidence = [{k: v for k, v in receipt.items() if k != "response_index"}
+                for receipt in ctx.state["qc_inspections"] if 0 <= receipt["response_index"] < response]
+    if args["assessment"] != "inconclusive":
+        seen = {receipt["target"] for receipt in evidence if receipt["frames"]}
+        if not {ctx.state["qc_recheck"][key]["target"] for key in ("before", "after")} <= seen:
+            raise ValueError("Inspect both selected windows, receive their image results, then report the assessment.")
+    report = {"assessment": args["assessment"], "summary": summary.strip(), "evidence": evidence}
+    if ctx.state.get("qc_recheck_report") not in (None, report):
+        raise ValueError("This attempt already has a report. Finish the review.")
+    record = ctx.state["qc_recheck"]
+    QCStore(_parent(ctx)).complete_recheck(record["id"], **report,
+                                         model=record["model"], provider=record["provider"])
+    ctx.state["qc_recheck_report"] = deepcopy(report)
+    return ToolResult.json({"recorded": True, "assessment": args["assessment"], "coverage": "sampled_frames_only",
+                            "qualification": "unqualified_visual_review", "human_review_required": True})
+
+
 _region = {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4}
 TOOLS = [
+    Tool("qc_recheck_report", "Record one recheck assessment after receiving image evidence from both selected windows. The host records sampled coverage; this never resolves a finding or certifies a pass.",
+         schema({"assessment": {"type": "string", "enum": ["persists", "not_observed", "inconclusive"]},
+                 "summary": {"type": "string"}}, ["assessment", "summary"]), qc_recheck_report, "qc.recheck", "qc"),
     Tool("qc_targets", "List frozen rendered video versions available for this QC turn.", schema({}), qc_targets, "qc.inspect", "qc"),
     Tool("qc_view", "Inspect one pinned frame plus an optional native crop. Region is normalized [x,y,w,h]. Returns both full context and crop; evidence covers only this frame.",
          schema({"target": {"type": "string"}, "frame": {"type": "integer"}, "region": _region}, ["target", "frame"]), qc_view, "qc.inspect", "qc"),

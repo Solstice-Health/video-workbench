@@ -210,6 +210,15 @@ class TurnQueue:
             self._save(ws)
             return dict(job)
 
+    def recheck_job(self, ws: Workspace, recheck_id: str) -> dict[str, Any] | None:
+        """Latest attempt, including explicit resumes, without provider settings."""
+        with self.lock:
+            for job in reversed(self._state(ws)["jobs"]):
+                if job.get("main_config", {}).get("qc_recheck_id") == recheck_id:
+                    return {key: job[key] for key in ("id", "status", "error", "created_at", "started_at", "finished_at")
+                            if key in job}
+        return None
+
     def cancel(self, ws: Workspace, job_id: str) -> dict[str, Any]:
         with self.lock:
             job = next((j for j in self._state(ws)["jobs"] if j["id"] == job_id), None)

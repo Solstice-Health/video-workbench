@@ -755,7 +755,8 @@ def _save_context(ctx: ToolContext, cfg: dict[str, Any], usage: dict[str, Any], 
 
 def run(ctx: ToolContext, registry: Registry, cfg: dict[str, Any], instructions: str, text: str, *,
         turn_id: str, initial_messages: list[dict[str, Any]] | None = None,
-        attachment_refs: list[dict[str, Any]] | None = None) -> str:
+        attachment_refs: list[dict[str, Any]] | None = None,
+        stop_when: Callable[[], bool] | None = None, output_token_limit: int | None = None) -> str:
     """Run one persistent main-agent turn. Caller holds the workspace turn lock."""
     from vwb.agents.attachment_inputs import content, hydrate
     from vwb.agents.loops import _mailbox
@@ -763,6 +764,10 @@ def run(ctx: ToolContext, registry: Registry, cfg: dict[str, Any], instructions:
     if ctx.swarm is not None and hasattr(ctx.swarm, "prepare_context"):
         ctx.swarm.prepare_context(ctx)
     cfg = direct_anthropic_route(cfg)
+    if output_token_limit is not None:
+        if output_token_limit < 1:
+            raise ValueError("Output token limit must be positive.")
+        cfg = {**cfg, "max_output_tokens": min(int(cfg.get("max_output_tokens", 16384)), output_token_limit)}
     provider, model = cfg["provider"], cfg["model"]
     allow_images = image_input_supported(cfg)
     if provider not in ENDPOINTS:
@@ -829,6 +834,8 @@ def run(ctx: ToolContext, registry: Registry, cfg: dict[str, Any], instructions:
                 _save_context(ctx, measured_cfg, usage, estimated, f"{cfg['host']}:{model}",
                               stop_reason="max_tokens", compaction_count=state.get("compaction_count", 0))
                 ceiling = ANTHROPIC_OUTPUT_LIMITS.get(model, body["max_tokens"])
+                if output_token_limit is not None:
+                    ceiling = min(ceiling, output_token_limit)
                 if attempt or body["max_tokens"] >= ceiling:
                     raise ProviderError(f"Anthropic reached its {body['max_tokens']:,}-token output allowance "
                                         "for one call, including thinking. Context and completed tool results are saved; "
@@ -901,6 +908,9 @@ def run(ctx: ToolContext, registry: Registry, cfg: dict[str, Any], instructions:
             state["finished_turn"] = turn_id
             write_json(path, state)
             return answer
+        # Evidence tools distinguish images produced in this response's tool
+        # batch from images the model could already see in an earlier request.
+        ctx.state["provider_response_index"] = step
         for call in calls:
             detail = {"id": f"{provider}:{call['id']}", "source": provider, "name": call["name"],
                       "arguments": call["arguments"]}
@@ -923,5 +933,9 @@ def run(ctx: ToolContext, registry: Registry, cfg: dict[str, Any], instructions:
                                   "output": result.text[:MAX_TOOL_CHARS]})
         state["messages"].extend(state["pending"]["images"])
         state.pop("pending", None)
+        if stop_when is not None and stop_when():
+            state["finished_turn"] = turn_id
+            write_json(path, state)
+            return answer
         write_json(path, state)
     raise ProviderError("The model reached its step budget without a final answer. Your conversation and tool results are saved.")

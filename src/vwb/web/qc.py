@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from copy import deepcopy
 from urllib.parse import quote
 
 from filelock import FileLock
@@ -33,6 +34,7 @@ def snapshot(app, parent):
     for turn in request["chat"]:
         turn["attachments"] = [attachment_entry(parent, ref) for ref in turn.get("attachments", [])]
     store = QCStore(parent)
+    store.reconcile()
     targets = [{**row, "url": app.file_url(parent, rendered_path(parent, row["target"]))}
                for row in store.targets()]
     queue = app.queue.snapshot(ws)
@@ -40,12 +42,60 @@ def snapshot(app, parent):
         job["attachment_refs"] = [attachment_entry(parent, ref) for ref in job.get("attachment_refs", [])]
     return {"request": request, **queue, **event_page(ws), "usage": context_usage(ws),
             "model": {"model": cfg["model"], "provider": cfg["provider"]},
-            "targets": targets, "items": store.list_items(audience="qc")}
+            "targets": targets, "items": store.list_items(audience="qc"),
+            "rechecks": [{**record, "job": app.queue.recheck_job(ws, record["id"])}
+                         for record in store.list_rechecks()]}
+
+
+def submit_recheck(app, parent, ws, store, body):
+    from vwb.models import image_input_supported
+    from vwb.qc.recheck import INSTRUCTIONS, independent, targets
+
+    required = {"item_id", "target", "f0", "f1", "pin", "expected_revision", "idempotency_key"}
+    if not isinstance(body, dict) or set(body) != required:
+        raise ValueError("Choose a finding, pinned newer version and frame window for the recheck.")
+    key = body["idempotency_key"]
+    if not isinstance(key, str) or not 1 <= len(key) <= 200:
+        raise ValueError("Invalid recheck submission key.")
+    signature = sha256_json(body)
+    path = ws.memory / "recheck_submissions.json"
+    with FileLock(str(path.with_suffix(".lock"))):
+        submissions = read_json(path, {})
+        previous = submissions.get(key)
+        if previous is not None and previous["signature"] != signature:
+            raise ValueError("This recheck submission key belongs to another selection.")
+        if previous is None:
+            cfg = deepcopy(slot("qc"))
+            if cfg.get("provider") not in {"anthropic", "openrouter"} or not image_input_supported(cfg):
+                raise ValueError("Rechecks require an Anthropic or OpenRouter model with image input.")
+            cfg["host"] = f"{cfg['provider']}_api"
+            cfg.pop("fallbacks", None)
+            cfg["qc_recheck_instructions"] = INSTRUCTIONS
+            cfg["max_turns"] = min(int(cfg.get("max_turns", 12)), 12)
+            cfg["max_output_tokens"] = min(int(cfg.get("max_output_tokens", 8192)), 8192)
+            finding = store.get(body["item_id"])
+            for target in (finding["anchor"], store.verify_target(body["target"])):
+                independent(target, cfg["model"])
+            # Persist model/prompt BEFORE preparation. A retry after any later
+            # crash must retain this configuration and the same durable job key.
+            previous = {"signature": signature, "cfg": cfg}
+            submissions[key] = previous
+            write_json(path, submissions)
+        cfg = deepcopy(previous["cfg"])
+        record = store.prepare_recheck(body["item_id"], body["target"], f0=body["f0"], f1=body["f1"],
+                                       pin=body["pin"], expected_revision=body["expected_revision"],
+                                       idempotency_key=key, model=cfg["model"], provider=cfg["provider"])
+        cfg.update(qc_recheck_id=record["id"], qc_targets=targets(record))
+        job = app.queue.enqueue(ws, message=f"Recheck finding {record['item_id']} on {record['after']['target']}.",
+                                main_config=cfg, skip_index=True, idempotency_key=f"qc-recheck:{record['id']}")
+        return {"recheck": record, "job": job}
 
 
 def mutate(app, parent, path, body):
     ws = workspace(parent)
     store = QCStore(parent)
+    if path == ["rechecks"]:
+        return submit_recheck(app, parent, ws, store, body)
     if path == ["messages"]:
         message = app.message(body)
         mode = body.get("mode", "queue")
