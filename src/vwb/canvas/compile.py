@@ -29,12 +29,12 @@ from vwb.canvas.model import (
     VideoLayer,
     font_library,
 )
+from vwb.canvas.paths import checked_path, output_id, read_record
 from vwb.config import load_profile
 from vwb.index.ocr import CLAIM_HINT
 from vwb.index.store import IndexStore
 from vwb.media.probe import probe
 from vwb.util.hashing import sha256_json
-from vwb.util.jsonio import read_json
 from vwb.workspace import Workspace
 from vwb.workspace.registry import Registry
 
@@ -43,11 +43,11 @@ PLATE_TYPES = (TextLayer, CaptionsLayer, ShapeLayer)
 
 
 def working_path(ws: Workspace, output: str) -> Path:
-    return ws.work / "outputs" / output / "canvas.json"
+    return checked_path(ws.root, "work", "outputs", output_id(output), "canvas.json")
 
 
 def load_working(ws: Workspace, output: str) -> Canvas:
-    data = read_json(working_path(ws, output))
+    data = read_record(ws.root, "work", "outputs", output_id(output), "canvas.json")
     if data is None:
         raise FileNotFoundError(f"no working canvas for {output}; create it with canvas_new")
     req = ws.load()

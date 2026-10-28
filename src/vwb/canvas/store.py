@@ -15,6 +15,7 @@ from filelock import FileLock
 
 from vwb.canvas.compile import check, expand, load_working
 from vwb.canvas.model import Canvas
+from vwb.canvas.paths import checked_path, output_id, read_record, read_text, version_number
 from vwb.util.hashing import sha256_json
 from vwb.util.jsonio import read_json, write_json
 from vwb.workspace import Workspace
@@ -23,23 +24,29 @@ from vwb.workspace import Workspace
 class CanvasStore:
     def __init__(self, canvas_dir: Path):
         self.dir = Path(canvas_dir)
+        checked_path(self.dir.parent, self.dir.name)
         self.dir.mkdir(parents=True, exist_ok=True)
 
     def head(self, output: str) -> int | None:
-        p = self.dir / output / "HEAD"
-        return int(p.read_text().strip()) if p.exists() else None
+        output_id(output)
+        try:
+            return version_number(int(read_text(self.dir.parent, self.dir.name, output, "HEAD").strip()))
+        except FileNotFoundError:
+            return None
 
     def outputs(self) -> list[str]:
-        return sorted(p.name for p in self.dir.iterdir() if p.is_dir() and (p / "HEAD").exists())
+        return sorted(p.name for p in self.dir.iterdir()
+                      if not p.is_symlink() and p.is_dir() and (p / "HEAD").exists())
 
     def path(self, output: str, version: int) -> Path:
-        return self.dir / output / f"v{version}.json"
+        return checked_path(self.dir.parent, self.dir.name, output_id(output), f"v{version_number(version)}.json")
 
     def get(self, output: str, version: int | None = None) -> Canvas:
-        version = version or self.head(output)
+        output_id(output)
+        version = self.head(output) if version is None else version_number(version)
         if version is None:
             raise KeyError(f"No committed canvas for output {output!r}")
-        return Canvas.model_validate(read_json(self.path(output, version)))
+        return Canvas.model_validate(read_record(self.dir.parent, self.dir.name, output, f"v{version}.json"))
 
     def commit(self, ws: Workspace, output: str, author: str, message: str = "") -> tuple[Canvas, list[dict[str, Any]]]:
         """Check, expand and snapshot the working canvas. Raises with the errors if any."""
@@ -49,7 +56,7 @@ class CanvasStore:
         if errors:
             raise ValueError("canvas has errors:\n" + "\n".join(f"  {e['where']}: {e['why']}" for e in errors))
         canvas = expand(ws, canvas)
-        out_dir = self.dir / output
+        out_dir = checked_path(self.dir.parent, self.dir.name, output_id(output))
         out_dir.mkdir(parents=True, exist_ok=True)
         with FileLock(str(out_dir / ".lock")):
             head = self.head(output)
@@ -69,8 +76,8 @@ class CanvasStore:
             if path.exists():
                 raise FileExistsError(f"{path} exists; canvas versions are immutable")
             write_json(path, data)
-            (out_dir / "HEAD").write_text(str(canvas.version))
-        return Canvas.model_validate(read_json(path)), [p for p in problems if p["severity"] == "warn"]
+            checked_path(self.dir.parent, self.dir.name, output, "HEAD").write_text(str(canvas.version))
+        return self.get(output, canvas.version), [p for p in problems if p["severity"] == "warn"]
 
     def diff(self, output: str, a: int, b: int) -> dict[str, Any]:
         ca, cb = self.get(output, a).dump(), self.get(output, b).dump()

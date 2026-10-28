@@ -19,6 +19,7 @@ from PIL import Image, ImageDraw
 from vwb.canvas import copydeck
 from vwb.canvas.compile import check, expand, load_working, plan, working_path
 from vwb.canvas.model import font_library
+from vwb.canvas.paths import output_id, read_record, version_number
 from vwb.canvas.store import CanvasStore
 from vwb.config import DOCS_DIR, load_profile
 from vwb.index.store import IndexStore
@@ -28,7 +29,7 @@ from vwb.qc import inspect, lint
 from vwb.render import pipeline, plates
 from vwb.render.compositor import Compositor
 from vwb.tools.base import Tool, ToolContext, ToolResult, parse_json_arg, schema
-from vwb.util.jsonio import read_json, write_json
+from vwb.util.jsonio import write_json
 from vwb.util.timecode import fmt
 from vwb.verify.verifier import verify
 from vwb.workspace import flags
@@ -337,7 +338,7 @@ def canvas_list(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     rows = []
     for out in sorted(set(working) | set(store.outputs())):
         v = store.head(out)
-        ver = read_json(ctx.ws.qc / out / f"v{v}" / "verification.json", {}) if v else {}
+        ver = read_record(ctx.ws.root, "qc", output_id(out), f"v{version_number(v)}", "verification.json", default={}) if v else {}
         rows.append({"output": out, "working_file": out in working, "head": v,
                      "rendered": bool(v) and (pipeline.render_dir(ctx.ws, out, v) / "receipt.json").exists(),
                      "triage": ver.get("triage")})
@@ -358,9 +359,12 @@ def render_output(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
 
 
 def render_info(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
-    v = a.get("version") or _store(ctx).head(a["output"])
-    rec = read_json(pipeline.render_dir(ctx.ws, a["output"], v) / "receipt.json", {})
-    ver = read_json(ctx.ws.qc / a["output"] / f"v{v}" / "verification.json", {})
+    output = output_id(a["output"])
+    v = _store(ctx).head(output) if a.get("version") is None else version_number(a["version"])
+    if v is None:
+        return ToolResult.json({"receipt": {}, "triage": None, "open_flags": []})
+    rec = pipeline.render_receipt(ctx.ws, output, v, {})
+    ver = read_record(ctx.ws.root, "qc", output, f"v{v}", "verification.json", default={})
     return ToolResult.json({"receipt": rec, "triage": ver.get("triage"),
                             "open_flags": [f"{f['severity']} {f['kind']}: {f['summary'][:100]}" for f in ver.get("flags", [])
                                            if f["status"] == "open"]})
@@ -373,7 +377,7 @@ def qc_run(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
         return ToolResult.json({"runs": [{"output": r.data["output"], "version": r.data["version"], "failing": r.data["failing"]}
                                          if not r.is_error else {"error": r.text} for r in runs]})
     c = _store(ctx).get(a["output"], a.get("version"))
-    rec = read_json(pipeline.render_dir(ctx.ws, c.output, c.version) / "receipt.json")
+    rec = pipeline.render_receipt(ctx.ws, c.output, c.version)
     if not rec:
         return ToolResult.error("render the output first (render_output)")
     mp4 = Path(rec["file"])
@@ -397,7 +401,7 @@ def qc_peek(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
         parts = [qc_peek(ctx, {"output": o, "n": a.get("n", 6)}) for o in a["outputs"]]
         return ToolResult(text="\n".join(p.text for p in parts), images=[i for p in parts for i in p.images])
     c = _store(ctx).get(a["output"], a.get("version"))
-    rec = read_json(pipeline.render_dir(ctx.ws, c.output, c.version) / "receipt.json")
+    rec = pipeline.render_receipt(ctx.ws, c.output, c.version)
     if not rec:
         return ToolResult.error("render the output first (render_output)")
     if a.get("times"):

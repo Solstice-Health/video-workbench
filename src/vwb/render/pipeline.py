@@ -9,12 +9,13 @@ from typing import Any
 
 from vwb.canvas.compile import plan
 from vwb.canvas.model import Canvas
+from vwb.canvas.paths import checked_path, output_id, read_record, version_number
 from vwb.canvas.store import CanvasStore
 from vwb.config import load_profile
 from vwb.render import audio_mix, plates
 from vwb.render.compositor import COMPOSITOR_VERSION, Compositor, encode
 from vwb.util.hashing import sha256_file
-from vwb.util.jsonio import read_json, write_json
+from vwb.util.jsonio import write_json
 from vwb.util.procs import ffmpeg_version
 from vwb.workspace import Workspace
 from vwb.workspace.ledger import Ledger
@@ -22,7 +23,11 @@ from vwb.workspace.registry import Registry
 
 
 def render_dir(ws: Workspace, output: str, version: int) -> Path:
-    return ws.renders / output / f"v{version}"
+    return checked_path(ws.root, "renders", output_id(output), f"v{version_number(version)}")
+
+
+def render_receipt(ws: Workspace, output: str, version: int, default: Any = None) -> Any:
+    return read_record(ws.root, "renders", output_id(output), f"v{version_number(version)}", "receipt.json", default=default)
 
 
 def plate_jobs(canvas: Canvas, ws: Workspace | None = None) -> list[tuple[str, dict[str, Any]]]:
@@ -41,12 +46,12 @@ def render(ws: Workspace, output: str, version: int | None = None, actor: str = 
     out_dir = render_dir(ws, output, canvas.version)
     receipt_path = out_dir / "receipt.json"
     if receipt_path.exists() and not force:
-        return read_json(receipt_path)
+        return render_receipt(ws, output, canvas.version)
     out_dir.mkdir(parents=True, exist_ok=True)
     from filelock import FileLock
     with FileLock(str(out_dir / ".render.lock")):          # one render of a version at a time; the next reuses it
         if receipt_path.exists() and not force:
-            return read_json(receipt_path)
+            return render_receipt(ws, output, canvas.version)
         return _render_locked(ws, canvas, output, out_dir, receipt_path, actor)
 
 
