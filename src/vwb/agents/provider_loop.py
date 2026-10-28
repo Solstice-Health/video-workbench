@@ -22,6 +22,7 @@ import httpx
 from PIL import Image
 
 from vwb.agents.events import MAX_TOOL_CHARS, emit
+from vwb.agents.provider_errors import token_count_failure
 from vwb.config import secrets
 from vwb.models import direct_anthropic_route, image_input_supported
 from vwb.tools.base import Registry, ToolContext, ToolResult
@@ -54,7 +55,7 @@ IMAGE_UNAVAILABLE = ("[harness] Image pixels were not sent because this model ha
 
 
 class ProviderError(RuntimeError):
-    """A safe, actionable error with no upstream bodies, headers or credentials."""
+    """A safe error; upstream diagnostics retain only allowlisted metadata."""
 
 
 def history_path(ctx: ToolContext, provider: str, model: str) -> Path:
@@ -416,35 +417,93 @@ def _compaction_strategy(cfg: dict[str, Any]) -> dict[str, Any] | None:
             "instructions": COMPACTION_INSTRUCTIONS}
 
 
+def _context_options(body: dict[str, Any]) -> str:
+    # The output reservation is checked separately, including an output-limit
+    # retry. All other options that can change the provider's input stay bound.
+    return sha256_text(json.dumps({key: value for key, value in body.items()
+                                  if key not in {"messages", "max_tokens", "stream"}},
+                                 sort_keys=True, ensure_ascii=False))
+
+
+def _context_receipt(body: dict[str, Any], assistant: dict[str, Any], usage: dict[str, Any]) -> dict | None:
+    """Bind measured usage to the exact hydrated prefix; store hashes, not pixels.
+
+    Include the returned assistant message in the anchor. Output usage accounts
+    for its reasoning as well as its visible text, without treating opaque
+    signatures as text tokens. New tool results are estimated on the next call.
+    """
+    if any(type(usage.get(key)) is not int or usage[key] < 0 for key in ("input_tokens", "output_tokens")):
+        return None
+    messages = _effective_anthropic_messages([*body["messages"], assistant])
+    return {"version": 1, "options_sha256": _context_options(body), "messages": len(messages),
+            "messages_sha256": sha256_text(json.dumps(messages, sort_keys=True, ensure_ascii=False)),
+            "tokens": usage["input_tokens"] + usage["output_tokens"]}
+
+
+def _context_estimate(body: dict[str, Any], cfg: dict[str, Any], receipt: dict | None) -> int:
+    """Use measurements only for an unchanged prefix; bound new content normally.
+
+    Edits, different tools/settings, changed image hydration, and compaction that
+    doesn't match the anchor invalidate it. Missing/legacy usage never authorizes
+    an optimistic guess. This estimate is not presented as measured usage.
+    """
+    if cfg.get("provider") == "anthropic" and isinstance(receipt, dict) and receipt.get("version") == 1:
+        count, tokens = receipt.get("messages"), receipt.get("tokens")
+        messages = body.get("messages", [])
+        if (type(count) is int and 0 < count <= len(messages) and type(tokens) is int and tokens >= 0
+                and receipt.get("options_sha256") == _context_options(body)
+                and receipt.get("messages_sha256") == sha256_text(
+                    json.dumps(messages[:count], sort_keys=True, ensure_ascii=False))):
+            # A framing allowance plus the existing byte/pixel bound for every
+            # newly appended item; never extrapolate a token/byte compression ratio.
+            return tokens + 1024 + estimate_tokens(messages[count:], provider="anthropic")
+    return estimate_tokens(body, provider=cfg.get("provider"))
+
+
 def _count_anthropic_tokens(body: dict[str, Any]) -> int:
-    payload = {key: body[key] for key in ("model", "system", "messages", "tools", "thinking", "context_management") if key in body}
+    # Count the same effective request, including effort/speed. Keep signed
+    # messages byte-for-byte intact; only generation-only options are omitted.
+    fields = ("model", "system", "messages", "tools", "tool_choice", "thinking", "context_management",
+              "output_config", "speed")
+    payload = {key: body[key] for key in fields if key in body}
     try:
         with httpx.Client(timeout=30, trust_env=False) as client:
             response = client.post("https://api.anthropic.com/v1/messages/count_tokens",
                                    headers=_anthropic_headers(body), json=payload)
         if response.status_code != 200:
-            raise ProviderError(f"Anthropic token counting failed (HTTP {response.status_code}). No generation was sent.")
-        count = response.json().get("input_tokens")
+            raise ProviderError(token_count_failure(response))
+        result = response.json()
+        count = result.get("input_tokens") if isinstance(result, dict) else None
         if type(count) is not int or count < 0:
-            raise ProviderError("Anthropic returned an invalid context count. No generation was sent.")
+            raise ProviderError("Anthropic returned an invalid token-count response. "
+                                "The next generation was not sent; completed work is saved.")
         return count
     except (httpx.HTTPError, ValueError):
-        raise ProviderError("Could not count the Anthropic context. No generation was sent; try again.") from None
+        raise ProviderError("Could not complete Anthropic's token-count check. "
+                            "The next generation was not sent; completed work is saved. Try again.") from None
 
 
-def _check_context(body: dict[str, Any], cfg: dict[str, Any]) -> int:
+def _check_context(body: dict[str, Any], cfg: dict[str, Any], receipt: dict | None = None) -> int:
     limit = int(cfg.get("context_window", 300000))
     output = int(cfg.get("max_output_tokens", 16384))
-    estimated = estimate_tokens(body, provider=cfg.get("provider"))
-    if estimated + output > limit and body.get("context_management") and cfg.get("provider") == "anthropic":
+    native = int(cfg.get("native_context_window", limit))
+    budget = min(limit, native)
+    estimated = _context_estimate(body, cfg, receipt)
+    if estimated + output > budget and cfg.get("provider") == "anthropic":
         # Conservative byte estimates can be several times the true token
         # count. Count only near the bound; the native summary handles growth.
         actual = _count_anthropic_tokens(body)
-        strategy = body["context_management"]["edits"][0]
-        native = int(cfg.get("native_context_window", limit))
-        if actual + output <= limit or (actual >= strategy["trigger"]["value"] and actual <= native):
+        edits = body.get("context_management", {}).get("edits", [])
+        strategy = next((edit for edit in edits if edit.get("type") == "compact_20260112"), None)
+        if actual + output <= budget or (strategy and actual >= strategy["trigger"]["value"] and actual <= native):
             return actual
-    if estimated + output > limit:
+        raise ProviderError(
+            f"Anthropic counted {actual:,} input tokens; the selected context budget is {limit:,} "
+            f"with {output:,} reserved for output (native limit {native:,}). "
+            "Choose a larger supported context or shorten the conversation. "
+            "The next generation was not sent; completed work is saved."
+        )
+    if estimated + output > budget:
         raise ProviderError(
             f"This conversation exceeds the selected {limit:,}-token context budget under the "
             "history estimate. Choose a larger context or start a new conversation. No model call was sent."
@@ -737,7 +796,7 @@ def run(ctx: ToolContext, registry: Registry, cfg: dict[str, Any], instructions:
         effective = _anthropic_replay(state) if provider == "anthropic" else state["messages"]
         body = _request(provider, cfg, instructions,
                         hydrate(ctx.ws, effective, provider, allow_images=allow_images), tools)
-        estimated = _check_context(body, cfg)
+        estimated = _check_context(body, cfg, state.get("context_receipt"))
         started = time.time()
         ident = f"{provider}:{turn_id}:{step}"
         emit(ctx.ws, "thinking", {"id": ident, "source": provider, "status": "in_progress",
@@ -789,7 +848,7 @@ def run(ctx: ToolContext, registry: Registry, cfg: dict[str, Any], instructions:
                 if strategy:
                     body["context_management"] = {"edits": [strategy]}
                 usage = {}
-                estimated = _check_context(body, {**cfg, "max_output_tokens": ceiling})
+                estimated = _check_context(body, {**cfg, "max_output_tokens": ceiling}, state.get("context_receipt"))
                 started = time.time()
                 emit(ctx.ws, "thinking", {"id": ident, "source": provider, "status": "in_progress",
                                           "text": "Continuing with a larger output allowance."})
@@ -809,6 +868,8 @@ def run(ctx: ToolContext, registry: Registry, cfg: dict[str, Any], instructions:
             raise
         state["messages"].append(assistant)
         state["usage"] = usage
+        if provider == "anthropic":
+            state["context_receipt"] = _context_receipt(body, assistant, usage)
         for block in assistant.get("content", []) if provider == "anthropic" else []:
             if block.get("type") == "compaction":
                 valid = isinstance(block.get("content"), str) and bool(block["content"].strip())
