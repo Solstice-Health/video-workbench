@@ -281,7 +281,7 @@ class Workbench:
             return None
         return f"/files/{quote(ws.id)}/{quote(relative.as_posix())}"
 
-    def outputs(self, ws: Workspace) -> list[dict[str, Any]]:
+    def outputs(self, ws: Workspace, *, qc_store=None, qc_outputs: set[str] | None = None) -> list[dict[str, Any]]:
         flags: dict[str, dict[str, Any]] = {}
         for ev in _rows(ws.ledger / "ledger.jsonl"):
             data = ev.get("data", {})
@@ -315,6 +315,23 @@ class Workbench:
                          "duration_s": receipt.get("seconds"),
                          "flags": [f for f in flags.values() if f.get("output") == out and f.get("version") == version],
                          "review_url": self.file_url(ws, review_path)})
+            if qc_store is not None and (qc_outputs is None or out in qc_outputs) and rows[-1]["video_url"]:
+                from vwb.qc.chat_store import QCStoreError
+                try:
+                    target = qc_store.describe_target(f"output:{out}@v{version}")
+                    # A receipt may point at another file. Only certify the exact
+                    # video displayed by this output row, never a nearby render.
+                    displayed = (render / f"{out}_v{version}.mp4").relative_to(ws.root).as_posix()
+                    if target["file"] == displayed:
+                        rows[-1]["qc_target"] = {
+                            key: target[key] for key in ("target", "output", "version", "file", "fps", "frames",
+                                                        "sha256", "canvas_file_sha256")
+                        }
+                        rows[-1]["qc_target"]["url"] = rows[-1]["video_url"]
+                except (QCStoreError, OSError):
+                    # The sent finding remains visible, but cannot seek into an
+                    # unverified render. Do not expose private store diagnostics.
+                    pass
         return rows
 
     def snapshot(self, ws: Workspace, *, after: int | None = None, before: int | None = None,
@@ -340,7 +357,19 @@ class Workbench:
                     source.pop("path", None)
                 for turn in req["chat"]:
                     turn["attachments"] = [self.attachment_entry(ws, ref) for ref in turn.get("attachments", [])]
-                payload.update(request=req, outputs=self.outputs(ws))
+                from vwb.qc.chat_store import QCStore, QCStoreError
+                qc_store, qc_findings = None, []
+                # Reading Edit must not initialize QC, reconcile findings, or
+                # consult live/private item state. Only sent snapshots cross over.
+                if (ws.root / ".qc-chat/events.jsonl").is_file():
+                    try:
+                        qc_store = QCStore(ws)
+                        qc_findings = qc_store.list_items(audience="editor")
+                    except (QCStoreError, OSError):
+                        qc_store = None
+                payload.update(request=req, outputs=self.outputs(ws, qc_store=qc_store if qc_findings else None,
+                               qc_outputs={item["anchor"]["output"] for item in qc_findings}),
+                               qc_findings=qc_findings)
             for job in [*payload.get("queue", []), *([payload["active"]] if payload.get("active") else [])]:
                 job["attachment_refs"] = [self.attachment_entry(ws, ref) for ref in job.get("attachment_refs", [])]
             return payload

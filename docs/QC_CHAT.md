@@ -1,4 +1,4 @@
-# QC chat: first build increment
+# QC chat: pinned findings and fresh-context rechecks
 
 The QC feature starts from `codex/feat-code-intelligence` at `b974eee`, on
 `codex/feat-qc-chat`. The first increment provides a usable independent review
@@ -38,8 +38,51 @@ changes do not silently alter an already sent batch.
 
 Human resolution and dismissal are explicit events with revision checks. When
 an editing turn produces a newer rendered version, unresolved findings become
-`needs_recheck`. This first increment records the need for a recheck; it does not
-run an autonomous second judge or mark the new render as passing.
+`needs_recheck`. This invalidation also happens when QC is opened after a render
+created outside the UI. It does not start a model call or mark the new render as
+passing.
+
+## Compare and recheck a finding
+
+For an open finding, choose a newer rendered version of the same output and
+select its frame window. Compare the original and newer windows before submitting
+**Recheck with fresh context**. Different frame rates or durations require an
+explicit new range. Equal clocks are only a convenient initial selection: cuts,
+retiming and composition changes can still move the subject. Region overlays
+reuse normalized coordinates; they do not track objects. Paired seeking aligns
+elapsed time from the chosen window starts, not semantic content.
+
+The recheck joins the QC queue and uses its existing Stop/Resume controls. Every
+attempt, including a resumed attempt, starts with a new provider history. It sees
+only the frozen finding's expectation/observation/category, the original window
+and the selected newer window. It cannot read either continuing chat, other
+findings, attachments, workspace files or the editor's reasoning. It can inspect
+only the two selected windows and submit one structured assessment. Known author
+model families must differ from the reviewer. Unknown historical authors remain
+unknown.
+
+The result is **Issue observed**, **Not observed in sampled frames**, or
+**Inconclusive**. The host records exact inspected frames and media hashes from
+successful inspection calls. A substantive report requires images from both
+windows to have reached a previous model request; a report issued alongside its
+first inspection calls is refused. Each attempt permits at most 12 model
+responses, 8,192 output tokens per call (including truncation retries), and 64
+inspections. Reports are persisted before acknowledgement and finish the attempt
+without another generation. The result remains an **unqualified visual review**:
+these checks have not been calibrated on held-out defects, and sampled images
+cannot establish whole-video, motion or audio correctness.
+
+Rechecks never resolve or dismiss findings. A later human disposition, changed
+finding revision or newer render makes the recorded result stale without erasing
+it. Changed media bytes prevent completion. Failed attempts retain their private
+logs; an explicit retry starts another fresh attempt. Restart does not replay
+queued work. No automatic paid recheck is scheduled by polling or rendering.
+
+QC timeline markers refer to findings on the exact selected media pin. Edit's
+output panel receives only the frozen findings explicitly sent by the person;
+private observations, rechecks and later dispositions remain private. A finding
+from an older output version is labeled accordingly rather than seeking an
+unrelated frame in the current version.
 
 ## Context and persistence
 
@@ -75,7 +118,7 @@ privileges; it is not a filesystem isolation boundary for a sealed evaluation.
 `QCStore` stores `.qc-chat/items.json` and an append-only `.qc-chat/events.jsonl`.
 The log is authoritative and repairs a stale materialized snapshot after a crash.
 Events distinguish human findings, model observations, human disposition, handoff
-and recheck invalidation. Version pins, actor, model and timestamps remain attached
+and recheck invalidation, preparation and completion. Version pins, actor, model and timestamps remain attached
 to the evidence. A machine observation is never silently relabeled as human gold.
 
 These records are the foundation for the RSI work: collect attributable review
@@ -93,6 +136,7 @@ All tools use `Registry.call` and the policy dial:
 | `qc_frames` | `qc.inspect` | 2–12 numbered sample frames in an explicit range |
 | `qc_items_read` | `qc.read` | QC sees its findings; other roles see only human-sent snapshots |
 | `qc_item_create` | `qc.findings` | Model observation, immutable media pin and actor/model attribution |
+| `qc_recheck_report` | `qc.recheck` | Fresh reviewer only; host-recorded coverage, no human disposition |
 
 Inspection receipts record the exact frames examined. Samples do not establish
 coverage of unsampled frames or a whole-video pass. Checklists can be read with
@@ -100,8 +144,8 @@ the existing attachment and PDF tools inside the private QC workspace.
 
 ## Next increments
 
-1. Fresh-context recheck execution with explicit coverage and qualified checks;
-   version comparisons and timeline markers in both views.
+1. Qualify review checks against known-good examples and planted defects; evaluate
+   bounded automatic rechecks before adding explicit opt-in scheduling.
 2. A larger review board with multiple synchronized media lanes, source/imported
    videos, arrows and freehand marks, and tracked regions.
 3. Qualified paired-frame/window questions, detection and segmentation adapters,
@@ -114,5 +158,14 @@ the existing attachment and PDF tools inside the private QC workspace.
 Tests cover pin integrity, revision conflicts, private finding filtering,
 interrupted handoff recovery, concurrent writes, new-version invalidation,
 provider history isolation, forbidden tool calls, queue concurrency and restart,
-HTTP authorization and frontend geometry/state transitions. Model tests stub the
-provider boundary; they do not establish live model quality or qualification.
+HTTP authorization and frontend geometry/state transitions. They also cover
+encoding failures, evidence delivery, durable report acknowledgement, hard output
+limits, cached pin validation, and multi-digit comparison frame entry.
+
+The recheck increment passed **2,114 tests, with 9 skipped**. Browser checks covered
+paired frame seeking, pinned timeline selection, explicit queue submission and
+editor handoff filtering. Two live synthetic cases used generated red rectangles:
+the corrected clipping was reported as not observed in sampled frames, and the
+unchanged clipping as persisting. Both findings retained their human-review
+status. These small smoke checks do not establish model quality or qualification;
+the regression suite otherwise stubs provider calls.

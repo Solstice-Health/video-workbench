@@ -52,4 +52,27 @@
 .qc-composer-help {margin:8px 4px 0;}
 .qc-usage {margin:0 4px; color:var(--ds-text-secondary);}
 .qc-panel .qc-usage summary {padding:4px 0; font-size:12px; line-height:16px;}
+.qc-comparison {container-type:inline-size; padding:12px; border:1px solid var(--ds-border-divider); border-radius:8px; background:var(--ds-surface-sunken); scroll-margin-top:12px; overflow-wrap:anywhere;}
+.qc-comparison h3, .qc-comparison h4, .qc-rechecks h4 {font-size:13px; line-height:20px; margin:4px 0 8px; font-weight:600;}
+.qc-comparison dl {margin:8px 0;}
+.qc-comparison dt {font-size:12px; font-weight:600;}
+.qc-comparison dd {margin:0 0 8px; white-space:pre-wrap;}
+.qc-comparison-lanes {display:grid; grid-template-columns:minmax(0,1fr); gap:16px; margin:12px 0;}
+.qc-comparison-lane {min-width:0;}
+.qc-comparison-lane > label {margin-top:8px;}
+@container (min-width:540px) {.qc-comparison-lanes {grid-template-columns:repeat(2,minmax(0,1fr));}}
+.qc-panel .qc-confirm {flex-direction:row; align-items:flex-start; gap:8px; margin:12px 0;}
+.qc-confirm input {flex-shrink:0; margin-top:3px;}
+.qc-comparison-player input[type=range] {padding:6px 0; box-shadow:none; accent-color:var(--ds-action-accent);}
+.qc-compare-action {display:inline-block; margin:8px 0 8px 12px;}
+.qc-rechecks {border-top:1px solid var(--ds-border-divider); margin-top:12px; padding-top:8px;}
+.qc-recheck {border-left:2px solid var(--ds-border-divider); padding:0 0 8px 10px; margin:12px 0;}
+.qc-recheck-assessment {display:block; font-size:13px;}
+.qc-recheck-summary {white-space:pre-wrap;}
+.qc-evidence-entry {padding:4px 0 8px; border-bottom:1px solid var(--ds-border-divider);}
+.qc-evidence-entry p {margin:4px 0;}
+.qc-marker-timeline {margin:8px 0;}
+.qc-marker-row {position:relative; height:24px; margin:2px 10px; background:linear-gradient(transparent 11px,var(--ds-border-divider) 11px,var(--ds-border-divider) 13px,transparent 13px);}
+.qc-timeline-marker {position:absolute; top:4px; height:16px; min-width:4px; padding:0; border:0; border-radius:3px; background:var(--ds-action-accent); cursor:pointer;}
+.qc-timeline-marker::after {content:''; position:absolute; inset:-4px; min-width:20px;}
 @media(max-width:639px) {.qc-feed {padding:0 4px 12px;} .qc-finding {padding:8px;} .qc-recovery {margin:0 0 8px;} .chat-mode-tabs .chat-pane-heading > span {font-size:12px;} }

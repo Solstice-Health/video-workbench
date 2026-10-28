@@ -362,6 +362,10 @@ class QCStore:
         """Verify committed metadata, render bytes and source bytes without hash cache."""
         return self._target(target, fresh=True)
 
+    def describe_target(self, target: str) -> dict[str, Any]:
+        """Read one verified descriptor, reusing hashes only for unchanged files."""
+        return self._target(target, fresh=False)
+
     def _rendered_versions(self, output: str) -> list[int]:
         versions = []
         try:

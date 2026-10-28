@@ -6,6 +6,7 @@ import {IntegrationsControl} from './integrations-control.js';
 import {COMPACT_WIDTH, paneLayout, panePreferences} from './pane-layout.js';
 import {LocalImportDialog, localPath} from './local-import-control.js';
 import {QCPanel} from './qc-panel.js';
+import {EditorOutputPreview, editorMediaKey} from './editor-qc-markers.js';
 import {ProjectNavigation, MessageActions, HistoryDialog} from './conversation-controls.js';
 
 // Eeva and React are local, versioned assets. No network service is needed to open the UI.
@@ -310,7 +311,7 @@ function OutputPanel({data, outputId, setOutputId, notice, onClose}) {
       <${TabPanel} value="outputs" className="output-content">
         ${outputs.length ? html`<div className="output-selector" role="group" aria-label="Select output">${outputs.map((o, i) => html`<button key=${o.id || o.output} aria-pressed=${o === output} onClick=${() => setOutputId(o.id || o.output)}>
           <span>${(o.id || o.output || `Short ${i + 1}`).replace(/-/g, ' ')}</span><span className="caption">v${o.version}</span></button>`)}</div>
-          <div className="preview-stage">${output.video_url ? html`<video key=${output.video_url} controls playsInline preload="metadata" poster=${output.thumbnail_url || undefined} src=${output.video_url} aria-label=${`Preview ${output.id || output.output}`} />` : html`<div className="empty-preview"><${Icon} name="file" size=${18}/><p>The preview appears after rendering.</p></div>`}</div>
+          <${EditorOutputPreview} key=${`${req?.id}:${editorMediaKey(output)}`} output=${output} findings=${data?.qc_findings || []}/>
           <div className="output-metadata"><span>${output.width || '—'} × ${output.height || '—'}${output.duration_s ? ` · ${output.duration_s.toFixed(1)}s` : ''}</span><span>Version ${output.version}</span></div>
           <div className="review-heading"><h3>Review</h3><span className=${`status-pill ${output.triage === 'GREEN' ? 'success' : 'required'}`}><${Icon} name=${output.triage === 'GREEN' ? 'check' : 'circle-alert'} size=${12}/>${output.triage === 'GREEN' ? 'Ready' : 'Needs review'}</span></div>
           <p className="review-explanation">${output.triage === 'GREEN' ? 'Checks are complete for this version.' : 'Check the flagged details before accepting this version.'}</p>

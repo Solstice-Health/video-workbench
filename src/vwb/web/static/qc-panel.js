@@ -62,6 +62,69 @@ export function targetChanged(draft, targets) {
 export function selectTarget(target) {
   return {target:target.target, reviewTarget:{...target}, selectionMode:'frame', f0:'0', f1:'1', region:null};
 }
+export function newerTargets(item, targets) {
+  const anchor = item?.anchor;
+  return targets.filter(t => anchor?.output && t.output === anchor.output && integer(t.version)
+    && integer(anchor.version) && Number(t.version) > Number(anchor.version))
+    .sort((a, b) => b.version - a.version);
+}
+export function comparisonDraft(item, targets, target) {
+  const after = target || newerTargets(item, targets)[0] || null;
+  // Never translate a finding's frame numbers across different media clocks.
+  const prefill = after && after.fps === item.anchor.fps && after.frames === item.anchor.frames;
+  return {item:JSON.parse(JSON.stringify(item)), after:after ? {...after} : null,
+    f0:prefill ? String(item.anchor.f0) : '', f1:prefill ? String(item.anchor.f1) : '', confirmed:false};
+}
+export function comparisonBody(comparison, items, targets) {
+  if (!comparison) throw new Error('Choose a finding to compare.');
+  const {item, after} = comparison, current = items.find(i => i.id === item.id), before = item.anchor;
+  if (!current || current.revision !== item.revision || !sameTargetPin(current.anchor, before)) {
+    throw new Error('This finding changed. Reload the comparison and confirm its window again.');
+  }
+  if (!sameTargetPin(before, targets.find(t => t.target === before.target))) {
+    throw new Error('The original pin changed or is unavailable. Its recorded frames cannot be compared to replacement bytes.');
+  }
+  if (!after || !newerTargets(item, [after]).length || !newerTargets(item, targets).some(t => t.target === after.target)) {
+    throw new Error('Choose a newer rendered version of the same output.');
+  }
+  if (!sameTargetPin(after, targets.find(t => t.target === after.target))) {
+    throw new Error('The newer target pin changed. Reload the comparison and choose its window again.');
+  }
+  if (![before.fps, after.fps].every(fps => Number.isFinite(fps) && fps > 0)) throw new Error('Both targets need a known frame rate.');
+  if ([before, after].some(pin => ['output', 'version', 'fps', 'frames', 'width', 'height'].some(key => pin[key] !== targets.find(t => t.target === pin.target)?.[key]))) {
+    throw new Error('Target timing or dimensions changed. Reload the comparison before choosing a window.');
+  }
+  frameSelection({...before, selectionMode:'range'}, before);
+  const {f0, f1} = frameSelection({...comparison, selectionMode:'range'}, after);
+  return {item_id:item.id, expected_revision:item.revision, target:after.target,
+    pin:{sha256:after.sha256, canvas_file_sha256:after.canvas_file_sha256}, f0, f1};
+}
+// Elapsed seconds from each explicitly selected start; the shorter window holds
+// on its last frame. This is not content tracking or proportional range scaling.
+export function comparisonFrames(before, after, seconds = 0) {
+  for (const window of [before, after]) {
+    frameSelection({...window, selectionMode:'range'}, window);
+    if (!Number.isFinite(window.fps) || window.fps <= 0) throw new Error('A known frame rate is required.');
+  }
+  const max = Math.max((before.f1 - before.f0 - 1) / before.fps, (after.f1 - after.f0 - 1) / after.fps);
+  const offset = clamp(Number.isFinite(seconds) ? seconds : 0, 0, max);
+  const at = w => clamp(Number(w.f0) + Math.floor(offset * w.fps + 1e-7), Number(w.f0), Number(w.f1) - 1);
+  return {before:at(before), after:at(after), offset, max, step:1 / Math.max(before.fps, after.fps)};
+}
+export function findingMarkers(items, target) {
+  if (!target) return [];
+  return items.filter(item => {
+    if (!sameTargetPin(item.anchor, target)) return false;
+    try {frameSelection({...item.anchor, selectionMode:'range'}, target); return true;} catch {return false;}
+  }).map(item => ({item, left:100 * item.anchor.f0 / target.frames, width:100 * (item.anchor.f1 - item.anchor.f0) / target.frames}));
+}
+export function recheckStaleReason(recheck, item, targets) {
+  if (recheck.stale) return recheck.stale_reason || 'The finding or its pinned media has changed.';
+  if (!item || item.revision !== recheck.item_revision) return 'The finding changed after this recheck was prepared.';
+  if (![recheck.before, recheck.after].every(pin => sameTargetPin(pin, targets.find(t => t.target === pin?.target)))) return 'Pinned media changed or is unavailable.';
+  if (newerTargets(item, targets).some(t => t.version > recheck.after.version)) return 'A newer rendered version is available.';
+  return '';
+}
 export function findingBody(draft, targets) {
   if (!draft.reviewTarget || draft.reviewTarget.target !== draft.target || targetChanged(draft, targets)) {
     throw new Error('The rendered target changed or has not been reviewed. Reload the target before saving a finding.');
@@ -87,8 +150,9 @@ export function qcDraft() {
 // late writes only update their owning session, even if another request is open.
 export function createQCSession(requestId, api, {schedule = setTimeout, cancel = clearTimeout, uuid = () => crypto.randomUUID()} = {}) {
   const base = `/api/requests/${encodeURIComponent(requestId)}/qc`;
-  let state = {data:null, draft:qcDraft(), selected:[], notes:{}, busy:false, uploading:false, error:'', pollError:'', info:''};
+  let state = {data:null, draft:qcDraft(), comparison:null, comparisonOpen:false, selected:[], notes:{}, busy:false, uploading:false, error:'', pollError:'', info:''};
   let listener = null, generation = 0, timer = null, controller = null;
+  let recheckAttempt = null;
   const keys = new Map(), messageKeys = new Map();
   const update = patch => {state = {...state, ...patch}; listener?.();};
   const invalidate = () => {generation++; cancel(timer); timer = null; controller?.abort(); controller = null;};
@@ -128,6 +192,65 @@ export function createQCSession(requestId, api, {schedule = setTimeout, cancel =
     note(id, text) {update({notes:{...state.notes, [id]:text}});},
     error(message) {update({error:message});},
     command,
+    openComparison(id) {
+      const item = state.data?.items?.find(i => i.id === id);
+      if (!item) return;
+      if (state.comparison?.item.id !== id) {
+        recheckAttempt = null;
+        update({comparison:comparisonDraft(item, state.data.targets || [])});
+      }
+      update({comparisonOpen:true, error:'', info:''});
+    },
+    closeComparison() {update({comparisonOpen:false});},
+    reloadComparison() {
+      const item = state.data?.items?.find(i => i.id === state.comparison?.item.id);
+      if (!item) return;
+      const targets = state.data.targets || [], after = newerTargets(item, targets).find(t => t.target === state.comparison?.after?.target);
+      recheckAttempt = null;
+      update({comparison:comparisonDraft(item, targets, after), error:''});
+    },
+    comparisonTarget(targetId) {
+      if (!state.comparison) return;
+      const target = newerTargets(state.comparison.item, state.data?.targets || []).find(t => t.target === targetId);
+      if (!target || sameTargetPin(target, state.comparison.after)) return;
+      recheckAttempt = null;
+      update({comparison:comparisonDraft(state.comparison.item, state.data.targets, target), error:''});
+    },
+    comparisonWindow(patch) {
+      if (!state.comparison) return;
+      const next = {...state.comparison, ...Object.fromEntries(['f0', 'f1'].filter(k => k in patch).map(k => [k, patch[k]]))};
+      if (next.f0 === state.comparison.f0 && next.f1 === state.comparison.f1) return;
+      if (!['f0', 'f1'].every(k => integer(next[k]) && integer(state.comparison[k]) && Number(next[k]) === Number(state.comparison[k]))) recheckAttempt = null;
+      update({comparison:{...next, confirmed:false}, error:''});
+    },
+    confirmComparison(confirmed) {
+      if (!state.comparison) return;
+      if (confirmed) {
+        try {
+          comparisonBody(state.comparison, state.data?.items || [], state.data?.targets || []);
+          if (!['open', 'needs_recheck'].includes(state.comparison.item.status)) throw new Error('Reopen this finding before requesting another model recheck.');
+        }
+        catch (error) {update({error:error.message}); return;}
+      }
+      update({comparison:{...state.comparison, confirmed:!!confirmed}});
+    },
+    async recheck() {
+      if (state.busy || state.uploading) return null;
+      let body;
+      try {
+        body = comparisonBody(state.comparison, state.data?.items || [], state.data?.targets || []);
+        if (!['open', 'needs_recheck'].includes(state.comparison.item.status)) throw new Error('Reopen this finding before requesting another model recheck.');
+        if (!state.comparison.confirmed) throw new Error('Confirm the newer frame window before requesting a model recheck.');
+      } catch (error) {update({error:error.message}); return null;}
+      const signature = JSON.stringify(body);
+      if (recheckAttempt?.signature !== signature) recheckAttempt = {signature, key:uuid()};
+      const attempt = recheckAttempt, comparison = state.comparison;
+      return command('/rechecks', {...body, idempotency_key:attempt.key}, 'POST', result => {
+        if (recheckAttempt === attempt) recheckAttempt = null;
+        if (state.comparison === comparison) update({comparison:{...comparison, confirmed:false}});
+        update({info:`Recheck ${result.recheck?.id || ''} submitted to the QC queue. Finding status is unchanged.`});
+      });
+    },
     async send(mode = 'queue') {
       const sent = state.draft;
       if (!sent.text.trim() && !sent.uploads.length) return;
@@ -198,7 +321,128 @@ function QCAttachments({files = [], requestId}) {
   </li>`)}</ul>` : null;
 }
 
-function ReviewPlayer({target, draft, setDraft, visible, onError}) {
+const pinnedMediaUrl = target => `${target.url}${target.url.includes('?') ? '&' : '?'}qc_pin=${encodeURIComponent(`${target.sha256}:${target.canvas_file_sha256}`)}`;
+function RegionOverlay({target, region}) {
+  return validRegion(region) ? html`<svg className="qc-region-overlay" viewBox=${`0 0 ${target.width} ${target.height}`} preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+    <rect x=${region[0] * target.width} y=${region[1] * target.height} width=${region[2] * target.width} height=${region[3] * target.height} vector-effect="non-scaling-stroke"/>
+  </svg>` : null;
+}
+function ComparisonFrame({label, target, frame, region, onFrame, onError}) {
+  const video = useRef(null), editing = useRef(false);
+  const [frameInput, setFrameInput] = useState(String(frame));
+  const seek = element => {if (element && element.readyState >= 1) {element.pause(); element.currentTime = frameTime(frame, target);}};
+  useEffect(() => {seek(video.current);}, [frame, target.target, target.sha256, target.canvas_file_sha256]);
+  useEffect(() => {
+    if (!editing.current) setFrameInput(String(frame));
+  }, [frame, target.target, target.sha256, target.canvas_file_sha256, target.f0, target.f1]);
+  const commitFrame = value => {
+    if (!editing.current) return; // Enter followed by blur commits only once.
+    editing.current = false;
+    if (integer(value) && Number(value) >= target.f0 && Number(value) < target.f1) {
+      setFrameInput(String(Number(value)));
+      if (Number(value) !== frame) onFrame((Number(value) - target.f0) / target.fps);
+    } else setFrameInput(String(frame));
+  };
+  return html`<div className="qc-comparison-lane">
+    <h4>${label}</h4><p className="qc-caption">${target.target} · [${target.f0}, ${target.f1}) · ${target.fps} fps</p>
+    <div className="qc-video-stage">
+      <video ref=${video} src=${pinnedMediaUrl(target)} muted playsInline preload="metadata" aria-label=${`${label} comparison preview`}
+        onLoadedMetadata=${event => seek(event.currentTarget)} onPlay=${event => event.currentTarget.pause()}
+        onError=${() => onError(`${label} video could not load. Refresh QC to check its pin.`)}/>
+      <${RegionOverlay} target=${target} region=${region}/>
+    </div>
+    <label>${label} frame<input type="number" min=${target.f0} max=${target.f1 - 1} step="1" value=${frameInput}
+      title="Press Enter or leave this field to seek to the frame."
+      onFocus=${() => {editing.current = true;}}
+      onChange=${event => {editing.current = true; setFrameInput(event.target.value);}}
+      onBlur=${event => commitFrame(event.currentTarget.value)}
+      onKeyDown=${event => {if (event.key === 'Enter') {event.preventDefault(); commitFrame(event.currentTarget.value);}}}/></label>
+  </div>`;
+}
+export function ComparisonPlayer({before, after, onError}) {
+  const [seconds, setSeconds] = useState(0), position = comparisonFrames(before, after, seconds);
+  // Explicit paused-frame controls avoid decoder playback drift and make each
+  // side's actual selected frame visible, even with different frame rates.
+  return html`<div className="qc-comparison-player">
+    <div className="qc-comparison-lanes">
+      <${ComparisonFrame} label="Original" target=${before} frame=${position.before} region=${before.region} onFrame=${setSeconds} onError=${onError}/>
+      <${ComparisonFrame} label="Newer" target=${after} frame=${position.after} region=${before.region} onFrame=${setSeconds} onError=${onError}/>
+    </div>
+    <label>Offset from each selected window start · ${position.offset.toFixed(3)} s<input type="range" min="0" max=${position.max} step="any" value=${position.offset} disabled=${position.max === 0} aria-label="Comparison window offset"
+      onChange=${event => setSeconds(Number(event.target.value))}/></label>
+    <div className="qc-actions"><${Button} variant="text" size="sm" disabled=${position.offset <= 0} onClick=${() => setSeconds(Math.max(0, position.offset - position.step))}>Previous pair<//>
+      <${Button} variant="text" size="sm" disabled=${position.offset >= position.max} onClick=${() => setSeconds(Math.min(position.max, position.offset + position.step))}>Next pair<//></div>
+    <p className="qc-caption">Paused frame comparison. Both sides advance by elapsed offset from their selected starts. The shorter window holds its last frame. This does not track matching content or establish temporal alignment.</p>
+  </div>`;
+}
+function FindingComparison({session, locked}) {
+  const {comparison, data} = session.state;
+  const targets = data?.targets || [], items = data?.items || [], {item, after} = comparison;
+  const recheckable = ['open', 'needs_recheck'].includes(item.status);
+  const choices = newerTargets(item, targets), original = targets.find(t => sameTargetPin(t, item.anchor));
+  let problem = '', body;
+  try {body = comparisonBody(comparison, items, targets);} catch (error) {problem = error.message;}
+  const sameClock = after && after.fps === item.anchor.fps && after.frames === item.anchor.frames;
+  return html`<section className="qc-comparison" aria-label=${`Compare finding ${item.id}`}>
+    <div className="qc-finding-top"><h3>Compare finding ${item.id}</h3><button className="text-action" onClick=${session.closeComparison}>Close comparison</button></div>
+    <p className="qc-caption">Finding revision ${item.revision} · ${item.lane === 'audit' ? 'Audit · private' : 'Shared'} · Original ${item.anchor.target} [${item.anchor.f0}, ${item.anchor.f1})</p>
+    <dl><dt>Expected</dt><dd>${item.expected}</dd><dt>Observed</dt><dd>${item.observed}</dd></dl>
+    <fieldset disabled=${locked} className="qc-fields"><legend>Newer frame window</legend>
+      <label>Newer version of ${item.anchor.output}<select aria-label="Comparison newer version" value=${after?.target || ''} onChange=${event => session.comparisonTarget(event.target.value)}>
+        ${!choices.some(t => t.target === after?.target) && html`<option value=${after?.target || ''}>${after ? 'Selected version unavailable' : 'No newer render available'}</option>`}
+        ${choices.map(t => html`<option key=${t.target} value=${t.target}>${t.target} · ${t.fps} fps · ${t.frames} frames</option>`)}</select></label>
+      ${after && html`<div className="qc-field-pair"><label>Newer start frame<input type="number" min="0" max=${after.frames - 1} step="1" value=${comparison.f0} onChange=${event => session.comparisonWindow({f0:event.target.value})}/></label>
+        <label>Newer end (exclusive)<input type="number" min="1" max=${after.frames} step="1" value=${comparison.f1} onChange=${event => session.comparisonWindow({f1:event.target.value})}/></label></div>`}
+    </fieldset>
+    <p className="qc-caption">${sameClock ? 'Frame rate and frame count match, so the original numbers are prefilled for you to review.' : 'Frame rate or frame count differs. Choose both newer frame boundaries explicitly; frame numbers are not converted.'} Edits may move content even when the clocks match.</p>
+    ${problem && html`<p className="qc-validation" role="status">${problem}</p><button className="text-action" disabled=${locked} onClick=${session.reloadComparison}>Reload comparison</button>`}
+    ${body && original && html`<${ComparisonPlayer} key=${JSON.stringify([item.id, item.revision, item.anchor.sha256, after.sha256, after.canvas_file_sha256, body.f0, body.f1])}
+      before=${{...original, ...item.anchor, url:original.url}} after=${{...after, f0:body.f0, f1:body.f1}} onError=${session.error}/>`}
+    ${item.anchor.region && html`<p className="qc-caption">The original normalized region is shown unchanged on both versions. It is not tracked and may cover different content after edits or resizing.</p>`}
+    ${!recheckable && html`<p className="qc-validation">This finding is ${item.status}. Reopen it with a human review action before requesting another model recheck.</p>`}
+    <label className="qc-confirm"><input type="checkbox" checked=${comparison.confirmed} disabled=${locked || !!problem || !recheckable} onChange=${event => session.confirmComparison(event.target.checked)}/>
+      I confirm the newer window ${body ? `[${body.f0}, ${body.f1}) on ${after.target}` : 'after choosing valid frames'} for this recheck.</label>
+    <${Button} variant="secondary" size="sm" disabled=${locked || !!problem || !recheckable || !comparison.confirmed} onClick=${session.recheck}>Recheck with fresh context<//>
+    <p className="qc-caption">Starts a model job in the QC queue using this frozen finding and the selected windows. Opening this comparison does not run a model. Use the existing QC Stop / Resume controls. Results cover sampled frames only; resolving a finding remains a human action.</p>
+  </section>`;
+}
+export function RecheckResults({item, rechecks, targets}) {
+  const records = rechecks.filter(r => r.item_id === item.id).slice().reverse();
+  const labels = {persists:'Issue observed', not_observed:'Not observed in sampled frames', inconclusive:'Inconclusive'};
+  return records.length ? html`<section className="qc-rechecks" aria-label=${`Recheck results for ${item.id}`}><h4>Model rechecks (${records.length})</h4>
+    ${records.map(record => {
+      const stale = recheckStaleReason(record, item, targets), result = record.result;
+      const created = record.created_at ? new Date(typeof record.created_at === 'number' ? record.created_at * 1000 : record.created_at).toLocaleString() : 'Time not reported';
+      return html`<article className="qc-recheck" key=${record.id}>
+        ${stale && html`<p className="qc-validation" role="status"><strong>Outdated recheck</strong> · ${stale}</p>`}
+        <strong className="qc-recheck-assessment">${result ? labels[result.assessment] || 'Assessment not reported' : 'Recheck pending'}</strong>
+        <p className="qc-caption">${record.model || 'Model not reported'} · ${record.provider || 'Provider not reported'} · ${created} · Finding revision ${record.item_revision}</p>
+        <p className="qc-caption">Original ${record.before?.target} [${record.before?.f0}, ${record.before?.f1}) → Newer ${record.after?.target} [${record.after?.f0}, ${record.after?.f1})</p>
+        ${record.job && html`<p className="qc-caption">QC job ${record.job.id} · ${record.job.status}${record.job.error ? ` · ${record.job.error}` : ''}</p>`}
+        ${result ? html`<p className="qc-recheck-summary">${result.summary}</p><p className="qc-caption"><strong>Unqualified visual review</strong> · Sampled frames only. Unsampled frames are not assessed. This result does not resolve the finding.</p>
+          <details className="qc-evidence" open><summary>Actual sampled frame coverage</summary>
+            ${!result.evidence?.length && html`<p className="qc-validation">No sampled frame evidence reported.</p>`}
+            ${(result.evidence || []).map((evidence, index) => {
+              const side = sameTargetPin(evidence, record.before) ? 'Original' : sameTargetPin(evidence, record.after) ? 'Newer' : 'Unmatched pin';
+              const frames = Array.isArray(evidence.frames) ? evidence.frames.filter(Number.isSafeInteger) : [];
+              return html`<div className="qc-evidence-entry" key=${index}><p><strong>${side}</strong> · ${evidence.target}</p>
+                <p>Frames actually sampled: ${frames.length ? frames.join(', ') : 'None reported'}</p>
+                <p className="qc-caption">Coverage: ${evidence.coverage || 'Not reported'}</p>
+                ${validRegion(evidence.region) && html`<p className="qc-caption">Region inspected (normalized): [${evidence.region.join(', ')}]</p>`}
+                <details><summary>Evidence pins</summary><p className="qc-caption">Media SHA-256: ${evidence.sha256 || 'Not reported'}<br/>Canvas SHA-256: ${evidence.canvas_file_sha256 || 'Not reported'}</p></details>
+              </div>`;
+            })}
+          </details>` : html`<p className="qc-caption">${record.job?.status === 'failed' ? 'The job failed; no assessment is available.' : 'Waiting for a model result. Queueing or stopping a job is not an assessment.'}</p>`}
+        <details><summary>Frozen finding & recheck record</summary><p className="qc-caption">Recheck ${record.id} · ${record.status}${record.completed_at ? ` · Completed ${stamp(record.completed_at)}` : ''}</p>
+          <dl><dt>Expected</dt><dd>${record.item?.expected || 'Not reported'}</dd><dt>Observed</dt><dd>${record.item?.observed || 'Not reported'}</dd></dl>
+          ${[record.before, record.after].filter(Boolean).map(pin => html`<p key=${pin.target} className="qc-caption">${pin.target}<br/>Media SHA-256: ${pin.sha256}<br/>Canvas SHA-256: ${pin.canvas_file_sha256}</p>`)}
+        </details>
+      </article>`;
+    })}
+  </section>` : null;
+}
+
+function ReviewPlayer({target, draft, setDraft, visible, onError, items = []}) {
   const video = useRef(null), drag = useRef(null);
   const [drawing, setDrawing] = useState(false), [preview, setPreview] = useState(null), [currentFrame, setCurrentFrame] = useState(0);
   useEffect(() => {if (!visible) {video.current?.pause(); drag.current = null; setPreview(null); setDrawing(false);}}, [visible]);
@@ -226,7 +470,7 @@ function ReviewPlayer({target, draft, setDraft, visible, onError}) {
       event.currentTarget.setPointerCapture(event.pointerId);
     }} onPointerMove=${event => {const active = drag.current; if (active?.id === event.pointerId) setPreview(dragRegion(active.start, [event.clientX, event.clientY], active.rect));}}
       onPointerUp=${event => stopDrag(event, true)} onPointerCancel=${event => stopDrag(event, false)} onLostPointerCapture=${() => {drag.current = null; setPreview(null);}}>
-      <video ref=${video} src=${`${target.url}${target.url.includes('?') ? '&' : '?'}qc_pin=${encodeURIComponent(`${target.sha256}:${target.canvas_file_sha256}`)}`} controls=${!drawing} playsInline preload="metadata" aria-label=${`QC preview ${target.target}`}
+      <video ref=${video} src=${pinnedMediaUrl(target)} controls=${!drawing} playsInline preload="metadata" aria-label=${`QC preview ${target.target}`}
         onLoadedMetadata=${() => seek(draft.f0)} onTimeUpdate=${event => setCurrentFrame(frameAt(event.currentTarget.currentTime, target) ?? 0)}
         onError=${() => onError('This rendered video could not load. Refresh QC and try the target again.')} />
       ${validRegion(region) && html`<svg className="qc-region-overlay" viewBox=${`0 0 ${target.width} ${target.height}`} preserveAspectRatio="xMidYMid meet" aria-hidden="true">
@@ -234,6 +478,14 @@ function ReviewPlayer({target, draft, setDraft, visible, onError}) {
       </svg>`}
     </div>
     <p className="qc-caption">${target.width} × ${target.height} · ${target.fps} fps · ${target.frames} frames · Pinned version</p>
+    <div className="qc-marker-timeline" aria-label="Findings on this pinned timeline">
+      ${findingMarkers(items, target).map(({item, left, width}) => html`<div className="qc-marker-row" key=${item.id}>
+        <button className="qc-timeline-marker" style=${{left:`${left}%`, width:`${width}%`}} title=${`${item.id}: ${item.observed}`}
+          aria-label=${`Review finding ${item.id} at frames [${item.anchor.f0}, ${item.anchor.f1})`}
+          onClick=${() => {video.current?.pause(); seek(item.anchor.f0); setDraft({f0:String(item.anchor.f0), f1:String(item.anchor.f1), selectionMode:item.anchor.f1 === item.anchor.f0 + 1 ? 'frame' : 'range', region:item.anchor.region || null, seek:(draft.seek || 0) + 1});}}><span className="visually-hidden">${item.id}</span></button>
+      </div>`)}
+      ${findingMarkers(items, target).length > 0 && html`<p className="qc-caption">Finding markers match this exact render and canvas pin. Select a marker to review its original frames and region.</p>`}
+    </div>
     <div className="qc-actions"><${Button} variant="secondary" size="sm" onClick=${() => {video.current?.pause(); setDraft({f0:String(currentFrame), f1:String(currentFrame + 1), selectionMode:'frame'});}}>Use frame ${currentFrame}<//>
       <${Button} variant="text" size="sm" aria-pressed=${drawing} onClick=${() => {video.current?.pause(); setDrawing(!drawing);}}> ${drawing ? 'Cancel drawing' : 'Draw region'}<//>
     </div>
@@ -263,6 +515,9 @@ export function QCSurface({session, requestId, visible, Activity}) {
   const eligible = handoffItems(items, selected);
   const chat = data?.request?.chat || [], events = data?.events || [];
   useEffect(() => {if (visible && nearBottom.current && feed.current && !reviewOpen) feed.current.scrollTop = feed.current.scrollHeight;}, [chat.length, events.at(-1)?.seq, visible, reviewOpen]);
+  useEffect(() => {
+    if (visible && session.state.comparisonOpen) feed.current?.querySelector('.qc-comparison')?.scrollIntoView({block:'nearest'});
+  }, [visible, session.state.comparisonOpen, session.state.comparison?.item.id]);
   const recovery = !active && data?.resumable_job;
   const failed = !active && data?.last_job?.status === 'failed';
   const notice = error || pollError || (locked ? uploading ? 'Uploading QC attachments…' : 'Saving QC changes…' : '')
@@ -288,7 +543,7 @@ export function QCSurface({session, requestId, visible, Activity}) {
           ${targets.map(t => html`<option value=${t.target} key=${t.target}>${t.target}</option>`)}</select></label>` : html`<div className="qc-empty"><h3>No rendered targets yet</h3><p>Render an output in Edit to review frames here. You can still chat with QC.</p></div>`}
         ${changed && html`<div className="qc-target-changed"><p className="qc-validation" role="status">The pinned target changed or is unavailable. Reload to review the latest bytes; this clears the frame and region selection.</p>
           <${Button} variant="secondary" size="sm" disabled=${locked || !currentTarget} onClick=${() => {session.error(''); setDraft(selectTarget(currentTarget));}}>Reload target for review<//></div>`}
-        ${target && !changed && html`<fieldset className="qc-review-controls" disabled=${locked}><${ReviewPlayer} key=${`${target.target}:${target.sha256}:${target.canvas_file_sha256}`} target=${target} draft=${draft} setDraft=${setDraft} visible=${visible && reviewOpen} onError=${session.error}/>
+        ${target && !changed && html`<fieldset className="qc-review-controls" disabled=${locked}><${ReviewPlayer} key=${`${target.target}:${target.sha256}:${target.canvas_file_sha256}`} target=${target} draft=${draft} setDraft=${setDraft} visible=${visible && reviewOpen} onError=${session.error} items=${items}/>
           ${selectionError && html`<p className="qc-validation" role="status">${selectionError}</p>`}
           <details open=${draft.formOpen} onToggle=${event => {if (event.target === event.currentTarget && event.currentTarget.open !== draft.formOpen) setDraft({formOpen:event.currentTarget.open});}}>
             <summary>Add a finding</summary><form className="qc-finding-form" onSubmit=${event => {event.preventDefault(); session.createFinding();}}>
@@ -300,6 +555,7 @@ export function QCSurface({session, requestId, visible, Activity}) {
               <${Button} type="submit" variant="secondary" size="sm" disabled=${locked || !!selectionError || !draft.expected.trim() || !draft.observed.trim()}>Save finding<//>
             </form>
           </details></fieldset>`}
+        ${session.state.comparisonOpen && session.state.comparison && html`<${FindingComparison} session=${session} locked=${locked}/>`}
         <section className="qc-findings" aria-label="QC findings"><h3>Findings (${items.length})</h3>
           <p className="qc-caption">Resolved means human reviewed. Findings and resolutions are not regulatory acceptance.</p>
           ${!items.length && html`<p className="qc-caption">No findings recorded yet.</p>`}
@@ -309,6 +565,8 @@ export function QCSurface({session, requestId, visible, Activity}) {
             <p className="qc-caption">${item.anchor?.target} · [${item.anchor?.f0}, ${item.anchor?.f1})${item.anchor?.region ? ` · region [${item.anchor.region.map(n => Number(n).toFixed(3)).join(', ')}]` : ''}</p>
             <dl><dt>Expected</dt><dd>${item.expected}</dd><dt>Observed</dt><dd>${item.observed}</dd></dl>
             <button className="text-action" disabled=${locked || !targets.some(t => sameTargetPin(t, item.anchor))} onClick=${() => {setDraft({...selectTarget(targets.find(t => sameTargetPin(t, item.anchor))), f0:String(item.anchor.f0), f1:String(item.anchor.f1), selectionMode:item.anchor.f1 === item.anchor.f0 + 1 ? 'frame' : 'range', region:item.anchor.region || null, seek:(draft.seek || 0) + 1}); feed.current?.scrollTo({top:0});}}>Review pinned frames</button>
+            <button className="text-action qc-compare-action" disabled=${locked} onClick=${() => {session.openComparison(item.id);}}>Compare & recheck</button>
+            <${RecheckResults} item=${item} rechecks=${data?.rechecks || []} targets=${targets}/>
             <details><summary>Human review actions</summary><label>Review note (optional)<textarea rows="2" maxLength="4000" value=${notes[item.id] || ''} disabled=${locked} onChange=${event => session.note(item.id, event.target.value)}/></label>
               <div className="qc-actions">${item.status !== 'resolved' && html`<${Button} variant="secondary" size="sm" disabled=${locked} onClick=${() => session.transition(item, 'resolved')}>Resolve · human reviewed<//>`}
                 ${item.status !== 'dismissed' && html`<${Button} variant="text" size="sm" disabled=${locked} onClick=${() => session.transition(item, 'dismissed')}>Dismiss<//>`}
