@@ -1,0 +1,55 @@
+/* QC shares Eeva's chat surfaces; the canvas layout and Edit controls stay intact. */
+.chat-mode-tabs, .chat-mode-panel, .qc-panel {display:flex; flex:1; flex-direction:column; min-height:0; min-width:0;}
+.chat-mode-panel[hidden] {display:none;}
+.chat-mode-tabs > .chat-pane-heading {height:48px; padding-bottom:8px;}
+.chat-mode-tabs .chat-pane-heading [role=tablist] {flex-shrink:0;}
+.qc-panel {font-size:13px; line-height:20px; color:var(--ds-text-primary);}
+.qc-feed {flex:1; min-height:0; overflow:auto; overflow-x:hidden; padding:0 16px 16px;}
+.qc-panel summary {cursor:pointer; border-radius:4px; padding:8px 0; font-size:13px; line-height:20px;}
+.qc-panel :is(button, a, summary, input, select, textarea):focus-visible {outline:none; box-shadow:var(--ds-focus-ring);}
+.qc-panel button:disabled {cursor:default; opacity:.5;}
+.qc-review {margin:0 0 20px; border-bottom:1px solid var(--ds-border-divider);}
+.qc-review > summary {font-weight:600; padding:12px 0;}
+.qc-review > summary > span {float:right; font-weight:400; color:var(--ds-text-secondary);}
+.qc-review-body, .qc-finding-form {display:flex; flex-direction:column; gap:12px; padding-bottom:16px;}
+.qc-panel label {display:flex; flex-direction:column; gap:4px; min-width:0; font-size:13px; line-height:20px;}
+.qc-panel :is(input:not([type=checkbox]):not([type=file]), select, .qc-finding-form textarea, .qc-finding textarea) {width:100%; min-width:0; border:0; border-radius:8px; padding:8px; font:inherit; color:var(--ds-text-primary); background:var(--ds-surface-default); box-shadow:inset 0 0 0 1px var(--ds-border-divider);}
+.qc-panel textarea {resize:vertical;}
+.qc-panel fieldset {min-width:0; padding:0; margin:0; border:0;}
+.qc-panel .qc-fields {display:flex; flex-direction:column; gap:8px; margin-top:12px;}
+.qc-panel legend {padding:8px 0; font-weight:600;}
+.qc-field-pair {display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px;}
+.qc-caption {font-size:12px; line-height:16px; color:var(--ds-text-secondary); margin:8px 0; overflow-wrap:anywhere;}
+.qc-video-stage {position:relative; width:100%; aspect-ratio:16/9; background:var(--ds-action-primary); border-radius:8px; overflow:hidden;}
+.qc-video-stage video {display:block; width:100%; height:100%; object-fit:contain;}
+.qc-video-stage.is-drawing {touch-action:none; cursor:crosshair;}
+.qc-video-stage.is-drawing video {pointer-events:none;}
+.qc-region-overlay {position:absolute; inset:0; width:100%; height:100%; pointer-events:none;}
+.qc-region-overlay rect {fill:none; stroke:var(--ds-action-accent); stroke-width:2;}
+.qc-actions {display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:8px;}
+.qc-recovery {margin:0 12px 12px;}
+.qc-region-fields {margin-top:8px;}
+.qc-validation, .qc-item-status.needs-recheck {color:var(--ds-status-required); background:var(--ds-status-required-bg); border-radius:6px; padding:8px; font-size:12px; line-height:20px;}
+.qc-findings h3 {font-size:14px; line-height:20px; font-weight:600; margin:8px 0;}
+.qc-finding {background:var(--ds-surface-sunken); box-shadow:var(--ds-elevation-edge); border-radius:8px; padding:12px; margin:12px 0; overflow-wrap:anywhere;}
+.qc-finding-top {display:flex; flex-wrap:wrap; align-items:center; gap:8px; justify-content:space-between;}
+.qc-finding-top > span {font-size:12px; color:var(--ds-text-secondary);}
+.qc-panel .qc-item-select {flex-direction:row; align-items:center; gap:8px;}
+.qc-item-select input {width:16px; height:16px; accent-color:var(--ds-action-primary);}
+.qc-item-status {font-size:12px; line-height:20px; margin:8px 0;}
+.qc-finding dl {margin:12px 0;}
+.qc-finding dt {font-size:12px; font-weight:600; margin-top:8px;}
+.qc-finding dd {margin:4px 0 0; white-space:pre-wrap;}
+.qc-chat {display:flex; flex-direction:column; gap:24px; padding:8px 0; overflow-wrap:anywhere; white-space:pre-wrap;}
+.qc-empty {padding:20px 4px; color:var(--ds-text-secondary);}
+.qc-empty h2 {font:300 28px/34px var(--ds-font-display); letter-spacing:-.03em; color:var(--ds-text-primary); margin:0 0 12px;}
+.qc-empty h3 {font-size:14px; line-height:20px; color:var(--ds-text-primary); margin:0 0 8px;}
+.qc-empty p {margin:8px 0; font-size:13px; line-height:20px;}
+.qc-attachments {padding:0; list-style:none; margin:0 0 8px; font-size:12px; line-height:20px;}
+.qc-attachments a {color:var(--ds-text-accent); text-decoration:underline; text-underline-offset:3px;}
+.qc-composer-footer {display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; padding:0 12px 12px; font-size:12px; line-height:16px; color:var(--ds-text-secondary);}
+.qc-composer-footer > span {min-width:0; overflow-wrap:anywhere;}
+.qc-composer-help {margin:8px 4px 0;}
+.qc-usage {margin:0 4px; color:var(--ds-text-secondary);}
+.qc-panel .qc-usage summary {padding:4px 0; font-size:12px; line-height:16px;}
+@media(max-width:639px) {.qc-feed {padding:0 4px 12px;} .qc-finding {padding:8px;} .qc-recovery {margin:0 0 8px;} .chat-mode-tabs .chat-pane-heading > span {font-size:12px;} }

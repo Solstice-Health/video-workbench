@@ -5,6 +5,7 @@ import {WorkspaceExplorer, WorkspaceCanvas, initialCanvas, canvasReducer, import
 import {IntegrationsControl} from './integrations-control.js';
 import {COMPACT_WIDTH, paneLayout, panePreferences} from './pane-layout.js';
 import {LocalImportDialog, localPath} from './local-import-control.js';
+import {QCPanel} from './qc-panel.js';
 
 // Eeva and React are local, versioned assets. No network service is needed to open the UI.
 const {createElement, useState, useEffect, useRef, useCallback, useMemo} = window.React;
@@ -319,6 +320,7 @@ function App() {
   const [sidebar, setSidebar] = useState(false), [outputId, setOutputId] = useState(null);
   const [navigator, setNavigator] = useState('conversations'), [navigatorOpen, setNavigatorOpen] = useState(() => window.innerWidth >= 1024);
   const [chatShown, setChatShown] = useState(true), [mobileView, setMobileView] = useState('chat');
+  const [chatTab, setChatTab] = useState('edit');
   const [paneSizes, setPaneSizes] = useState(() => {try {return panePreferences(JSON.parse(localStorage.getItem('vwb-pane-sizes')));} catch (_) {return panePreferences();}});
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth), [resizingPane, setResizingPane] = useState(null);
   const layout = paneLayout(viewportWidth, paneSizes, navigatorOpen, chatShown);
@@ -602,7 +604,7 @@ function App() {
     document.getElementById(`reference-option-${pickIndex}`)?.scrollIntoView({block: 'nearest'});
   }, [picker, pickIndex, options.length, answering]);
   useEffect(() => {if (qIndex >= questions.length) setQIndex(Math.max(0, questions.length - 1));}, [questions.length, qIndex]);
-  useEffect(() => {if (isNearBottom && feed.current) feed.current.scrollTop = feed.current.scrollHeight;}, [chat.length, data?.cursor, queue.length, selected, loading]);
+  useEffect(() => {if (chatTab === 'edit' && isNearBottom && feed.current) feed.current.scrollTop = feed.current.scrollHeight;}, [chatTab, chat.length, data?.cursor, queue.length, selected, loading]);
   const mutate = async (path, body, method = 'POST') => {
     setBusy(true); setError(''); setInfo('');
     try {const result = await api(`/api/requests/${encodeURIComponent(selected)}${path}`, {method, body: JSON.stringify(body || {})}); await refresh(selected); return result;}
@@ -664,7 +666,7 @@ function App() {
   return html`<${Surface} theme="editorial" background="chat">
     <div className=${`workbench canvas-workbench ${navigatorOpen ? 'navigator-open' : ''} ${sidebar ? 'nav-open' : ''} ${chatShown ? 'chat-shown' : 'chat-hidden'} mobile-view-${mobileView}`} style=${{'--chat-width': `${layout.chat}px`, '--navigator-width': `${layout.navigator}px`}}>
     ${resizingPane && html`<div className="pane-resize-shield" aria-hidden="true"></div>`}
-    <a href="#conversation-feed" className="skip-link">Skip to conversation</a>
+    <a href=${chatTab === 'qc' ? '#qc-feed' : '#conversation-feed'} className="skip-link">Skip to conversation</a>
     <nav className="activity-rail" aria-label="Workbench sections"><div className="rail-brand" aria-label="Solstice video workbench"><${SolsticeMark} size=${24}/></div>
       <${Tooltip} content="Conversations"><button aria-label="Conversations" aria-pressed=${navigator === 'conversations' && (narrow ? sidebar : navigatorOpen)} onClick=${() => toggleNavigator('conversations')}><${Icon} name="library" size=${18}/></button><//>
       <${Tooltip} content="Workspace files"><button aria-label="Workspace files" aria-pressed=${navigator === 'workspace' && (narrow ? sidebar : navigatorOpen)} onClick=${() => toggleNavigator('workspace')}><${Icon} name="folder" size=${18}/></button><//>
@@ -695,7 +697,9 @@ function App() {
           <${Tooltip} content="Open browser"><${Button} variant="text" size="sm" aria-label="Show browser" onClick=${() => openCanvas({id:'browser',kind:'browser',title:'Browser'})}><${Icon} name="link" size=${16}/><span className="panel-button-label">Browser</span><//><//></div>
       </header>
       <div className="workspace-body"><section className="chat-column" aria-label="Agent conversation" inert=${(!chatShown && !narrow) || (narrow && mobileView !== 'chat') ? '' : undefined}>
-        <div className="chat-pane-heading"><h2>Conversation</h2><span>${active ? 'Working' : current?.output_count ? `${current.output_count} outputs` : 'Ready'}</span><${IconButton} name="chevron-left" label="Collapse chat" onClick=${() => narrow ? setMobileView('canvas') : setChatShown(false)}/></div>
+        <${Tabs} value=${chatTab} onValueChange=${setChatTab} className="chat-mode-tabs">
+        <div className="chat-pane-heading"><${TabList} aria-label="Conversation mode"><${Tab} value="edit">Edit<//><${Tab} value="qc">QC<//><//><span>${chatTab === 'qc' ? 'Quality review' : active ? 'Working' : current?.output_count ? `${current.output_count} outputs` : 'Ready'}</span><${IconButton} name="chevron-left" label="Collapse chat" onClick=${() => narrow ? setMobileView('canvas') : setChatShown(false)}/></div>
+        <${TabPanel} value="edit" forceMount hidden=${chatTab !== 'edit'} className="chat-mode-panel">
         ${notice && html`<div className="chat-panel-status"><${MessageBar} tone=${notice.tone}>${notice.text}<//></div>`}
         <div id="conversation-feed" className="conversation-feed" ref=${feed} tabIndex="0" onScroll=${e => setIsNearBottom(e.currentTarget.scrollHeight - e.currentTarget.scrollTop - e.currentTarget.clientHeight < 100)}>
           <div className="feed-inner">${loading ? html`<p className="loading-copy">Opening your conversation…</p>` : !chat.length ? html`<div className="welcome"><${SolsticeMark} size=${28}/><h2>Good work starts<br/>with a conversation.</h2><p>Start with an idea, a design, or any file.<br/>Tell me what you want to make.</p><div className="welcome-hint"><${Icon} name="file" size=${16}/><span>Describe your video or paste a Figma link to get started</span></div></div>` : html`
@@ -745,6 +749,10 @@ function App() {
               <${ContextUsage} usage=${data?.usage} active=${active} pending=${queue.length > 0} compact=${compact} busy=${compactBusy}/></div></div>
         </div><div className="composer-help"><span>${busy ? 'Saving…' : answering ? (uploads.length ? 'Your attached files are kept for your next general message.' : 'Answering this question. Collapse it to write another message.') : active ? (active.can_stop === false ? 'This turn is running in a terminal. Your message will queue.' : 'Send now stops the current turn and continues with your message.') : 'Enter to send · Shift + Enter for a new line'}</span><span>${selected ? 'Changes stay in this conversation' : 'Source video optional'}</span></div></div></div>
         <input ref=${fileInput} className="visually-hidden" type="file" multiple onChange=${e => {upload([...e.target.files]); e.target.value = '';}} aria-label="Attach files"/>
+        <//>
+        <${TabPanel} value="qc" forceMount hidden=${chatTab !== 'qc'} className="chat-mode-panel">
+          <${QCPanel} api=${api} requestId=${selected} visible=${chatTab === 'qc' && (narrow ? mobileView === 'chat' : chatShown)} Activity=${Activity}/>
+        <//><//>
       </section>
       ${divider('chat')}
       <${WorkspaceCanvas} visible=${!narrow || mobileView === 'canvas'} api=${api} requestId=${selected} state=${canvas} dispatch=${dispatchCanvas} onExplore=${explore}
