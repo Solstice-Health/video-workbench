@@ -16,6 +16,13 @@ Public methods return detached JSON dictionaries:
 * transition(id, status, actor='human', *, expected_revision, note='', model=None).
 * reconcile(): returns [{item, current_target}], marking open findings
   needs_recheck when a newer render exists without changing their original anchor.
+* prepare_recheck(item_id, target, *, f0, f1, pin, expected_revision,
+  idempotency_key, model, provider): freezes one finding and two verified windows.
+* complete_recheck(id, *, assessment, summary, evidence, model, provider): records
+  a sampled, unqualified observation without changing the finding. The caller
+  authenticates host inspection receipts; this store checks their shape and pins.
+* list_rechecks() / get_recheck(id): QC-private records with computed stale and
+  stale_reason fields. Neither these fields nor rechecks enter editor handoffs.
 * handoff(item_ids, enqueue, idempotency_key, *, expected_revisions=None,
   actor='human'): freezes a batch before enqueue(message=..., idempotency_key=...).
   The callback MUST durably deduplicate by key and return a JSON job dictionary.
@@ -136,6 +143,38 @@ def _target_parts(value: Any) -> tuple[str, int]:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="microseconds")
+
+
+def _receipt_json(value: Any, depth: int = 0, budget: list[int] | None = None) -> None:
+    """Bound host receipt metadata before serialization, including unknown fields."""
+    if depth > 8:
+        raise QCStoreError("Evidence metadata exceeds 8 nesting levels")
+    if budget is None:
+        budget = [16 * 1024]
+    # Bound traversal as well as the final encoded JSON. Nested containers may
+    # otherwise expand far beyond the per-receipt limit before serialization.
+    budget[0] -= 2
+    if budget[0] < 0:
+        raise QCStoreError("Evidence metadata exceeds the 16 KiB receipt budget")
+    if value is None or type(value) is bool:
+        return
+    if isinstance(value, str):
+        _text(value, "evidence metadata", 4096, empty=True)
+        budget[0] -= len(value.encode())
+    elif type(value) in (int, float):
+        _number(value, "evidence metadata number", -(2**53 - 1), 2**53 - 1)
+    elif isinstance(value, list) and len(value) <= 128:
+        for child in value:
+            _receipt_json(child, depth + 1, budget)
+    elif isinstance(value, dict) and len(value) <= 64:
+        for key, child in value.items():
+            _text(key, "evidence metadata key", 128)
+            budget[0] -= len(key.encode())
+            _receipt_json(child, depth + 1, budget)
+    else:
+        raise QCStoreError("Evidence metadata must be bounded, finite JSON")
+    if budget[0] < 0:
+        raise QCStoreError("Evidence metadata exceeds the 16 KiB receipt budget")
 
 
 def _identity(value: os.stat_result) -> tuple[int, ...]:
@@ -361,7 +400,7 @@ class QCStore:
 
     @staticmethod
     def _empty() -> dict[str, Any]:
-        return {"schema": _SCHEMA, "sequence": 0, "head": None, "items": {}, "batches": {}}
+        return {"schema": _SCHEMA, "sequence": 0, "head": None, "items": {}, "batches": {}, "rechecks": {}}
 
     def _load(self, directory: int) -> dict[str, Any]:
         state = self._empty()
@@ -383,7 +422,12 @@ class QCStore:
                 snapshot = _decode(stream.read())
         except FileNotFoundError:
             snapshot = None
-        if snapshot != state:
+        # Journals predating rechecks retain their original hashes and schema.
+        # In particular, an empty legacy projection is not lost audit data.
+        legacy = isinstance(snapshot, dict) and "rechecks" not in snapshot
+        if legacy:
+            snapshot = {**snapshot, "rechecks": {}}
+        if legacy or snapshot != state:
             if state["sequence"] == 0 and snapshot not in (None, self._empty()):
                 raise QCStoreError("QC journal missing but snapshot contains data")
             self._write_snapshot(directory, state)
@@ -399,6 +443,9 @@ class QCStore:
         elif kind in ("handoff.prepared", "handoff.sent"):
             batch = data["batch"]
             state["batches"][batch["idempotency_key"]] = deepcopy(batch)
+        elif kind in ("recheck.prepared", "recheck.completed"):
+            recheck = data["recheck"]
+            state["rechecks"][recheck["id"]] = deepcopy(recheck)
         else:
             raise QCStoreError("Unknown QC journal event type")
 
@@ -567,6 +614,177 @@ class QCStore:
                     self._append(directory, state, "item.recheck", {"item": item}, "system:reconcile")
                 candidates.append({"item": deepcopy(item), "current_target": deepcopy(latest)})
             return candidates
+
+    def prepare_recheck(self, item_id: str, target: str, *, f0: int, f1: int,
+                        pin: dict[str, str], expected_revision: int, idempotency_key: str,
+                        model: str, provider: str) -> dict[str, Any]:
+        """Freeze a comparison before dispatch; retries reuse the original payload.
+
+        ``target`` is an output reference and ``pin`` is the viewer's exact
+        {sha256, canvas_file_sha256}. Configuration belongs to the host submission,
+        not this journal. A retry may return an already completed record.
+        """
+        _id(item_id)
+        output, version = _target_parts(target)
+        _integer(f0, "f0")
+        _integer(f1, "f1", f0 + 1)
+        _integer(expected_revision, "expected_revision", 1)
+        _text(idempotency_key, "idempotency_key", 240)
+        _text(model, "model")
+        _text(provider, "provider")
+        if (not isinstance(pin, dict) or set(pin) != {"sha256", "canvas_file_sha256"}
+                or any(not isinstance(value, str) or not _DIGEST.fullmatch(value) for value in pin.values())):
+            raise QCStoreError("pin must contain exactly sha256 and canvas_file_sha256 as 64 lowercase hex characters")
+        pin = dict(pin)
+        with self._locked() as directory:
+            state = self._load(directory)
+            previous = next((r for r in state["rechecks"].values() if r["idempotency_key"] == idempotency_key), None)
+            if previous is not None:
+                # Match against the frozen revision/pins before consulting mutable
+                # findings or media. Recovery must not dispatch a second review.
+                if (previous["item_id"] != item_id or previous["item_revision"] != expected_revision
+                        or previous["after"]["target"] != target
+                        or previous["after"]["f0"] != f0 or previous["after"]["f1"] != f1
+                        or previous["model"] != model or previous["provider"] != provider
+                        or any(previous["after"][key] != value for key, value in pin.items())):
+                    raise QCConflict("Idempotency key already belongs to a different recheck")
+                return deepcopy(previous)
+            item = state["items"][item_id]
+            if item["revision"] != expected_revision:
+                raise QCConflict(f"Revision conflict for {item_id}: expected {expected_revision}, current {item['revision']}")
+            if item["status"] not in ("open", "needs_recheck"):
+                raise QCStoreError("Only open or needs_recheck findings can be rechecked")
+            before = item["anchor"]
+            if output != before["output"] or version <= before["version"]:
+                raise QCStoreError("Recheck target must be a strictly newer version of the same output")
+            self._verify_anchor(before)
+            _integer(before["f0"], "original f0", 0, before["frames"] - 1)
+            _integer(before["f1"], "original f1", before["f0"] + 1, before["frames"])
+            after = self.verify_target(target)
+            if any(after[key] != value for key, value in pin.items()):
+                raise QCPinError("Recheck viewer pin is stale; inspect the current rendered bytes before preparing")
+            if f1 > after["frames"]:
+                raise QCStoreError("f1 exceeds rendered frame count")
+            record = {"id": str(uuid4()), "idempotency_key": idempotency_key, "status": "prepared",
+                      "item_id": item_id, "item_revision": item["revision"], "item": deepcopy(item),
+                      "before": deepcopy(before), "after": {**after, "f0": f0, "f1": f1,
+                                                           "region": deepcopy(before["region"])},
+                      "model": model, "provider": provider, "created_at": _now(), "result": None}
+            self._append(directory, state, "recheck.prepared", {"recheck": record}, "system:recheck", model)
+            return deepcopy(record)
+
+    @staticmethod
+    def _recheck_evidence(record: dict[str, Any], evidence: Any, assessment: str) -> list[dict[str, Any]]:
+        if not isinstance(evidence, list) or len(evidence) > 64:
+            raise QCStoreError("evidence must be a list of at most 64 host inspection receipts")
+        windows = {record[side]["target"]: record[side] for side in ("before", "after")}
+        observed = set()
+        retained = []
+        total_bytes = 0
+        for receipt in evidence:
+            if not isinstance(receipt, dict) or not {"target", "sha256", "frames"} <= receipt.keys():
+                raise QCStoreError("Evidence receipts require target, sha256 and frames")
+            _receipt_json(receipt)
+            raw = _json(receipt).encode()
+            total_bytes += len(raw)
+            if len(raw) > 16 * 1024 or total_bytes > 256 * 1024:
+                raise QCStoreError("Evidence exceeds 16 KiB per receipt or 256 KiB total")
+            # Work only on detached JSON; no caller-owned containers are retained.
+            receipt = _decode(raw)
+            _target_parts(receipt["target"])
+            window = windows.get(receipt["target"])
+            if window is None or receipt["sha256"] != window["sha256"]:
+                raise QCPinError("Evidence target/hash does not match a frozen recheck window")
+            if ("canvas_file_sha256" in receipt
+                    and receipt["canvas_file_sha256"] != window["canvas_file_sha256"]):
+                raise QCPinError("Evidence canvas hash does not match a frozen recheck window")
+            frames = receipt["frames"]
+            if not isinstance(frames, list) or len(frames) > 64:
+                raise QCStoreError("Evidence frames must be a list of at most 64 integers")
+            for frame in frames:
+                _integer(frame, "evidence frame", window["f0"], window["f1"] - 1)
+            region = receipt.get("region")
+            if region is not None:
+                if not isinstance(region, list) or len(region) != 4:
+                    raise QCStoreError("Evidence region must be normalized [x, y, w, h]")
+                x, y, w, h = [_number(v, "evidence region", 0, 1) for v in region]
+                if w <= 0 or h <= 0 or x + w > 1 or y + h > 1:
+                    raise QCStoreError("Evidence region must have positive area within the normalized frame")
+            if "coverage" in receipt:
+                _choice(receipt["coverage"], "evidence coverage", ("one frame", "sampled frames only"))
+            if frames:
+                observed.add(receipt["target"])
+            retained.append(receipt)
+        if assessment != "inconclusive" and observed != set(windows):
+            raise QCStoreError("Substantive assessments require inspected frames in both recheck windows")
+        return retained
+
+    def complete_recheck(self, id: str, *, assessment: str, summary: str, evidence: list[dict[str, Any]],
+                         model: str, provider: str) -> dict[str, Any]:
+        """Persist a host-validated review, without resolving or revising its finding.
+
+        Identical completion retries return the saved record, even if its media
+        later disappears. The first completion verifies both full media pins.
+        """
+        _id(id)
+        _choice(assessment, "assessment", ("persists", "not_observed", "inconclusive"))
+        _text(summary, "summary", 4000)
+        _text(model, "model")
+        _text(provider, "provider")
+        with self._locked() as directory:
+            state = self._load(directory)
+            record = deepcopy(state["rechecks"][id])
+            if model != record["model"] or provider != record["provider"]:
+                raise QCConflict("Completion model/provider must match the prepared recheck")
+            result = {"assessment": assessment, "summary": summary,
+                      "evidence": self._recheck_evidence(record, evidence, assessment),
+                      "qualification": "unqualified_visual_review", "coverage": "sampled_frames_only"}
+            if record["status"] == "completed":
+                if record["result"] != result:
+                    raise QCConflict("Recheck already completed with a different result")
+                return record
+            self._verify_anchor(record["before"])
+            self._verify_anchor(record["after"])
+            record.update(status="completed", result=result, completed_at=_now())
+            self._append(directory, state, "recheck.completed", {"recheck": record}, "qc_rechecker", model)
+            return deepcopy(record)
+
+    def _recheck_view(self, state: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+        """Project current staleness without changing journaled review evidence."""
+        item = state["items"].get(record["item_id"])
+        reason = None
+        if item is None:
+            reason = "finding_missing"
+        elif item["status"] in ("resolved", "dismissed"):
+            reason = f"finding_{item['status']}"
+        elif item["revision"] != record["item_revision"]:
+            reason = "finding_revision_changed"
+        else:
+            after = record["after"]
+            for version in self._rendered_versions(after["output"]):
+                if version <= after["version"]:
+                    break
+                try:
+                    self._target(f"output:{after['output']}@v{version}", fresh=False)
+                except QCPinError:
+                    # An unfinished/corrupt new render is not a valid successor.
+                    continue
+                reason = "newer_render_available"
+                break
+        return {**deepcopy(record), "stale": reason is not None, "stale_reason": reason}
+
+    def list_rechecks(self) -> list[dict[str, Any]]:
+        """QC-private rechecks, in preparation order, with dynamic staleness."""
+        with self._locked() as directory:
+            state = self._load(directory)
+            return [self._recheck_view(state, record) for record in state["rechecks"].values()]
+
+    def get_recheck(self, id: str) -> dict[str, Any]:
+        """Read one QC-private recheck; host routes must enforce QC access."""
+        _id(id)
+        with self._locked() as directory:
+            state = self._load(directory)
+            return self._recheck_view(state, state["rechecks"][id])
 
     @staticmethod
     def _message(batch: dict[str, Any]) -> str:
