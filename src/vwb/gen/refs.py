@@ -2,6 +2,7 @@
 
   t:<seconds>            a source frame at a time, for example "t:47.2"
   f:<frame>              a source frame by number, for example "f:1416"
+  source:<ref>#t=2       a specific registered source at a time (#f=60 for a frame)
   slot:<name>@<rev>      a registry asset (a still; for a clip, its first frame)
   slot:<name>@<rev>#t=2  a frame of a clip asset at a time in the clip
 Each may carry a crop [x, y, w, h] in the pixels of what it names.
@@ -16,7 +17,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from vwb.index.store import IndexStore
+from vwb.index.paths import SourceIndexes, source
 from vwb.media.decode import read_frames
 from vwb.workspace import Workspace
 from vwb.workspace.registry import Registry
@@ -37,10 +38,18 @@ def _rgba(rgb: np.ndarray) -> np.ndarray:
 
 def resolve(ws: Workspace, ref: str, crop: list[float] | None = None) -> Resolved:
     ref = ref.strip()
-    if ref.startswith(("t:", "f:")):
-        src = ws.load().source()
-        fps = float(IndexStore(ws.index / "index.sqlite").media()["fps"])
-        frame = int(round(float(ref[2:]) * fps)) if ref.startswith("t:") else int(ref[2:])
+    if ref.startswith(("t:", "f:", "source:")):
+        if ref.startswith("source:"):
+            media, sep, at = ref[7:].partition("#")
+            if not sep or not at.startswith(("t=", "f=")):
+                raise ValueError("Use source:<media ref>#t=<seconds> or #f=<frame>.")
+            src = source(ws, media, require_explicit=True)
+            coordinate = at.replace("=", ":", 1)
+        else:
+            src = source(ws, require_explicit=True)
+            coordinate = ref
+        fps = float(SourceIndexes(ws).for_media(src.ref).media()["fps"])
+        frame = int(round(float(coordinate[2:]) * fps)) if coordinate.startswith("t:") else int(coordinate[2:])
         rgba = _rgba(read_frames(src.path, [frame])[frame])
         lineage = {"kind": "source_frame", "media": src.ref, "frame": frame}
     elif ref.startswith("slot:"):
@@ -57,7 +66,7 @@ def resolve(ws: Workspace, ref: str, crop: list[float] | None = None) -> Resolve
         lineage = {"kind": "asset", "ref": f"slot:{row['slot']}@{row['rev']}", "sha256": row["sha256"],
                    "prov": row["prov"], **({"t": float(at)} if at else {})}
     else:
-        raise ValueError(f"unknown image reference {ref!r}: use t:<seconds>, f:<frame> or slot:<name>@<rev>")
+        raise ValueError(f"unknown image reference {ref!r}: use source:<ref>#t=<seconds>, #f=<frame> or slot:<name>@<rev>")
     if crop:
         x, y, w, h = (int(round(v)) for v in crop)
         H, W = rgba.shape[:2]

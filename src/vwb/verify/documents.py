@@ -10,6 +10,7 @@ from typing import Any
 
 from vwb.canvas.anim import is_keyed
 from vwb.canvas.model import Canvas, CaptionsLayer, ClipLayer, ImageLayer, TextLayer, VideoLayer
+from vwb.index.paths import SourceIndexes, store_for
 from vwb.index.store import IndexStore
 from vwb.util.timecode import fmt
 from vwb.workspace import Workspace
@@ -18,16 +19,18 @@ from vwb.workspace.registry import Registry
 SEV_ORDER = {"BLOCK": 0, "HOLD": 1, "WARN": 2, "INFO": 3}
 
 
-def cue_sheet(ws: Workspace, canvas: Canvas, store: IndexStore, receipt: dict[str, Any]) -> dict[str, Any]:
+def cue_sheet(ws: Workspace, canvas: Canvas, store: SourceIndexes | IndexStore, receipt: dict[str, Any]) -> dict[str, Any]:
     fps = canvas.fps
-    shots = store.all("SELECT * FROM shots ORDER BY id")
     rows, out_f = [], 0
     for span in canvas.time_map:
+        st = store_for(store, span.media)
+        shots = st.all("SELECT * FROM shots ORDER BY id")
+        source_fps = float(st.media()["fps"])
         n = span.src_out - span.src_in
         crossed = [{"shot": s["id"], "kind": s["kind"], "title": (s["title"] or "")[:90]}
                    for s in shots if s["f0"] < span.src_out and s["f1"] > span.src_in]
         rows.append({"out_in": fmt(out_f / fps), "out_out": fmt((out_f + n) / fps), "media": span.media,
-                     "src_in": fmt(span.src_in / fps), "src_out": fmt(span.src_out / fps),
+                     "src_in": fmt(span.src_in / source_fps), "src_out": fmt(span.src_out / source_fps),
                      "src_frames": [span.src_in, span.src_out], "shots": crossed})
         out_f += n
     camera = {}

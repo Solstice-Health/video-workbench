@@ -32,6 +32,7 @@ from vwb.canvas.model import (
 from vwb.canvas.paths import checked_path, output_id, read_record
 from vwb.config import load_profile
 from vwb.index.ocr import CLAIM_HINT
+from vwb.index.paths import SourceIndexes, store_for
 from vwb.index.store import IndexStore
 from vwb.media.probe import probe
 from vwb.util.hashing import sha256_json
@@ -107,8 +108,6 @@ def check(ws: Workspace, c: Canvas) -> list[Problem]:
     if c.length <= 0:
         P.append(Problem("error", "time_map", "the timeline is empty"))
         return P
-    src = next(iter(media.values())) if media else None
-    sw, sh = (probe(src.path, with_keyframes=False).width, probe(src.path, with_keyframes=False).height) if src else (0, 0)
     ids = [l.id for l in c.layers]
     for dup in {i for i in ids if ids.count(i) > 1}:
         P.append(Problem("error", dup, "layer ids must be unique"))
@@ -133,6 +132,9 @@ def check(ws: Workspace, c: Canvas) -> list[Problem]:
         if isinstance(l, VideoLayer):
             if l.source not in media:
                 P.append(Problem("error", l.id, f"unknown media {l.source}"))
+                continue
+            info = probe(media[l.source].path, with_keyframes=False)
+            sw, sh = info.width, info.height
             crops = [] if l.crop == "full" else all_values(l.crop)
             for cr in crops:
                 if len(cr) != 4 or cr[2] <= 1 or cr[3] <= 1:
@@ -195,6 +197,11 @@ def caption_pages(words: list[dict[str, Any]], max_chars: int, max_lines: int, m
     pages: list[list[list[dict[str, Any]]]] = []
     page: list[list[dict[str, Any]]] = [[]]
     for w in words:
+        # Source-local word IDs and hazard intervals cannot share a caption page
+        # across a cut (including repeated/reordered spans from the same source).
+        if page[0] and w.get("span_index") != page[0][0].get("span_index"):
+            pages.append(page)
+            page = [[]]
         line = page[-1]
         if line and sum(len(x["text"]) + 1 for x in line) + len(w["text"]) > max_chars:
             if len(page) < max_lines:
@@ -212,13 +219,15 @@ def caption_pages(words: list[dict[str, Any]], max_chars: int, max_lines: int, m
     return pages
 
 
-def output_words(store: IndexStore, c: Canvas) -> list[dict[str, Any]]:
+def output_words(store: SourceIndexes | IndexStore, c: Canvas) -> list[dict[str, Any]]:
     """Transcript words the output plays, with output frames (o0, o1) and seconds (t0, t1)."""
     fps = c.fps
     words, offset = [], 0
-    for s in c.time_map:
-        for w in store.all("SELECT * FROM words WHERE f0 >= ? AND f1 <= ? ORDER BY t0", (s.src_in, s.src_out + 1)):
-            words.append({**w, "o0": offset + w["f0"] - s.src_in, "o1": offset + w["f1"] - s.src_in,
+    for span_index, s in enumerate(c.time_map):
+        st = store_for(store, s.media)
+        for w in st.all("SELECT * FROM words WHERE f0 >= ? AND f1 <= ? ORDER BY t0", (s.src_in, s.src_out)):
+            words.append({**w, "media": s.media, "span_index": span_index, "span_end": offset + s.src_out - s.src_in,
+                          "o0": offset + w["f0"] - s.src_in, "o1": offset + w["f1"] - s.src_in,
                           "t0": (offset + w["f0"] - s.src_in) / fps, "t1": (offset + w["f1"] - s.src_in) / fps})
         offset += s.src_out - s.src_in
     return words
@@ -227,14 +236,15 @@ def output_words(store: IndexStore, c: Canvas) -> list[dict[str, Any]]:
 def expand(ws: Workspace, c: Canvas) -> Canvas:
     """Fill the copy deck for text layers and derive caption pages from the transcript."""
     deck = copydeck.load(ws)
-    store = IndexStore(ws.index / "index.sqlite")
+    store = SourceIndexes(ws)
     fps = c.fps
     copy = {}
     for l in c.layers:
         if isinstance(l, TextLayer):
             copy[l.copy_id] = deck[l.copy_id]
     words = output_words(store, c)
-    claims = store.all("SELECT f0, f1 FROM hazards WHERE kind LIKE 'claim%'")
+    claims = {s.media: store.for_media(s.media).all("SELECT f0, f1 FROM hazards WHERE kind LIKE 'claim%'")
+              for s in c.time_map}
     for l in c.layers:
         if not isinstance(l, CaptionsLayer):
             continue
@@ -244,16 +254,19 @@ def expand(ws: Workspace, c: Canvas) -> Canvas:
             flat = [w for ln in page for w in ln]
             cid = f"cap-{l.id}-{n:03d}"
             text = " ".join(w["text"] for w in flat)
-            regulated = any(f0 < flat[-1]["f1"] and f1 > flat[0]["f0"] for f0, f1 in ((h["f0"], h["f1"]) for h in claims)) \
+            regulated = any(f0 < flat[-1]["f1"] and f1 > flat[0]["f0"]
+                            for f0, f1 in ((h["f0"], h["f1"]) for h in claims[flat[0]["media"]])
+                            if f0 is not None and f1 is not None) \
                 or bool(CLAIM_HINT.search(text))
-            copy[cid] = copydeck.caption_entry(cid, text, flat, regulated, c.time_map[0].media)
+            copy[cid] = copydeck.caption_entry(cid, text, flat, regulated, flat[0]["media"])
             pages.append({"copy_id": cid, "from": int(flat[0]["o0"]), "to": 0,
+                          "span_end": flat[0]["span_end"],
                           "lines": [[{"text": w["text"], "from": int(w["o0"]), "to": int(w["o1"])} for w in ln] for ln in page]})
         end = l.span[1] if l.span else c.length
         for i, pg in enumerate(pages):
             nxt = pages[i + 1]["from"] if i + 1 < len(pages) else end
             last = max(w["to"] for ln in pg["lines"] for w in ln)
-            pg["to"] = int(min(nxt, max(last + int(0.6 * fps), pg["from"] + 6)))
+            pg["to"] = int(min(nxt, end, pg.pop("span_end"), max(last + int(0.6 * fps), pg["from"] + 6)))
         l.pages = pages
     c.copy_deck = list(copy.values())
     return c
