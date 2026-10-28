@@ -471,7 +471,13 @@ def test_upload_regular_named_workspace_file_is_permitted(browser):
     result, _ = session.act({"action": "upload", "ref": "e1", "path": "work/selected.txt",
                              "observation_id": old["observation_id"], "screenshot": False}, actor="job_lead")
     assert result["action_completed"]
-    assert commands(driver) == [["upload", "@e1", str(path.resolve())]]
+    sent = commands(driver)
+    assert len(sent) == 1 and sent[0][:2] == ["upload", "@e1"]
+    uploaded = Path(sent[0][2])
+    assert uploaded.name == path.name and uploaded.is_relative_to(session.private)
+    assert uploaded.read_text() == "user-selected content"
+    path.write_text("later change")
+    assert uploaded.read_text() == "user-selected content"  # browser submission stays pinned
 
 
 @pytest.mark.parametrize("action", ["click_at", "move_at"])

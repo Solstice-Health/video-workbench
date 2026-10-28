@@ -502,18 +502,19 @@ class LocalImports:
                 self.owned.pop(self._key(ws, identity), None)
 
     def _publish(self, ws: Workspace, job: int, identity: str, cancel: threading.Event, ready) -> None:
-        root = os.open(ws.root, _DIRECTORY)
+        work_path = ws.work
+        root = os.open(work_path.parent, _DIRECTORY)
         try:
-            with _child_directory(root, "work") as work:
+            with _child_directory(root, work_path.name) as work:
                 with _child_directory(work, "imports", create=True) as imports:
                     _check(cancel)
-                    if not _same_directory(root, "work", work) or not _same_directory(work, "imports", imports):
+                    if not _same_directory(root, work_path.name, work) or not _same_directory(work, "imports", imports):
                         raise ValueError("The workspace folder changed during import. Try again.")
                     with self.lock:
                         _check(cancel)
                         _rename_new(job, "stage", imports, identity)
                         try:
-                            if not _same_directory(root, "work", work) or not _same_directory(work, "imports", imports):
+                            if not _same_directory(root, work_path.name, work) or not _same_directory(work, "imports", imports):
                                 raise ValueError("The workspace folder changed during import. Try again.")
                             ready()
                         except BaseException:

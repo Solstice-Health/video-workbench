@@ -27,16 +27,20 @@ VIDEO_SUFFIXES = {'.mp4', '.mov', '.m4v', '.webm', '.mkv'}
 def directory(ws, relative: str) -> Path:
     descriptor = _directory_fd(ws, relative)
     os.close(descriptor)
-    return ws.root / relative
+    return ws.path(relative)
 
 
 def _directory_fd(ws, relative: str) -> int:
     """Create/open each directory relative to a pinned no-follow descriptor."""
-    parts = Path(relative).parts
+    parts = tuple(relative.split('/'))
     if Path(relative).is_absolute() or any(part in ('', '.', '..') for part in parts):
         raise ValueError('Invalid studio directory.')
-    descriptor = os.open(ws.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    root = ws.work if parts[0] == 'work' else ws.root
+    if parts[0] == 'work':
+        parts = parts[1:]
+    descriptor = None
     try:
+        descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         for part in parts:
             try:
                 os.mkdir(part, mode=0o700, dir_fd=descriptor)
@@ -47,7 +51,8 @@ def _directory_fd(ws, relative: str) -> int:
             descriptor = child
         return descriptor
     except OSError:
-        os.close(descriptor)
+        if descriptor is not None:
+            os.close(descriptor)
         raise ValueError('Studio directories must be regular folders, without symbolic links.') from None
 
 
@@ -170,7 +175,7 @@ def snapshot_input(ws, source: Input, folder: Path, index: str, *, kind: str) ->
         row = Registry(ws.assets).get(source.ref)
         if (row['kind'] == 'video') != (kind == 'video'):
             raise ValueError('The asset has the wrong media type.')
-        path = Path(row['path']).relative_to(ws.root).as_posix()
+        path = ws.rel(row['path'])
         receipt, original_ref = row['receipt'], source.ref
         expected_hash = row['sha256']
     else:
@@ -202,7 +207,7 @@ def snapshot_input(ws, source: Input, folder: Path, index: str, *, kind: str) ->
     finally:
         raw.unlink(missing_ok=True)
     digest = sha256_file(target)
-    public_path = (folder / target.name).relative_to(ws.root).as_posix()
+    public_path = ws.rel(folder / target.name)
     publish(ws, public_path, target)
     lineage = {'path': path, 'sha256': source_digest, 'kind': 'studio_input'}
     if original_ref:
