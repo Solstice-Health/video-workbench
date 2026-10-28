@@ -144,7 +144,16 @@ def _identity(value: os.stat_result) -> tuple[int, ...]:
 
 def _open_file(directory: int, name: str, flags: int, *, private: bool = False) -> int:
     try:
-        fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory)
+        # Concurrent first creation on macOS can return ENOENT even though the
+        # competing creator has just published the file. Retry only creation,
+        # against the same pinned directory and with every no-follow guard.
+        for attempt in range(3):
+            try:
+                fd = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory)
+                break
+            except FileNotFoundError:
+                if not flags & os.O_CREAT or attempt == 2:
+                    raise
     except OSError as exc:
         if isinstance(exc, FileNotFoundError):
             raise

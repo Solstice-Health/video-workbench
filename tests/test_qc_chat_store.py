@@ -460,6 +460,21 @@ def test_concurrent_process_writes_preserve_every_item_and_event(ws):
     assert [e["sequence"] for e in events(ws)] == list(range(1, 13))
 
 
+def test_transient_create_race_retries_with_same_directory_guards(ws, monkeypatch):
+    real_open = os.open
+    calls = []
+    def open_with_race(path, flags, mode=0o777, *, dir_fd=None):
+        if path == ".lock":
+            calls.append((flags, mode, dir_fd))
+            if len(calls) == 1:
+                raise FileNotFoundError("Concurrent creator")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+    monkeypatch.setattr(os, "open", open_with_race)
+    QCStore(ws)
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert calls[0][0] & os.O_NOFOLLOW
+
+
 def test_concurrent_transition_has_one_winner_and_handoff_enqueues_once(ws):
     item = QCStore(ws).create(payload())
 
