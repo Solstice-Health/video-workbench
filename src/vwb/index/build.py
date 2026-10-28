@@ -14,6 +14,8 @@ import json
 import os
 import re
 import shutil
+import sqlite3
+import tempfile
 import time
 from collections import defaultdict
 from collections.abc import Callable
@@ -23,10 +25,12 @@ from typing import Any
 
 import cv2
 import numpy as np
+from filelock import FileLock, Timeout
 
 from vwb.config import lever_serves, slot
 from vwb.gateway import Gateway
 from vwb.index import asr, dossier, hazards, layout, marks, ocr, readings, vision
+from vwb.index.paths import index_dir, source
 from vwb.index.shots import detect_shots
 from vwb.index.store import IndexStore
 from vwb.media import audio as audio_mod
@@ -50,7 +54,8 @@ class IndexBuilder:
         self.ws, self.src = ws, source
         self.gw = gw or Gateway(ws, actor="index")
         self.force = force
-        self.store = IndexStore(ws.index / "index.sqlite")
+        self.index = index_dir(ws, source.ref)
+        self.store = IndexStore(self.index / "index.sqlite")
         self.progress = progress or (lambda msg: log.info("index: %s", msg))
         self.pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="index-api")
         self.info: dict[str, Any] = {}
@@ -93,8 +98,27 @@ class IndexBuilder:
     # ---------------------------------------------------------------- stages
     def run(self) -> dict[str, Any]:
         t_start = time.time()
+        media = self.store.all("SELECT * FROM media")
+        if media and (len(media) != 1 or media[0]["rev"] != self.src.rev
+                      or not self.store.stage_done("media", INDEX_VERSION, {"sha": self.src.sha256})):
+            # Old callers could build a second source into the first source's
+            # tables. Do not preserve any facts or readings from that cache.
+            con = self.store.connect()
+            with con:
+                for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall():
+                    con.execute(f'DELETE FROM "{row[0]}"')
         self._stage("media", {"sha": self.src.sha256}, self.stage_media)
-        self.info = json.loads(self.store.media()["info"])
+        indexed_media = self.store.media()
+        self.info = json.loads(indexed_media["info"])
+        self.info.update(path=self.src.path, sha256=self.src.sha256)
+        # Reused indexes have request-local source IDs and paths. Rebind them
+        # even when all expensive stages are cached.
+        con = self.store.connect()
+        with con:
+            con.execute("DELETE FROM media")
+            con.execute("UPDATE observations SET media_id=?, media_rev=? WHERE media_id=? AND media_rev=?",
+                        (self.src.media_id, self.src.rev, indexed_media["media_id"], indexed_media["rev"]))
+        self.store.set_media(self.src.media_id, self.src.rev, self.src.path, self.info)
         self.fps = float(self.info["fps"])
 
         reading_future: Future | None = None
@@ -103,11 +127,11 @@ class IndexBuilder:
         else:
             reading_future = self.pool.submit(readings.video_reading, self.gw, self.src.path, self.info["duration"])
 
-        self._stage("audio", {"v": 1}, self.stage_audio)
+        self._stage("audio", {"v": 2}, self.stage_audio)
         reader2_future: Future | None = None
         asr_settings = {"r1": slot("asr.reader1"), "r2": slot("asr.reader2") if lever_serves("index.asr_reader2") else None, "v": 4}
-        if lever_serves("index.asr_reader2") and (self.force or not self.store.stage_done("asr", INDEX_VERSION, asr_settings)):
-            reader2_future = self.pool.submit(asr.transcribe_reader2, self.gw, self.ws.index / "audio16k.wav")
+        if self.info.get("has_audio", True) and lever_serves("index.asr_reader2") and (self.force or not self.store.stage_done("asr", INDEX_VERSION, asr_settings)):
+            reader2_future = self.pool.submit(asr.transcribe_reader2, self.gw, self.index / "audio16k.wav")
 
         self._stage("shots", {"engine": "adaptive", "v": 1}, self.stage_shots)
         self._shots = self.store.all("SELECT * FROM shots ORDER BY id")
@@ -132,7 +156,7 @@ class IndexBuilder:
         self._stage("disagreements", {"v": 1}, self.stage_disagreements)
 
         text = dossier.build(self.store, f"{self.src.media_id}@{self.src.rev}")
-        (self.ws.index / "dossier.md").write_text(text)
+        (self.index / "dossier.md").write_text(text)
         self.pool.shutdown(wait=False)
         summary = {"media": self.src.ref, "seconds": round(time.time() - t_start, 1),
                    "counts": {t: self.store.one(f"SELECT COUNT(*) AS n FROM {t}")["n"]
@@ -147,11 +171,15 @@ class IndexBuilder:
         return f"{info['width']}x{info['height']} {info['duration']:.1f}s"
 
     def stage_audio(self) -> str:
-        wav = self.ws.index / "audio16k.wav"
+        wav = self.index / "audio16k.wav"
+        if not self.info.get("has_audio", True):
+            self.store.replace_rows("silences", [{"t0": 0, "t1": self.info["duration"]}])
+            np.save(self.index / "rms_db.npy", np.array([[0, self.info["duration"]], [-120, -120]], dtype=np.float32))
+            return "no audio stream"
         ffmpeg("-i", self.src.path, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav), expect=[wav])
         pcm = audio_mod.load_pcm(wav, sr=16000)
         times, db = audio_mod.rms_envelope(pcm, 16000, hop_ms=10)
-        np.save(self.ws.index / "rms_db.npy", np.stack([times, db]).astype(np.float32))
+        np.save(self.index / "rms_db.npy", np.stack([times, db]).astype(np.float32))
         sil = audio_mod.silences(wav, noise_db=-42, min_dur=0.18)
         self.store.replace_rows("silences", [{"t0": a, "t1": b} for a, b in sil])
         loud = audio_mod.loudness(self.src.path)
@@ -228,11 +256,11 @@ class IndexBuilder:
         self.store.replace_rows("persons", persons)
         self.store.replace_rows("saliency", sal)
         samples = [(idx, results_ocr[idx]) for idx in sorted(results_ocr)]
-        (self.ws.index / "ocr_samples.json").write_text(dumps({"step": step, "samples": samples}, None))
+        (self.index / "ocr_samples.json").write_text(dumps({"step": step, "samples": samples}, None))
         return f"{len(results_small)} samples, {len(samples)} OCR frames, {len(faces)} face boxes"
 
     def stage_text(self) -> str:
-        data = json.loads((self.ws.index / "ocr_samples.json").read_text())
+        data = json.loads((self.index / "ocr_samples.json").read_text())
         samples = [(int(i), lines) for i, lines in data["samples"]]
         bounds = sorted({s["f0"] for s in self._shots} | {self.info["n_frames"]})
         tracks = ocr.build_tracks(samples, int(OCR_MAX_GAP_S * self.fps), self.info["n_frames"], bounds)
@@ -280,7 +308,7 @@ class IndexBuilder:
 
     def _rep_frames(self) -> dict[int, int]:
         """Representative frame per shot: the OCR sample with the most text, late in the shot."""
-        data = json.loads((self.ws.index / "ocr_samples.json").read_text())
+        data = json.loads((self.index / "ocr_samples.json").read_text())
         best: dict[int, tuple[int, int]] = {}
         for idx, lines in data["samples"]:
             sid = self._shot_of(int(idx))
@@ -316,16 +344,20 @@ class IndexBuilder:
                                          (dumps(seg["bg"], None), n_text, int(bool(fboxes)), s["id"]))
         self.store.connect().commit()
         self.store.replace_rows("blocks", blocks)
-        (self.ws.index / "rep_frames.json").write_text(dumps(reps, None))
+        (self.index / "rep_frames.json").write_text(dumps(reps, None))
         return f"{len(blocks)} blocks over {len(self._shots)} shots"
 
     def stage_asr(self, reader2_future: Future | None) -> str:
+        if not self.info.get("has_audio", True):
+            self.store.replace_rows("words", [])
+            self.store.replace_rows("sentences", [])
+            return "no audio stream; no transcript"
         screen_text = " ".join(t["text"] for t in self.store.all("SELECT text FROM text_tracks"))
         glossary = asr.glossary_from_text([screen_text])
-        words1 = asr.transcribe_reader1(self.ws.index / "audio16k.wav", glossary, slot("asr.reader1")["model"])
+        words1 = asr.transcribe_reader1(self.index / "audio16k.wav", glossary, slot("asr.reader1")["model"])
         text2 = ""
-        cache = self.ws.index / "asr_reader2.json"
-        audio_sha = sha256_file(self.ws.index / "audio16k.wav")
+        cache = self.index / "asr_reader2.json"
+        audio_sha = sha256_file(self.index / "audio16k.wav")
         cached = read_json(cache, {}) or {}
         if reader2_future is not None:
             try:
@@ -336,14 +368,14 @@ class IndexBuilder:
         elif cached.get("audio_sha256") == audio_sha and cached.get("text", "").strip():
             text2 = cached["text"]
         elif lever_serves("index.asr_reader2"):
-            text2 = asr.transcribe_reader2(self.gw, self.ws.index / "audio16k.wav")
+            text2 = asr.transcribe_reader2(self.gw, self.index / "audio16k.wav")
         if text2.strip():
             write_json(cache, {"audio_sha256": audio_sha, "model": slot("asr.reader2")["model"], "text": text2})
         elif lever_serves("index.asr_reader2"):
             self._degraded("asr.reader2", "second transcript reader returned nothing")
-        (self.ws.index / "asr_reader1.json").write_text(dumps(words1))
+        (self.index / "asr_reader1.json").write_text(dumps(words1))
         words = asr.consensus(words1, text2, screen_text) if text2 else [dict(w, agree=0, alt=None, chosen_from="reader1") for w in words1]
-        rms = np.load(self.ws.index / "rms_db.npy")
+        rms = np.load(self.index / "rms_db.npy")
         moved = asr.snap_to_pauses(words, rms[0], rms[1])
         sents = asr.sentences(words)
         word_rows, sent_rows = [], []
@@ -413,7 +445,7 @@ class IndexBuilder:
         return dict(kinds).__repr__()
 
     def stage_marks(self) -> str:
-        reps = {int(k): v for k, v in json.loads((self.ws.index / "rep_frames.json").read_text()).items()}
+        reps = {int(k): v for k, v in json.loads((self.index / "rep_frames.json").read_text()).items()}
         frames = read_frames(self.src.path, list(reps.values()))
         small_size = (480, 270)
         smalls = [cv2.resize(frames[i], small_size, interpolation=cv2.INTER_AREA) for i in reps.values()]
@@ -505,7 +537,7 @@ class IndexBuilder:
         for s in self._shots:
             texts = [t["text"] for t in tracks if t["shot"] == s["id"]]
             lines.append(f"shot {s['id']} {s['t0']:.2f}-{s['t1']:.2f}: " + " | ".join(texts)[:900])
-        reps = {int(k): v for k, v in json.loads((self.ws.index / "rep_frames.json").read_text()).items()}
+        reps = {int(k): v for k, v in json.loads((self.index / "rep_frames.json").read_text()).items()}
         frames = read_frames(self.src.path, list(reps.values()), size=(640, 360))
         cells = [(f"shot {sid} {self._shots[sid]['t0']:.1f}s", frames[i]) for sid, i in reps.items()]
         sheets = [jpeg_bytes(contact_sheet(cells[k:k + 12], cols=4, cell_width=480)) for k in range(0, len(cells), 12)]
@@ -528,33 +560,60 @@ class IndexBuilder:
 
 
 def reuse_index(ws: Workspace, src: SourceRef, progress: Callable[[str], None] | None = None) -> bool:
-    """Seed an empty index from another request's complete index of the same media (same sha256 and
-    index version). Every stage then reports cached; nothing about the index differs between requests."""
-    if (ws.index / "index.sqlite").exists() or force_fresh():
+    """Seed only from a completed index whose media stage matches this exact digest."""
+    dest = index_dir(ws, src.ref)
+    if (dest / "index.sqlite").exists() or force_fresh():
         return False
     from vwb.config import RUNS_DIR
-    candidates = []
-    for req_json in Path(RUNS_DIR).glob("*/request.json"):
-        other = req_json.parent
-        if other.resolve() == ws.root.resolve() or not (other / "index" / "index.sqlite").exists():
+    for req_json in sorted(Path(RUNS_DIR).glob("*/request.json"), reverse=True):
+        other = Workspace(req_json.parent)
+        if other.root.resolve() == ws.root.resolve():
             continue
         try:
-            data = json.loads(req_json.read_text())
-        except json.JSONDecodeError:
+            matches = [s for s in other.load().sources if s.sha256 == src.sha256]
+            for match in matches:
+                origin = index_dir(other, match.ref)
+                if not (origin / "index.sqlite").is_file():
+                    continue
+                with FileLock(str(origin / ".build.lock"), timeout=0):
+                    st = IndexStore(origin / "index.sqlite")
+                    try:
+                        if not (st.stage_done("media", INDEX_VERSION, {"sha": src.sha256})
+                                and st.stage_done("disagreements", INDEX_VERSION, {"v": 1})):
+                            continue
+                        dest.mkdir(parents=True, exist_ok=True)
+                        # SQLite backup includes committed WAL pages; copying the
+                        # main file alone can silently lose the source's rows.
+                        with tempfile.TemporaryDirectory(prefix=".reuse-", dir=dest) as staging:
+                            db = Path(staging) / "index.sqlite"
+                            target = sqlite3.connect(db)
+                            try:
+                                st.connect().backup(target)
+                                # Output-specific watch claims belong to the old
+                                # request, unlike observations of this source.
+                                with target:
+                                    target.execute("DELETE FROM observations WHERE media_id<>? OR media_rev<>?",
+                                                   (match.media_id, match.rev))
+                            finally:
+                                target.close()
+                            for item in origin.iterdir():
+                                if item.name.startswith(("index.sqlite", ".")) or item.name == "sources":
+                                    continue
+                                if item.is_dir():
+                                    shutil.copytree(item, dest / item.name, dirs_exist_ok=True)
+                                else:
+                                    shutil.copy2(item, dest / item.name)
+                            # Publish the stage cache only after all its sidecars
+                            # succeeded; an interrupted copy can safely retry.
+                            os.replace(db, dest / "index.sqlite")
+                    finally:
+                        st.connect().close()
+                (progress or (lambda m: log.info("index: %s", m)))(
+                    f"reused the index of {other.id}/{match.ref} (same media, same version)")
+                return True
+        except (OSError, ValueError, sqlite3.Error, Timeout):
             continue
-        if not any(s.get("sha256") == src.sha256 for s in data.get("sources", [])):
-            continue
-        st = IndexStore(other / "index" / "index.sqlite")
-        if not st.stage_done("disagreements", INDEX_VERSION, {"v": 1}):
-            continue
-        n_stages = st.one("SELECT COUNT(*) AS n FROM stages")["n"]       # the most complete index wins, then the newest
-        candidates.append((n_stages, (other / "index" / "index.sqlite").stat().st_mtime, other))
-    if not candidates:
-        return False
-    _, _, other = max(candidates)
-    shutil.copytree(other / "index", ws.index, dirs_exist_ok=True)
-    (progress or (lambda m: log.info("index: %s", m)))(f"reused the index of {other.name} (same media, same version)")
-    return True
+    return False
 
 
 def force_fresh() -> bool:
@@ -567,10 +626,21 @@ def build_index(ws: Workspace, media_id: str | None = None, force: bool = False,
     if not req.sources:
         return {"status": "not_applicable", "sources": [],
                 "notice": "No source video is attached. Use the brief and imported design references; there is no video index to build."}
-    src = req.source(media_id)
-    if not force:
-        reuse_index(ws, src, progress)
-    return IndexBuilder(ws, src, force=force, progress=progress).run()
+    sources = [source(ws, media_id)] if media_id else req.sources
+    summaries = []
+    for src in sources:
+        folder = index_dir(ws, src.ref)
+        folder.mkdir(parents=True, exist_ok=True)
+        with FileLock(str(folder / ".build.lock")):
+            if not force:
+                reuse_index(ws, src, progress)
+            builder = IndexBuilder(ws, src, force=force, progress=progress)
+            try:
+                summaries.append(builder.run())
+            finally:
+                builder.pool.shutdown(wait=True, cancel_futures=True)
+                builder.store.connect().close()
+    return summaries[0] if len(summaries) == 1 else {"sources": summaries}
 
 
 def resize_for_sheet(rgb: np.ndarray, width: int = 480) -> np.ndarray:

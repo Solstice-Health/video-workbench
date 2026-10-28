@@ -13,20 +13,35 @@ from typing import Any
 import numpy as np
 
 from vwb.gateway import gemini as gem
+from vwb.index.paths import index_dir, source
 from vwb.index.store import IndexStore
 from vwb.media.decode import read_frames
 from vwb.media.frames import contact_sheet, crop, draw_boxes, jpeg_bytes, png_bytes, resize_to_width
 from vwb.tools.base import Tool, ToolContext, ToolResult, schema
 from vwb.util.hashing import sha256_bytes
 from vwb.util.timecode import fmt
+from vwb.workspace.media import register_work_file
+
+
+def media_register(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
+    src = register_work_file(ctx.ws, a["path"])
+    return ToolResult.json({"media_id": src.media_id, "ref": src.ref, "sha256": src.sha256,
+                            "path": a["path"], "notice": "Immutable source registered. Use index_build(media_id) to "
+                            "build its index, then index tools with media_id or media tools with target='source:<ref>'."},
+                           artifacts=[src.sha256])
 
 
 def resolve_target(ctx: ToolContext, target: str | None) -> tuple[Path, float, str]:
-    """'source' or 'output:<id>[@v<N>]' -> (path, fps, label)."""
+    """'source[:<ref>]' or 'output:<id>[@v<N>]' -> (path, fps, label)."""
     target = target or "source"
-    if target == "source":
-        src = ctx.ws.load().source()
-        fps = IndexStore(ctx.ws.index / "index.sqlite").media()["fps"]
+    if target == "source" or target.startswith("source:"):
+        src = source(ctx.ws, target.partition(":")[2] or None)
+        db = index_dir(ctx.ws, src.ref) / "index.sqlite"
+        if db.is_file():
+            fps = IndexStore(db).media()["fps"]
+        else:
+            from vwb.media.probe import probe
+            fps = probe(src.path, with_keyframes=False).fps
         return Path(src.path), float(fps), src.ref
     if target.startswith("output:"):
         from vwb.canvas.store import CanvasStore
@@ -41,15 +56,15 @@ def resolve_target(ctx: ToolContext, target: str | None) -> tuple[Path, float, s
         if not p.exists():
             raise ValueError(f"{out} v{v} is not rendered yet")
         return p, float(store.get(out, v).fps), f"{out}@v{v}"
-    raise ValueError("target must be 'source' or 'output:<id>[@v<N>]'")
+    raise ValueError("target must be 'source', 'source:<media_id or ref>' or 'output:<id>[@v<N>]'")
 
 
 def media_frame(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     path, fps, label = resolve_target(ctx, a.get("target"))
     f = int(a["frame"]) if a.get("frame") is not None else int(round(float(a.get("t", 0)) * fps))
     rgb = read_frames(path, [f])[f]
-    if a.get("show") and a.get("target", "source") == "source":
-        st = IndexStore(ctx.ws.index / "index.sqlite")
+    if a.get("show") and not a.get("target", "source").startswith("output:"):
+        st = IndexStore(index_dir(ctx.ws, label) / "index.sqlite")
         boxes = []
         if "text" in a["show"]:
             boxes += [((t["x"], t["y"], t["w"], t["h"]), f"tt{t['id']}:{t['role']}") for t in
@@ -146,8 +161,9 @@ def watch_ask(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     q = (a["question"].strip() + "\n\nAnswer precisely. Give times as MM:SS.s from the start of the full video. "
          "If you cannot tell, say so. For locations give box_2d [ymin, xmin, ymax, xmax] normalised to 0-1000.")
     call = gem.generate(ctx.gateway, "watch", [part, q], purpose=f"watch:{ctx.agent}", resolution=a.get("resolution", "high"))
-    st = IndexStore(ctx.ws.index / "index.sqlite")
-    src = ctx.ws.load().source()
+    is_source = not a.get("target", "source").startswith("output:")
+    src = source(ctx.ws, label if is_source else None)
+    st = IndexStore(index_dir(ctx.ws, src.ref) / "index.sqlite")
     obs = st.add_observation(media_id=label if label != src.ref else src.media_id, media_rev=src.rev, kind="watch.answer",
                              f0=int(float(t0) * fps) if t0 is not None else None,
                              f1=int(float(t1) * fps) if t1 is not None else None,
@@ -161,6 +177,10 @@ def watch_ask(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
 
 
 TOOLS = [
+    Tool("media_register", "Register a downloaded or authored video under work/ as an immutable source, deduplicated "
+         "by SHA-256. Pass a relative path (e.g. downloads/clip.mp4). No re-upload needed. Then use index_build(media_id) "
+         "to index it; registration itself makes no model calls.",
+         schema({"path": {"type": "string"}}, ["path"]), media_register, "media.register", "media"),
     Tool("media_frame", "One frame as an image, from the source or a rendered output ('output:short-01' or "
          "'output:short-01@v2'). Give t (seconds) or frame. Optional crop [x,y,w,h], width, and show=['text','blocks',"
          "'faces'] to draw index boxes on a source frame.",
@@ -180,7 +200,7 @@ TOOLS = [
          "label), the value axis fitted from its tick labels, and each bar's value read through that fit, with an "
          "annotated preview. For recreating an unlabelled chart in another form (flat, 3D, animated) without guessing "
          "values. box [x, y, w, h] should include the axis labels and legend.",
-         schema({"source": {"type": "string", "description": "t:<seconds>, f:<frame> or slot:<name>@<rev>"},
+         schema({"source": {"type": "string", "description": "source:<media ref>#t=<seconds> or #f=<frame>; t:/f: for a single source; or slot:<name>@<rev>"},
                  "box": {"type": "array", "items": {"type": "number"}},
                  "orientation": {"type": "string", "enum": ["auto", "vertical", "horizontal"]}}, ["source", "box"]),
          chart_read, "tool", "media"),
@@ -191,3 +211,7 @@ TOOLS = [
                  "resolution": {"type": "string", "enum": ["low", "medium", "high"]}}, ["question"]),
          watch_ask, "watch", "media"),
 ]
+
+for tool in TOOLS:
+    if "target" in tool.schema["properties"]:
+        tool.schema["properties"]["target"]["description"] = "source (first source), source:<media_id or ref>, or output:<id>[@v<N>]."

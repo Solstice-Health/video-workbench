@@ -5,38 +5,42 @@ from __future__ import annotations
 from typing import Any
 
 from vwb.index.build import build_index
+from vwb.index.paths import index_dir, source
 from vwb.index.store import IndexStore
 from vwb.tools.base import Tool, ToolContext, ToolResult, schema
 from vwb.util.timecode import fmt
 
 
-def _store(ctx: ToolContext) -> IndexStore:
-    return IndexStore(ctx.ws.index / "index.sqlite")
+def _store(ctx: ToolContext, a: dict[str, Any]) -> IndexStore:
+    return IndexStore(index_dir(ctx.ws, a.get("media_id")) / "index.sqlite")
 
 
 def index_build(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
-    summary = build_index(ctx.ws, force=bool(a.get("force")))
+    summary = build_index(ctx.ws, media_id=a.get("media_id"), force=bool(a.get("force")))
     return ToolResult.json(summary)
 
 
 def index_overview(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     if not ctx.ws.load().sources:
         return ToolResult.json({"sources": [], "notice": "No source video or video dossier. Read the brief and authorized design imports instead. Use canvas_new(duration_s=...) for an authored timeline."})
-    p = ctx.ws.index / "dossier.md"
-    if not p.exists():
-        return ToolResult.error("no index yet; call index_build")
-    return ToolResult(text=p.read_text())
+    sources = [source(ctx.ws, a["media_id"])] if a.get("media_id") else ctx.ws.load().sources
+    parts = []
+    for src in sources:
+        p = index_dir(ctx.ws, src.ref) / "dossier.md"
+        parts.append(f"## {src.ref} ({src.original_path})\n" + (p.read_text() if p.exists() else
+                     f"No index yet; call index_build(media_id='{src.ref}')."))
+    return ToolResult(text="\n\n".join(parts))
 
 
 def index_query(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
-    rows = _store(ctx).query_readonly(a["sql"], limit=int(a.get("limit", 200)))
+    rows = _store(ctx, a).query_readonly(a["sql"], limit=int(a.get("limit", 200)))
     return ToolResult.json({"rows": rows, "n": len(rows)})
 
 
 def index_search(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     q = a["text"].strip().lower()
     like = f"%{q}%"
-    st = _store(ctx)
+    st = _store(ctx, a)
     hits = []
     for r in st.all("SELECT id, t0, t1, text, shot FROM sentences WHERE lower(text) LIKE ?", (like,)):
         hits.append({"kind": "speech", "id": f"s{r['id']}", "t": f"{fmt(r['t0'])}-{fmt(r['t1'])}", "shot": r["shot"], "text": r["text"]})
@@ -53,7 +57,7 @@ def index_search(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
 
 
 def index_transcript(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
-    st = _store(ctx)
+    st = _store(ctx, a)
     t0, t1 = float(a.get("t0", 0)), float(a.get("t1", 1e9))
     sents = st.all("SELECT * FROM sentences WHERE t1 > ? AND t0 < ? ORDER BY id", (t0, t1))
     out = []
@@ -72,7 +76,7 @@ def index_transcript(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
 
 
 def index_shots(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
-    st = _store(ctx)
+    st = _store(ctx, a)
     ids = a.get("shots")
     shots = st.all("SELECT * FROM shots ORDER BY id")
     if ids:
@@ -94,9 +98,9 @@ def index_shots(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
 
 
 TOOLS = [
-    Tool("index_build", "Build or refresh the edit index for the request's source (eager facts and readings). "
+    Tool("index_build", "Build or refresh indexes for all registered sources, or one media_id (eager facts and readings). "
          "Usually already built before you start.", schema({"force": {"type": "boolean"}}), index_build, "index.build", "index"),
-    Tool("index_overview", "Read the dossier: a compact summary of the edit index (source facts, readings, hazards, "
+    Tool("index_overview", "Read all source dossiers: compact summaries of the edit indexes (source facts, readings, hazards, "
          "marks, sections, shots, the two-reader transcript with sentence ids and times, proposed moments).",
          schema({}), index_overview, "tool", "index"),
     Tool("index_query", "Run one read-only SQL query on the index (tables: shots, sentences, words, text_tracks, faces, "
@@ -112,3 +116,11 @@ TOOLS = [
          schema({"shots": {"type": "array", "items": {"type": "integer"}}, "detail": {"type": "boolean"}}),
          index_shots, "tool", "index"),
 ]
+
+# Every read can select a source. Overview/build default to all; the other tools
+# retain their first-source default for existing callers.
+for tool in TOOLS:
+    tool.schema["properties"]["media_id"] = {"type": "string", "description": "Registered source ID or immutable ref, e.g. src2@<rev>."}
+    tool.description += " Pass media_id to select a specific registered source."
+    if tool.name not in {"index_build", "index_overview"}:
+        tool.description += " Defaults to the first source when omitted."

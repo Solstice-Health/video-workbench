@@ -6,6 +6,7 @@ import os
 import re
 import stat
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +69,25 @@ def _check_path(ws, rel: str, *, folder: bool) -> None:
             raise ValueError("Select a regular file; symbolic links are not supported.")
     finally:
         os.close(fd)
+
+
+@contextmanager
+def open_file(ws, rel: str):
+    """Open a selected regular file through pinned, no-follow work descriptors."""
+    if not isinstance(rel, str) or not rel or len(rel) > 512:
+        raise ValueError("Choose a file relative to work/.")
+    parts = _parts(rel)
+    if not parts:
+        raise ValueError("Choose a file, not the workspace root.")
+    parent = _directory(ws.work, parts[:-1])
+    try:
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    finally:
+        os.close(parent)
+    with os.fdopen(fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError("Select a regular file; symbolic links are not supported.")
+        yield stream
 
 
 def catalog(ws=None, query: str = "") -> dict[str, Any]:
@@ -214,11 +234,14 @@ def prompt(value: dict[str, list[str]]) -> str:
                      "Enumerate the requested inputs with file_list using a scoped glob, or a sandbox script for large batches. "
                      "Check truncation and account for every requested input. Read files, PDF pages or image pixels only as needed "
                      "with the appropriate inspection tools. Imported videos are work files; they are not automatically indexed "
-                     "media sources. Use sandbox tools for bulk transformations. Folder selection does not expand your permissions.")
+                     "media sources. Use media_register(path) for a video you need as a source, and index_build(media_id) "
+                     "to index it. Use sandbox tools for bulk transformations. Folder selection does not expand your permissions.")
     if value.get("files"):
         lines.append("The user selected these files, relative to your work/ directory: " + json.dumps(value["files"])
                      + ". Inspect them with file_read, image/PDF tools or a sandbox parser as appropriate. "
-                     "These are live file references, not automatically loaded contents or pinned image payloads.")
+                     "Selected video files are snapshotted as immutable source refs before this turn; use the registered "
+                     "media refs and index tools below. Other files remain live references, without automatically loaded "
+                     "contents or pinned image payloads.")
     if value.get("plugins"):
         lines.append("The user selected these plugins or MCP connections: " + json.dumps(value["plugins"])
                      + ". Inspect integration_status before using their tools. For saved mcp_* connections, pass the exact "
