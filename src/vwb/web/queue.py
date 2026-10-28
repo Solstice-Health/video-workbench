@@ -167,7 +167,13 @@ class TurnQueue:
             if kind == "message":
                 from vwb.config import slot
                 from vwb.prompts import with_snapshot
-                job["main_config"] = with_snapshot(main_config if main_config is not None else slot("main"), ws, self.runs_dir)
+                if getattr(ws, "conversation_lane", "edit") == "qc":
+                    from copy import deepcopy
+                    if main_config is None:
+                        raise ValueError("QC jobs require a captured QC configuration.")
+                    job["main_config"] = deepcopy(main_config)
+                else:
+                    job["main_config"] = with_snapshot(main_config if main_config is not None else slot("main"), ws, self.runs_dir)
             elif main_config is not None:
                 from copy import deepcopy
                 job["main_config"] = deepcopy(main_config)
@@ -287,7 +293,9 @@ class TurnQueue:
     def _start(self, ws: Workspace, job: dict[str, Any]) -> None:
         directory = ws.memory / "web_jobs"
         job_path = directory / f"{job['id']}.json"
-        write_json(job_path, {**job, "request": str(ws.root), "parent_pid": os.getpid()})
+        lane = getattr(ws, "conversation_lane", "edit")
+        metadata = {"lane": lane, "parent_request": str(ws.parent.root)} if lane == "qc" else {}
+        write_json(job_path, {**job, **metadata, "request": str(ws.root), "parent_pid": os.getpid()})
         log = (directory / f"{job['id']}.log").open("ab")
         env = {**os.environ, "VWB_RUNS_DIR": str(self.runs_dir), "PYTHONUNBUFFERED": "1", "VWB_UI_JOB_ID": job["id"]}
         try:

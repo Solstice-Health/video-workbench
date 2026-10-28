@@ -570,12 +570,16 @@ class QCStore:
 
     @staticmethod
     def _message(batch: dict[str, Any]) -> str:
-        lines = [f"Explicit QC handoff {batch['id']}. Review these pinned findings:"]
+        lines = [f"QC findings sent to the editor. Batch {batch['id']}:"]
         for item in batch["items"]:
-            # Serialize trusted store fields, never a caller-supplied message or filename.
-            lines.append(_json({k: item[k] for k in
-                                ("id", "revision", "priority", "category", "expected", "observed", "anchor")}))
-        lines.append("A newer render requires reinspection; these findings do not certify a pass.")
+            anchor = item["anchor"]
+            region = f"; region {_json(anchor['region'])}" if anchor.get("region") else ""
+            lines.extend([f"\n{anchor['target']} · frames [{anchor['f0']}, {anchor['f1']}){region}",
+                          f"Expected: {item['expected']}", f"Observed: {item['observed']}",
+                          f"{item['priority']} · {item['category']} · Finding {item['id']} revision {item['revision']}",
+                          f"Media SHA256: {anchor['sha256']}"])
+        lines.append("\nUse qc_items_read for the frozen finding records and full evidence pins. "
+                     "A newer render requires reinspection; these observations do not certify a pass.")
         message = "\n".join(lines)
         if len(message) > 100_000:
             raise QCStoreError("Handoff message exceeds 100,000 characters; select fewer items")

@@ -112,6 +112,14 @@ def chat(message: str, attach: list[Path] | None = None, request_id: str | None 
                         if resume_message is not None else "")
         reply = job_lead.run(ws, message + references.prompt(context) + continuation, first_turn=first, **kwargs)
         outputs = ensure_review(ws)
+        # New rendered versions invalidate review coverage; only a later check
+        # or explicit human action can close a finding.
+        if (ws.root / ".qc-chat" / "items.json").exists():
+            from vwb.qc.chat_store import QCStore
+            try:
+                QCStore(ws).reconcile()
+            except Exception as exc:
+                log.error("QC findings could not be reconciled; their prior review coverage is unchanged: %s", exc)
         review = page.build(ws)
     finally:
         lock.release()

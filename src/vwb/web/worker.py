@@ -34,7 +34,12 @@ def main() -> int:
     try:
         if job.get("parent_pid"):
             threading.Thread(target=_watch_parent, args=(job["parent_pid"], finished), daemon=True).start()
-        if job["kind"] == "compact":
+        if job.get("lane") == "qc":
+            from vwb.qc.chat import run
+            from vwb.workspace import Workspace
+            result = run(Workspace.open(job["parent_request"]), job["message"], cfg=job["main_config"],
+                         attachment_refs=job.get("attachment_refs"), resume_message=job.get("resume_message"))
+        elif job["kind"] == "compact":
             from vwb.agents.job_lead import compact
             from vwb.workspace import Workspace
             result = compact(Workspace.open(job["request"]))

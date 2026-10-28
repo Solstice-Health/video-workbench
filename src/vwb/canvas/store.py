@@ -57,6 +57,12 @@ class CanvasStore:
             canvas.parent = head
             canvas.provenance = {**canvas.provenance, "author": author, "message": message,
                                  "committed": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+            # Capture the host's active model, rather than an agent-authored claim.
+            active = read_json(ws.memory / "active_host.json", {}) or {}
+            model = str(active.get("key", "")).partition(":")[2]
+            canvas.provenance.pop("author_model", None)
+            if model:
+                canvas.provenance["author_model"] = model
             data = canvas.dump()
             data["provenance"]["sha256"] = sha256_json({k: v for k, v in data.items() if k != "provenance"})
             path = self.path(output, canvas.version)

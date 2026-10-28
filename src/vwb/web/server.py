@@ -18,6 +18,7 @@ import uuid
 import webbrowser
 from contextlib import nullcontext
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -83,6 +84,7 @@ class Workbench:
         self.runs_dir = runs_dir.resolve()
         self.queue = queue or TurnQueue(self.runs_dir)
         self.csrf_token = secrets.token_urlsafe(32)
+        self.qc_token = secrets.token_urlsafe(32)
         self.upload_dir = self.runs_dir / ".ui" / "uploads"
         self.mutation_lock = threading.RLock()
         self.studio = StudioJobs()
@@ -436,6 +438,17 @@ class Handler(BaseHTTPRequestHandler):
         if mutate and not hmac.compare_digest(self.headers.get("X-CSRF-Token", ""), self.app.csrf_token):
             raise PermissionError("Reload the workbench before making changes.")
 
+    def _check_qc_session(self) -> None:
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+            value = cookie.get(f"vwb_qc_{self.server.server_port}")
+            token = value.value if value else ""
+        except Exception:
+            token = ""
+        if not hmac.compare_digest(token, self.app.qc_token):
+            raise PermissionError("Open the Workbench launch link printed by vwb ui to access private QC.")
+
     def _body(self) -> dict[str, Any]:
         if self.headers.get("Transfer-Encoding"):
             raise ValueError("Chunked request bodies are not supported.")
@@ -452,6 +465,18 @@ class Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         parts = unquote(url.path).strip("/").split("/")
         query = parse_qs(url.query)
+        if self.command == "GET" and parts == [""] and "qc_access" in query:
+            self._check_origin()
+            if not hmac.compare_digest(query["qc_access"][0], self.app.qc_token):
+                raise PermissionError("This Workbench launch link expired. Use the current vwb ui link.")
+            self.send_response(303)
+            self.send_header("Set-Cookie", f"vwb_qc_{self.server.server_port}={self.app.qc_token}; HttpOnly; SameSite=Strict; Path=/api/requests/")
+            self.send_header("Location", "/")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if self.command == "GET" and parts == ["api", "integrations", "solstice", "callback"]:
             self._check_host()
             return self._integration_callback(query)
@@ -496,6 +521,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._file(Path(item["path"]), preview=True, handle=handle)
             raise FileNotFoundError("This artifact resource was not found.")
         self._check_origin(self.command not in {"GET", "HEAD"})
+        if len(parts) >= 4 and parts[:2] == ["api", "requests"] and parts[3] == "qc":
+            self._check_qc_session()
         if self.command in {"GET", "HEAD"}:
             if parts == ["api", "bootstrap"]:
                 return self._json({"csrf_token": self.app.csrf_token, "capabilities": {
@@ -516,6 +543,19 @@ class Handler(BaseHTTPRequestHandler):
                                       download=row["kind"] not in {"image", "video", "audio", "pdf"})
             if parts == ["api", "requests"]:
                 return self._json({"requests": self.app.requests()})
+            if len(parts) >= 4 and parts[:2] == ["api", "requests"] and parts[3] == "qc":
+                from vwb.web import qc as qc_chat
+                ws = self.app.workspace(parts[2])
+                if len(parts) == 4:
+                    return self._json(qc_chat.snapshot(self.app, ws))
+                if len(parts) == 6 and parts[4] == "attachments":
+                    qws = qc_chat.workspace(ws)
+                    row = chat_attachments.canonical(qws, parts[5])
+                    path = chat_attachments.original_path(qws, row)
+                    with path.open("rb") as handle:
+                        return self._file(Path(row["name"]), artifact=True, handle=handle,
+                                          download=row["kind"] not in {"image", "video", "audio", "pdf"})
+                raise FileNotFoundError("That QC endpoint was not found.")
             if parts == ["api", "features"]:
                 return self._json(references.catalog(query=query.get("q", [""])[0]))
             if len(parts) in {4, 5} and parts[:2] == ["api", "requests"] and parts[3] == "imports":
@@ -613,6 +653,9 @@ class Handler(BaseHTTPRequestHandler):
                                               kind=self.headers.get("X-Upload-Kind", "image"))
                 return self._json(self.app.studio_entry(ws, result), 201)
             body = self._body()
+            if len(parts) >= 5 and parts[:2] == ["api", "requests"] and parts[3] == "qc":
+                from vwb.web import qc as qc_chat
+                return self._json(qc_chat.mutate(self.app, self.app.workspace(parts[2]), parts[4:], body))
             if len(parts) == 6 and parts[:2] == ["api", "requests"] and parts[3] == "artifacts" and parts[5] == "feedback":
                 ws = self.app.workspace(parts[2])
                 def enqueue_feedback(message, mode):
@@ -747,6 +790,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"job": self.app.compact(ws)}, 202)
         elif self.command == "DELETE":
             self._body()
+            if len(parts) == 6 and parts[:2] == ["api", "requests"] and parts[3:5] == ["qc", "queue"]:
+                from vwb.web.qc import workspace as qc_workspace
+                return self._json({"job": self.app.queue.cancel(qc_workspace(self.app.workspace(parts[2])), parts[5])})
             if len(parts) == 5 and parts[:2] == ["api", "requests"] and parts[3] == "imports":
                 return self._json({"import": self.app.local_imports.cancel(self.app.workspace(parts[2]), parts[4])})
             if len(parts) == 5 and parts[:2] == ["api", "requests"] and parts[3] == "queue":
@@ -960,7 +1006,7 @@ def serve(*, port: int = 8765, open_browser: bool = True, runs_dir: Path = RUNS_
         app.studio.close()
         app.queue.close()
         raise
-    url = f"http://127.0.0.1:{server.server_address[1]}"
+    url = f"http://127.0.0.1:{server.server_address[1]}/?qc_access={app.qc_token}"
     print(f"Video Workbench: {url}\nPress Ctrl-C to stop the UI. Queued messages are kept.", flush=True)
     if open_browser:
         webbrowser.open(url)

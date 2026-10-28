@@ -18,6 +18,16 @@ main:
     - {host: tool_loop, provider: openai, model: gpt-6-astra, effort: max}
     - {host: anthropic_api, provider: anthropic, model: claude-fable-5-1, effort: max, context_window: 1000000, native_context_window: 1000000}
 
+qc:
+  purpose: Independent QC conversation; restricted tools, private history, no editing or fallback.
+  host: anthropic_api
+  provider: anthropic
+  model: claude-fable-5-1
+  effort: high
+  context_window: 1000000
+  max_turns: 80
+  max_output_tokens: 16384
+
 worker.video:
   purpose: Video-native worker (scene-miner). Reads the source natively and proposes moments.
   host: tool_loop

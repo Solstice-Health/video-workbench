@@ -11,6 +11,9 @@
 mode: local   # local | microvm
 
 capabilities:
+  qc.inspect: allow                # pinned rendered frames and bounded windows
+  qc.read: allow                   # editor sees human-sent finding snapshots only
+  qc.findings: allow               # QC observations; human owns handoff and closure
   # agents act only through typed toolkit calls in local mode
   shell.exec: block                 # raw bash for agents (needs the microVM)
   code.run: block                   # agent-written scripts: qc.script, generator.register
@@ -59,13 +62,17 @@ capabilities:
   desktop.after_effects.execute: allow # human-enabled native ExtendScript/aerender; not a sandbox
 
 roles:
+  qc_lead:
+    allow: [qc_targets, qc_view, qc_frames, qc_items_read, qc_item_create,
+            attachment_list, attachment_read, pdf_info, pdf_read, pdf_search, pdf_render]
+    deny: []
   # Which tools each role may call. "*" means every tool not listed under deny.
   job_lead:
     allow: ["*"]
-    deny: []
+    deny: [qc_item_create]
   worker:                         # general helper; intersects its parent's effective permissions
     allow: ["*"]
-    deny: [canvas_commit]
+    deny: [canvas_commit, qc_item_create]
   scene_miner:      # Gemini, watches the source natively
     allow: [model_providers, model_catalog, model_request,
             agent_spawn, agent_list, agent_send, agent_inbox, agent_wait, agent_interrupt, agent_followup,
