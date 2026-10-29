@@ -146,7 +146,10 @@ assert.equal(boxes().length,5);assert.equal(boxes()[0].props.checked,true);
 assert.equal(all(view).find(node=>node.type==='label').props.title,MODE_HELP);
 assert.ok(words(view).includes('UI preview only'));assert.ok(words(view).includes('do not alter execution or tool actions yet'));
 assert.ok(words(view).includes('one renderer per output, not a simultaneous overlay'));
-assert.ok(words(view).includes('runtime availability is not verified')||words(view).includes('Runtime availability is not verified'));
+assert.equal(words(all(view).find(node=>node.props.className==='composer-catalog-note')),available?
+ 'Your choices are included with your message.':'Catalog unavailable. Showing built-in options; runtime availability is not verified.');
+assert.deepEqual(all(view).filter(node=>node.type==='small').map(words),[
+ 'No added renderer preference','Video, text and shapes','HTML text / SVG','HTML / SVG motion','Shapes only; no text or captions']);
 assert.ok(words(view).includes(available?'Updated browser label':'React / HTML + SVG'));
 if(!available)assert.ok(words(view).includes('Catalog unavailable'));
 assert.equal(select().props['aria-describedby'],'composer-mode-help');

@@ -6,10 +6,10 @@ const STORAGE_KEY = 'vwb-composer-preferences';
 const MODES = ['ask', 'storyboard', 'agentic'];
 export const MODE_HELP = 'UI preview only. Ask, Storyboard and Agentic do not alter execution or tool actions yet.';
 export const RENDERERS = [
-  {id: 'remotion', label: 'Remotion'},
-  {id: 'browser', label: 'React / HTML + SVG'},
-  {id: 'gsap', label: 'React / HTML + GSAP'},
-  {id: 'canvas2d', label: 'Canvas 2D'},
+  {id: 'remotion', label: 'Remotion', scope: 'Video, text and shapes'},
+  {id: 'browser', label: 'React / HTML + SVG', scope: 'HTML text / SVG'},
+  {id: 'gsap', label: 'React / HTML + GSAP', scope: 'HTML / SVG motion'},
+  {id: 'canvas2d', label: 'Canvas 2D', scope: 'Shapes only; no text or captions'},
 ];
 
 export function composerPreference(value) {
@@ -84,9 +84,9 @@ export function ComposerControls({api, preference, onChange, disabled = false}) 
             <legend>Allowed canvas renderers</legend>
             <p id="composer-renderer-help">Choose Auto or multiple allowed options. The agent chooses one renderer per output, not a simultaneous overlay.</p>
             <label><input type="checkbox" checked=${!choice.renderers.length} onChange=${() => onChange({...choice, renderers: []})}/><span>Auto <small>No added renderer preference</small></span></label>
-            ${options.map(row => html`<label key=${row.id} title=${row.description || undefined}><input type="checkbox" checked=${choice.renderers.includes(row.id)} onChange=${() => toggle(row.id)}/><span>${row.label}<small>${row.id}</small></span></label>`)}
+            ${options.map(row => html`<label key=${row.id} title=${row.description || undefined}><input type="checkbox" checked=${choice.renderers.includes(row.id)} onChange=${() => toggle(row.id)}/><span>${row.label}<small>${row.scope}</small></span></label>`)}
           </fieldset>
-          <p className="composer-catalog-note">${catalogFailed ? 'Catalog unavailable. Showing built-in options; runtime availability is not verified.' : 'Renderer choices are preferences. Runtime availability is not verified here.'}</p>
+          <p className="composer-catalog-note">${catalogFailed ? 'Catalog unavailable. Showing built-in options; runtime availability is not verified.' : 'Your choices are included with your message.'}</p>
         </div>
       </details>
     </div>

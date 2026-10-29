@@ -198,3 +198,20 @@ pixel comparisons. [Playwright snapshot guidance](https://playwright.dev/docs/te
 [Remotion deterministic-frame requirements](https://www.remotion.dev/docs/flickering).
 
 The agent-visible host dependency-repair workflow remains deferred in ROADMAP.md.
+
+Validation recorded on 2026-10-29:
+
+- Full Python suite: **2,143 passed, 13 skipped**. Four skips are the opt-in live
+  renderer tests, which were also run explicitly and passed.
+- Final targeted run: **10 passed**, covering those four real preview/commit/MP4
+  export workflows and six renderer process-lifecycle checks. This rerun includes
+  the final shutdown grace adjustment.
+- Node renderer suite: **14 passed**, including actual Remotion and alternate
+  backend renders, alpha, deterministic seeking, network isolation and cleanup.
+  TypeScript compilation and scoped Python lint checks passed.
+- Wheel and source distribution built successfully. All five browser entrypoints
+  and this guide were checked against their packaged bytes.
+- Browser UI checks exercised multi-selection, per-conversation isolation,
+  persistence after reload and inclusion in the sent user message. They used an
+  isolated fixture server without model calls; live model routing quality has
+  not been benchmarked.
