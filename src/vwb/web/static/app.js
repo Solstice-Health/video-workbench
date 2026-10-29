@@ -1,6 +1,7 @@
 import htm from './vendor/htm.mjs';
 import {triggerAt, matchingOptions, toContext, workspaceReference, displayPath} from './composer-picker.js';
 import {ModelControl} from './model-control.js';
+import {ComposerControls, composerPreference, composerMessage, readComposerPreferences, saveComposerPreferences} from './composer-controls.js';
 import {WorkspaceExplorer, WorkspaceCanvas, initialCanvas, canvasReducer, importedTabs, studioTab, fileTab, formatBytes} from './workspace-canvas.js';
 import {IntegrationsControl} from './integrations-control.js';
 import {COMPACT_WIDTH, paneLayout, panePreferences} from './pane-layout.js';
@@ -332,6 +333,15 @@ function App() {
   const [projects, setProjects] = useState([]), [historyAction, setHistoryAction] = useState(null), [historyError, setHistoryError] = useState('');
   const projectKeys = useRef(new Map()), historyKeys = useRef(new Map());
   const [text, setText] = useState(''), [drafts, setDrafts] = useState({}), [uploads, setUploads] = useState([]);
+  const [composerPreferences, setComposerPreferences] = useState(readComposerPreferences);
+  const composerChoice = composerPreference(composerPreferences[selected || 'new']);
+  const setComposerChoice = value => setComposerPreferences(previous => ({...previous, [selected || 'new']: composerPreference(value)}));
+  const adoptComposerChoice = id => setComposerPreferences(previous => {
+    const next = {...previous, [id]: composerPreference(previous.new)};
+    delete next.new;
+    return next;
+  });
+  useEffect(() => saveComposerPreferences(composerPreferences), [composerPreferences]);
   const [references, setReferences] = useState([]), [features, setFeatures] = useState({skills: [], folders: [], files: []});
   const [picker, setPicker] = useState(null), [pickIndex, setPickIndex] = useState(0), [featuresLoading, setFeaturesLoading] = useState(false);
   const [featuresError, setFeaturesError] = useState('');
@@ -604,6 +614,7 @@ function App() {
     const result = await api('/api/workspaces', {method: 'POST', body: '{}'});
     const id = result.request_id;
     if (!id) throw new Error('The workspace could not be prepared. Try importing again.');
+    adoptComposerChoice(id);
     selection.current = id; setSelected(id); invalidateHistory();
     location.hash = id; await refresh(id);
     const list = await api('/api/requests'); setRequests(list.requests || []);
@@ -722,8 +733,9 @@ function App() {
     if (!selected) {
       setBusy(true); setError('');
       try {
-        const result = await api('/api/requests', {method: 'POST', body: JSON.stringify({message: value.trim(), attachments: uploads.map(u => u.id), context: toContext(references)})});
+        const result = await api('/api/requests', {method: 'POST', body: JSON.stringify({message: composerMessage(value, composerChoice), attachments: uploads.map(u => u.id), context: toContext(references)})});
         const id = result.request?.id || result.request_id || (typeof result.request === 'string' ? result.request : result.id);
+        adoptComposerChoice(id);
         selection.current = id; setSelected(id); setText(previous => previous.trim() === value.trim() ? '' : previous); setUploads(previous => previous.filter(item => !uploads.some(sent => sent.id === item.id))); location.hash = id; await refresh(id);
         setReferences(previous => previous.filter(r => !references.some(sent => sent.kind === r.kind && sent.id === r.id)));
       } catch (e) {setError(e.message);} finally {setBusy(false);}
@@ -731,7 +743,7 @@ function App() {
     }
     const isAnswer = answering && (answer || value.trim());
     const delivery = mode === 'queue' && data?.paused && !active && queue.length === 0 ? 'now' : mode;
-    const result = await mutate(isAnswer ? '/answers' : '/messages', isAnswer ? {ticket: question.id, option: answer || null, text: value.trim(), mode: delivery} : {message: value.trim(), mode: delivery, attachments: uploads.map(u => u.id), context: toContext(references)});
+    const result = await mutate(isAnswer ? '/answers' : '/messages', isAnswer ? {ticket: question.id, option: answer || null, text: value.trim(), mode: delivery} : {message: composerMessage(value, composerChoice), mode: delivery, attachments: uploads.map(u => u.id), context: toContext(references)});
     if (result && !isAnswer) setReferences(previous => previous.filter(r => !references.some(sent => sent.kind === r.kind && sent.id === r.id)));
     if (result) {if (isAnswer) {setQuestionDrafts(prev => ({...prev, [question.id]: (prev[question.id] || '').trim() === value.trim() ? '' : prev[question.id]})); setAnswers(prev => ({...prev, [question.id]: prev[question.id] === answer ? null : prev[question.id]}));} else {setText(previous => previous.trim() === value.trim() ? '' : previous); setUploads(previous => previous.filter(item => !uploads.some(sent => sent.id === item.id)));} setIsNearBottom(true);}
     if (result?.delivery === 'waiting_tool') setInfo('Answer delivered to the waiting agent.');
@@ -839,6 +851,7 @@ function App() {
             question=${questions.length ? html`<${QuestionQueue} questions=${questions} index=${qIndex} setIndex=${setQIndex} answer=${answers[question.id]} setAnswer=${value => {setAnswers(prev => ({...prev, [question.id]: value})); setQuestionModes(prev => ({...prev, [question.id]: 'answer'}));}} hidden=${questionsHidden} setHidden=${setQuestionsHidden} answering=${answering} onMode=${mode => {setQuestionModes(prev => ({...prev, [question.id]: mode})); setPicker(null); composer.current?.focus();}}/>` : undefined}
             attachments=${uploads.length ? html`<div className="staged-files">${uploads.map(u => html`<span className="staged-file" key=${u.id}>${u.kind === 'image' && u.url ? html`<img className="staged-image" src=${u.url} alt=""/>` : html`<${Icon} name="file" size=${14}/>`}${u.name}<${IconButton} name="x" label=${`Remove ${u.name}`} onClick=${() => setUploads(prev => prev.filter(x => x.id !== u.id))}/></span>`)}</div>` : answer ? html`<span className="selected-answer"><${Icon} name="check" size=${12}/> Answer selected. Send to confirm.</span>` : undefined}
             className="workbench-composer"/>
+          ${!answering && chatTab === 'edit' && html`<${ComposerControls} key=${selected || 'new'} api=${api} preference=${composerChoice} onChange=${setComposerChoice} disabled=${busy || importPending}/>`}
           <div className="composer-footer"><div className="composer-model"><${ModelControl} api=${api} requestId=${selected} onNotice=${notice => {if (notice.tone === 'error') setError(notice.text); else setInfo(notice.text);}}/><${IntegrationsControl} api=${api} disabled=${answering || busy} selected=${references.filter(r => r.kind === 'plugin')} onToggle=${item => {
               if (!references.some(r => r.kind === 'plugin' && r.id === item.id) && references.length >= referenceLimit) {setError(`Choose up to ${referenceLimit} references. Select a folder to include its files as one reference.`); return;}
               setReferences(previous => previous.some(r => r.kind === 'plugin' && r.id === item.id) ? previous.filter(r => r.kind !== 'plugin' || r.id !== item.id) : [...previous,item]);

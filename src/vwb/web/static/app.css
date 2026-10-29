@@ -149,6 +149,29 @@ summary::-webkit-details-marker {display: none;}
 .composer-model {display: flex; gap: 8px; align-items: center; color: var(--ds-text-secondary); min-width: 0;}
 .composer-model > span:first-of-type {overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px;}
 .composer-footer-actions {display: flex; align-items: center; gap: 12px;}
+.composer-preferences {position: relative; padding: 0 16px 12px; color: var(--ds-text-secondary); font-size: 11px; line-height: 16px;}
+.composer-preferences-row {display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px;}
+.composer-mode {display: flex; align-items: center; gap: 6px;}
+.composer-mode select {max-width: 110px; min-height: 28px; border: 1px solid var(--ds-border-divider); border-radius: 6px; padding: 2px 4px; background: var(--ds-surface-default); color: var(--ds-text-primary); font: inherit;}
+.composer-preview-label {font-size: 10px;}
+.composer-renderers {min-width: 0; max-width: 100%;}
+.composer-renderers > summary {padding: 6px 0; cursor: pointer; overflow-wrap: anywhere; color: var(--ds-text-primary);}
+.composer-renderer-options {position: absolute; bottom: calc(100% + 6px); left: 12px; width: min(280px, calc(100% - 24px)); max-height: min(420px, 55dvh); overflow-y: auto; z-index: var(--ds-z-dropdown); padding: 12px; border: 1px solid var(--ds-border-divider); border-radius: 12px; background: var(--ds-surface-default); box-shadow: 0 8px 28px #0002;}
+.composer-renderer-options fieldset {border: 0; margin: 0; padding: 0; min-width: 0;}
+.composer-renderer-options legend {font-weight: 600; color: var(--ds-text-primary);}
+.composer-renderer-options p {margin: 6px 0;}
+.composer-renderer-options label {display: flex; align-items: center; gap: 8px; padding: 6px 0; cursor: pointer; color: var(--ds-text-primary);}
+.composer-renderer-options input {width: 16px; height: 16px; flex-shrink: 0; margin: 0; accent-color: var(--ds-text-primary);}
+.composer-renderer-options small {display: block; font-size: 10px; color: var(--ds-text-secondary);}
+.composer-catalog-note {border-top: 1px solid var(--ds-border-divider); padding-top: 6px;}
+.composer-instruction {margin-top: 4px;}
+.composer-instruction summary {cursor: pointer;}
+.composer-instruction p {margin: 4px 0 0; overflow-wrap: anywhere;}
+.composer-preferences summary {display: flex; align-items: center; gap: 6px; list-style: none;}
+.composer-preferences summary::after {content: ''; width: 5px; height: 5px; flex-shrink: 0; border-right: 1px solid currentColor; border-bottom: 1px solid currentColor; transform: rotate(45deg);}
+.composer-preferences details[open] > summary::after {transform: rotate(225deg);}
+.composer-preferences :is(select, summary, input):focus-visible {outline: 2px solid var(--ds-text-primary); outline-offset: 3px;}
+.composer-preferences :disabled {opacity: .55; cursor: default;}
 .queue-label {padding-left: 8px; border-left: 1px solid var(--ds-border-divider); font-size: 11px; white-space: nowrap;}
 .send-now {display: flex; align-items: center; gap: 4px; border: 0; padding: 4px; background: none; color: var(--ds-text-secondary); white-space: nowrap; font-size: 12px; border-radius: 4px;}
 .send-now:hover:not(:disabled) {color: var(--ds-text-primary); background: var(--ds-surface-sunken);}
