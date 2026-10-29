@@ -1,5 +1,6 @@
 """Renderer selection must preserve editable data, version identity and cache isolation."""
 import json
+import os
 
 import pytest
 from PIL import Image
@@ -20,7 +21,10 @@ from vwb.workspace.request import SUBDIRS, Request
 
 
 @pytest.fixture
-def ws(tmp_path):
+def ws(tmp_path, monkeypatch):
+    from vwb.render import environment
+    details = {"test_runtime": "pinned"}
+    monkeypatch.setattr(environment, "capture", lambda: {"sha256": sha256_json(details), "details": details})
     ws = Workspace(tmp_path / "r-adapters")
     for sub in SUBDIRS:
         (ws.root / sub).mkdir(parents=True, exist_ok=True)
@@ -156,3 +160,97 @@ def test_dispatch_preserves_backend_and_unions_duplicate_frames(tmp_path, monkey
     assert set(next(iter(got.values()))) == {0, 2}
     with pytest.raises(ValueError, match="within the local timeline"):
         plates.render_stills(tmp_path, [("Scene", props, [-1])])
+
+
+def test_opaque_browser_png_is_normalized_without_losing_pixels(tmp_path, monkeypatch):
+    props = plan(scene('browser'))[0].props
+    def execute(stage, jobs, timeout):
+        for job in jobs:
+            Image.new('RGB', (64, 48), (16, 32, 48)).save(stage / f"{job['pid']}_f0.png")
+    monkeypatch.setattr(plates, '_execute', execute)
+    got = plates.render_stills(tmp_path, [('Scene', props, [0])])
+    with Image.open(next(iter(got.values()))[0]) as output:
+        assert output.mode == 'RGBA'
+        assert output.getpixel((0, 0)) == (16, 32, 48, 255)
+
+
+def test_non_alpha_movie_never_enters_cache(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    props = plan(scene('browser'))[0].props
+    def execute(stage, jobs, timeout):
+        for job in jobs:
+            from pathlib import Path
+            Path(job['out']).write_bytes(b'not published')
+    monkeypatch.setattr(plates, '_execute', execute)
+    monkeypatch.setattr(plates, 'probe', lambda *a, **k: SimpleNamespace(
+        n_frames=props['durationInFrames'], width=64, height=48, pix_fmt='gray', vcodec='rawvideo', fps=24))
+    with pytest.raises(ToolError, match='without alpha'):
+        plates.render(tmp_path, [('Scene', props)])
+    assert not list(tmp_path.glob('*.mov'))
+    assert not list(tmp_path.glob('.plates-*'))
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='POSIX process-group lifecycle')
+def test_timed_out_adapter_cleans_its_encoder_and_gets_no_vendor_environment(tmp_path, monkeypatch):
+    import os
+    import sys
+    runtime = tmp_path / 'runtime'
+    runtime.mkdir()
+    (runtime / 'browser-render.mjs').write_text('''import json,os,signal,subprocess,sys,time
+from pathlib import Path
+folder=Path(sys.argv[1]).parent
+assert 'VWB_TEST_PRIVATE_CREDENTIAL' not in os.environ
+child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])
+(folder/'child.json').write_text(json.dumps({'pid':child.pid}))
+def stop(*args):
+    child.terminate()
+    child.wait(timeout=2)
+    (folder/'closed').write_text('yes')
+    sys.exit(0)
+signal.signal(signal.SIGTERM,stop)
+while True: time.sleep(.05)
+''')
+    monkeypatch.setattr(plates, 'REMOTION_DIR', runtime)
+    monkeypatch.setattr(plates, 'ensure_installed', lambda renderer: None)
+    monkeypatch.setattr(plates, 'which', lambda name: sys.executable)
+    monkeypatch.setenv('VWB_TEST_PRIVATE_CREDENTIAL', 'dummy-only')
+    with pytest.raises(ToolError, match='exceeded'):
+        plates._execute(tmp_path, [{'renderer': 'browser'}], timeout=1)
+    assert (tmp_path / 'closed').read_text() == 'yes'
+    pid = json.loads((tmp_path / 'child.json').read_text())['pid']
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_environment_pins_affect_cache_and_block_changed_runtime(ws, monkeypatch):
+    from vwb.render import environment
+    from vwb.render.pipeline import ensure_plates
+    made = call(ws, 'canvas_new', {'output': 'card', 'duration_s': 1, 'renderer': 'browser'})
+    path = ws.work / made.data['path']
+    raw = read_json(path)
+    raw['layers'] = scene().dump()['layers']
+    raw['renderer_environment'] = {'sha256': 'agent-claim', 'details': {}}
+    write_json(path, raw)
+    c, _ = CanvasStore(ws.canvas).commit(ws, 'card', 'test')
+    assert c.renderer_environment['sha256'] != 'agent-claim'
+    pid = plan(c)[0].plate_id
+    assert plan(c)[0].props['__environment'] == c.renderer_environment['sha256']
+    replacement = {'details': {'test_runtime': 'changed'}, 'sha256': sha256_json({'test_runtime': 'changed'})}
+    monkeypatch.setattr(environment, 'capture', lambda: replacement)
+    monkeypatch.setattr(plates, 'render', lambda *a: pytest.fail('Changed runtime must fail before rendering'))
+    with pytest.raises(ToolError, match='environment changed'):
+        ensure_plates(ws, [c])
+    c2, _ = CanvasStore(ws.canvas).commit(ws, 'card', 'test')
+    assert c2.renderer_environment == replacement
+    assert plan(c2)[0].plate_id != pid
+    assert CanvasStore(ws.canvas).get('card', 1).renderer_environment != replacement
+
+
+def test_media_only_canvas_never_requires_browser_environment(ws, monkeypatch):
+    from vwb.render import environment
+    monkeypatch.setattr(environment, 'capture', lambda: pytest.fail('Empty/media-only canvas does not use the renderer'))
+    made = call(ws, 'canvas_new', {'output': 'card', 'duration_s': 1, 'renderer': 'browser'})
+    assert not made.is_error
+    c, _ = CanvasStore(ws.canvas).commit(ws, 'card', 'test')
+    assert c.renderer_environment is None
+    assert plan(c) == []

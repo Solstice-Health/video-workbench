@@ -58,6 +58,8 @@ class CanvasStore:
             raise ValueError("canvas has errors:\n" + "\n".join(f"  {e['where']}: {e['why']}" for e in errors))
         canvas = expand(ws, canvas)
         canvas.renderer_pin = validate_renderer(canvas).pin
+        from vwb.render.environment import bind
+        bind(canvas)
         out_dir = checked_path(self.dir.parent, self.dir.name, output_id(output))
         out_dir.mkdir(parents=True, exist_ok=True)
         with FileLock(str(out_dir / ".lock")):

@@ -7,7 +7,11 @@
   "scripts": {
     "setup-fonts": "node scripts/copy-fonts.mjs",
     "studio": "remotion studio src/index.ts",
-    "render-jobs": "node render.mjs"
+    "render-jobs": "node render.mjs",
+    "render-browser-jobs": "node browser-render.mjs",
+    "setup-browser": "playwright-core install chromium",
+    "test": "node --test tests/*.test.mjs",
+    "test:renderers": "VWB_RENDER_SMOKE=1 node --test tests/*.test.mjs"
   },
   "dependencies": {
     "@fontsource/arimo": "5.3.0",
@@ -29,14 +33,18 @@
     "@remotion/bundler": "4.0.534",
     "@remotion/cli": "4.0.534",
     "@remotion/fonts": "4.0.534",
-    "@remotion/layout-utils": "^4.0.534",
+    "@remotion/layout-utils": "4.0.534",
     "@remotion/renderer": "4.0.534",
+    "esbuild": "0.28.2",
+    "gsap": "3.15.0",
+    "playwright-core": "1.64.1",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "remotion": "4.0.534"
   },
   "devDependencies": {
     "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
     "typescript": "5.9.3"
   }
 }

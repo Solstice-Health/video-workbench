@@ -62,6 +62,7 @@ def load_working(ws: Workspace, output: str) -> Canvas:
     data.pop("copy", None)          # the deck is the only source of copy; commit fills it in
     data.pop("version", None)
     data.pop("parent", None)
+    data.pop("renderer_environment", None)  # host captures actual dependencies at preview/commit
     try:
         return Canvas.model_validate(data)
     except ValidationError as exc:
@@ -308,7 +309,9 @@ def plate_props(c: Canvas, layers: list[Any], start: int = 0, end: int | None = 
         out.append(d)
     return {"width": W, "height": H, "fps": c.fps, "durationInFrames": max(1, end - start), "offset": start,
             "total": c.length, "layers": out,
-            **({"__renderer": c.renderer} if c.renderer != "remotion" else {})}
+            **({"__renderer": c.renderer} if c.renderer != "remotion" else {}),
+            **({"__environment": c.renderer_environment["sha256"]}
+               if c.renderer != "remotion" and c.renderer_environment else {})}
 
 
 def plan(c: Canvas, registry: Registry | None = None) -> list[Step]:

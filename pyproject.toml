@@ -55,6 +55,7 @@ packages = ["src/vwb"]
 "config" = "vwb/_resources/config"
 "recipes" = "vwb/_resources/recipes"
 "docs/CANVAS.md" = "vwb/_resources/docs/CANVAS.md"
+"docs/ADAPTABLE_CANVAS.md" = "vwb/_resources/docs/ADAPTABLE_CANVAS.md"
 "docs/DESKTOP_APPS.md" = "vwb/_resources/docs/DESKTOP_APPS.md"
 "docs/MODEL_ACCESS.md" = "vwb/_resources/docs/MODEL_ACCESS.md"
 "docs/CODE_INTELLIGENCE.md" = "vwb/_resources/docs/CODE_INTELLIGENCE.md"
@@ -64,12 +65,17 @@ packages = ["src/vwb"]
 "generators/remotion/package-lock.json" = "vwb/_resources/generators/remotion/package-lock.json"
 "generators/remotion/tsconfig.json" = "vwb/_resources/generators/remotion/tsconfig.json"
 "generators/remotion/render.mjs" = "vwb/_resources/generators/remotion/render.mjs"
+"generators/remotion/browser-render.mjs" = "vwb/_resources/generators/remotion/browser-render.mjs"
+"generators/remotion/browser-validation.mjs" = "vwb/_resources/generators/remotion/browser-validation.mjs"
+"generators/remotion/browser-environment.mjs" = "vwb/_resources/generators/remotion/browser-environment.mjs"
+"generators/remotion/browser-input.mjs" = "vwb/_resources/generators/remotion/browser-input.mjs"
+"generators/remotion/browser-lifecycle.mjs" = "vwb/_resources/generators/remotion/browser-lifecycle.mjs"
 "generators/remotion/scripts" = "vwb/_resources/generators/remotion/scripts"
 "generators/remotion/src" = "vwb/_resources/generators/remotion/src"
 "generators/remotion/public/fonts" = "vwb/_resources/generators/remotion/public/fonts"
 
 [tool.hatch.build.targets.sdist]
-only-include = ["src", "config", "recipes", "docs", "docker", "generators/remotion/src", "generators/remotion/scripts", "generators/remotion/public/fonts", "generators/remotion/package.json", "generators/remotion/package-lock.json", "generators/remotion/tsconfig.json", "generators/remotion/render.mjs", "scripts", "tests", "pyproject.toml", "uv.lock", "README.md", ".env.example", "AGENTS.md", "DESIGN.md", "PRODUCT.md"]
+only-include = ["src", "config", "recipes", "docs", "docker", "generators/remotion/src", "generators/remotion/scripts", "generators/remotion/tests", "generators/remotion/public/fonts", "generators/remotion/package.json", "generators/remotion/package-lock.json", "generators/remotion/tsconfig.json", "generators/remotion/render.mjs", "generators/remotion/browser-render.mjs", "generators/remotion/browser-validation.mjs", "generators/remotion/browser-environment.mjs", "generators/remotion/browser-input.mjs", "generators/remotion/browser-lifecycle.mjs", "scripts", "tests", "pyproject.toml", "uv.lock", "README.md", ".env.example", "AGENTS.md", "DESIGN.md", "PRODUCT.md"]
 
 [tool.ruff]
 line-length = 110

@@ -13,7 +13,7 @@ from vwb.canvas.paths import checked_path, output_id, read_record, version_numbe
 from vwb.canvas.renderers import validate_renderer
 from vwb.canvas.store import CanvasStore
 from vwb.config import load_profile
-from vwb.render import audio_mix, plates
+from vwb.render import audio_mix, environment, plates
 from vwb.render.compositor import COMPOSITOR_VERSION, Compositor, encode
 from vwb.util.hashing import sha256_file
 from vwb.util.jsonio import write_json
@@ -37,6 +37,10 @@ def plate_jobs(canvas: Canvas, ws: Workspace | None = None) -> list[tuple[str, d
 
 
 def ensure_plates(ws: Workspace, canvases: list[Canvas]) -> None:
+    if any(environment.needed(c) for c in canvases):
+        current = environment.capture()
+        for c in canvases:
+            environment.validate(c, current)
     jobs = [j for c in canvases for j in plate_jobs(c, ws)]
     if jobs:
         plates.render(ws.plates, jobs)
@@ -78,6 +82,7 @@ def _render_locked(ws: Workspace, canvas: Canvas, output: str, out_dir: Path, re
                "inputs": inputs,
                "tools": {"compositor": COMPOSITOR_VERSION, "ffmpeg": ffmpeg_version(),
                          "renderer": canvas.renderer, "generator": validate_renderer(canvas).pin,
+                         **({"renderer_environment": canvas.renderer_environment} if canvas.renderer_environment else {}),
                          "x264": {k: profile["video"][k] for k in ("crf", "preset", "profile")}},
                "audio": audio_info, "render_seconds": round(time.time() - t0, 1), "attestation": "rendered-from-canvas"}
     write_json(receipt_path, receipt)

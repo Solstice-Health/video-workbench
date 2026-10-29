@@ -66,6 +66,7 @@ def canvas_set_renderer(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
         validate_renderer(c)
         data = read_record(ctx.ws.work, "outputs", output_id(a["output"]), "canvas.json")
         data.update(renderer=renderer.id, renderer_pin=renderer.pin)
+        data.pop("renderer_environment", None)
         write_json(working_path(ctx.ws, a["output"]), data)
     except (ValueError, FileNotFoundError) as exc:
         return ToolResult.error(str(exc))
@@ -199,6 +200,11 @@ def _render_frames(ctx: ToolContext, c, frames: list[int], with_plates: bool = T
     """Composite chosen output frames of an expanded canvas; plates are rendered as stills of just those frames."""
     stills: dict[str, dict[int, np.ndarray]] = {}
     if with_plates:
+        from vwb.render import environment
+        if c.version:
+            environment.validate(c)
+        else:
+            environment.bind(c)
         jobs, starts = [], {}
         for st in plan(c, Registry(ctx.ws.assets)):
             local = sorted({f - st.start for f in frames if st.kind == "plate" and st.start <= f < st.end})

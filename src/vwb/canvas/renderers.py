@@ -25,11 +25,11 @@ RENDERERS = {
     row.id: row for row in (
         Renderer("remotion", "Remotion", "remotion@4.0.534:Scene@4",
                  "Existing React video renderer; full canvas layer support."),
-        Renderer("browser", "React / HTML + SVG", "browser-scene@1",
+        Renderer("browser", "React / HTML + SVG", "browser-scene@1:playwright-core@1.64.1:esbuild@0.28.2",
                  "Frame-driven HTML typography and SVG graphics in headless Chromium."),
-        Renderer("gsap", "React / HTML + GSAP", "gsap-scene@1",
+        Renderer("gsap", "React / HTML + GSAP", "gsap-scene@1:gsap@3.15.0:playwright-core@1.64.1:esbuild@0.28.2",
                  "HTML/SVG scene with paused GSAP timelines sampled at explicit frames."),
-        Renderer("canvas2d", "Canvas 2D", "canvas2d-scene@1",
+        Renderer("canvas2d", "Canvas 2D", "canvas2d-scene@1:playwright-core@1.64.1:esbuild@0.28.2",
                  "Canvas 2D graphics. Shape plates only; use HTML/SVG for text or captions.", ("shape",)),
     )
 }

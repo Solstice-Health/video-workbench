@@ -657,3 +657,16 @@ def test_staged_upload_is_hash_pinned_before_queue(http):
     status, _, _ = request("POST", f"/api/requests/{ws.id}/messages", json.dumps({
         "message": "Read", "attachments": [uploaded["id"]]}), headers)
     assert status == 400 and not app.queue.snapshot(ws)["queue"]
+
+
+def test_canvas_renderer_catalog_is_same_origin_and_describes_capabilities(http):
+    request, _, _, _ = http
+    status, _, body = request('GET', '/api/canvas-renderers')
+    assert status == 200
+    catalog = json.loads(body)
+    assert catalog['default'] == 'remotion'
+    rows = {row['id']: row for row in catalog['renderers']}
+    assert set(rows) == {'remotion', 'browser', 'gsap', 'canvas2d'}
+    assert rows['canvas2d']['plate_layers'] == ['shape']
+    assert rows['browser']['pin'].startswith('browser-scene@1:')
+    assert request('GET', '/api/canvas-renderers', headers={'Sec-Fetch-Site': 'cross-site'})[0] == 403

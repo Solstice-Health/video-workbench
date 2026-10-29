@@ -17,6 +17,11 @@ after swapping, then commit a new immutable version. The committed document pins
 the adapter revision and the render receipt records it. Earlier versions retain
 their original renderer. A missing renderer field means legacy `remotion`.
 
+Browser-backed versions also pin the actual renderer environment (code,
+dependencies, font files, Chromium, encoder and OS). If those change, create a new
+version or restore the matching environment before re-rendering. Working previews
+use the current environment; already-rendered versions remain available.
+
 - `remotion`: the existing React video renderer.
 - `browser`: React HTML typography and SVG shapes, driven by explicit frames.
 - `gsap`: the HTML/SVG scene with paused GSAP animation sampled at explicit frames.
