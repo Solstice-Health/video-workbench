@@ -276,6 +276,8 @@ class Canvas(BaseModel):
     version: int = 0
     parent: int | None = None
     profile: str = "youtube_shorts"
+    renderer: Literal["remotion", "browser", "gsap", "canvas2d"] = "remotion"
+    renderer_pin: str | None = None
     format: dict[str, int]              # width, height, fps
     time_map: list[Span]
     duration_frames: int | None = Field(default=None, ge=1, strict=True)

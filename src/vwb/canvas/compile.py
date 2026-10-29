@@ -30,6 +30,7 @@ from vwb.canvas.model import (
     font_library,
 )
 from vwb.canvas.paths import checked_path, output_id, read_record
+from vwb.canvas.renderers import get_renderer, renderer_problems, validate_renderer
 from vwb.config import load_profile
 from vwb.index.ocr import CLAIM_HINT
 from vwb.index.paths import SourceIndexes, store_for
@@ -39,7 +40,7 @@ from vwb.util.hashing import sha256_json
 from vwb.workspace import Workspace
 from vwb.workspace.registry import Registry
 
-PLATE_PIN = "remotion@4.0.534:Scene@4"
+PLATE_PIN = get_renderer("remotion").pin  # compatibility for legacy plate caches
 PLATE_TYPES = (TextLayer, CaptionsLayer, ShapeLayer)
 
 
@@ -90,7 +91,7 @@ def _frames(c: Canvas, step: int = 5) -> list[int]:
 
 
 def check(ws: Workspace, c: Canvas) -> list[Problem]:
-    P: list[Problem] = []
+    P: list[Problem] = [Problem("error", where, why) for where, why in renderer_problems(c)]
     W, H = c.size
     prof = load_profile(c.profile)
     sz = prof["safe_zone"]
@@ -306,10 +307,12 @@ def plate_props(c: Canvas, layers: list[Any], start: int = 0, end: int | None = 
             d["paths"], d["viewbox"] = vec["paths"], vec["viewbox"]
         out.append(d)
     return {"width": W, "height": H, "fps": c.fps, "durationInFrames": max(1, end - start), "offset": start,
-            "total": c.length, "layers": out}
+            "total": c.length, "layers": out,
+            **({"__renderer": c.renderer} if c.renderer != "remotion" else {})}
 
 
 def plan(c: Canvas, registry: Registry | None = None) -> list[Step]:
+    renderer = validate_renderer(c)
     steps: list[Step] = []
     for l in c.layers:
         if isinstance(l, PLATE_TYPES):
@@ -327,5 +330,5 @@ def plan(c: Canvas, registry: Registry | None = None) -> list[Step]:
         if s.kind == "plate":
             s.start, s.end = plate_range(c, s.layers)
             s.props = plate_props(c, s.layers, s.start, s.end, registry)
-            s.plate_id = sha256_json({"pin": PLATE_PIN, "props": s.props})
+            s.plate_id = sha256_json({"pin": renderer.pin, "props": s.props})
     return steps

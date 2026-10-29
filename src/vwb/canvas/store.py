@@ -16,6 +16,7 @@ from filelock import FileLock
 from vwb.canvas.compile import check, expand, load_working
 from vwb.canvas.model import Canvas
 from vwb.canvas.paths import checked_path, output_id, read_record, read_text, version_number
+from vwb.canvas.renderers import validate_renderer
 from vwb.util.hashing import sha256_json
 from vwb.util.jsonio import read_json, write_json
 from vwb.workspace import Workspace
@@ -56,6 +57,7 @@ class CanvasStore:
         if errors:
             raise ValueError("canvas has errors:\n" + "\n".join(f"  {e['where']}: {e['why']}" for e in errors))
         canvas = expand(ws, canvas)
+        canvas.renderer_pin = validate_renderer(canvas).pin
         out_dir = checked_path(self.dir.parent, self.dir.name, output_id(output))
         out_dir.mkdir(parents=True, exist_ok=True)
         with FileLock(str(out_dir / ".lock")):

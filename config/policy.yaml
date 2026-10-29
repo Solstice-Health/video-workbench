@@ -28,6 +28,8 @@ capabilities:
   index.build: allow
   render: allow
   canvas.commit: allow              # role check still applies: job lead only
+  canvas.inspect: allow             # discover trusted data-only renderer adapters
+  canvas.configure: allow           # change a working canvas renderer; immutable versions stay pinned
   human.ask: allow
   agent.manage: allow             # supervised, permission-inheriting subagents; bounded tree per turn
   artifact.publish: allow         # request-local HTML artifacts and explicit review selections
@@ -110,7 +112,7 @@ roles:
             web_search, web_fetch, web_research,
             media_frame, media_contact_sheet, watch_ask, focus_find, reframe_solve, asset_marks, asset_view, asset_trace, chart_read, video_matte,
             sunburst_create, sunburst_extract, sunburst_inpaint, sunburst_outpaint, omni_video,
-            layout_facts, canvas_schema, canvas_new, canvas_check, canvas_preview, canvas_snapshot, canvas_query, shape_kit, copy_add, copy_list,
+            layout_facts, canvas_schema, canvas_renderers, canvas_set_renderer, canvas_new, canvas_check, canvas_preview, canvas_snapshot, canvas_query, shape_kit, copy_add, copy_list,
             repo_files, repo_search, repo_read, repo_context, repo_diff, repo_history, repo_lsp, repo_status,
             file_list, file_read, file_grep, file_write, file_edit, memory_note]
   critic:           # GPT-6.1-Sol, another family; checks renders, never certifies
@@ -120,7 +122,7 @@ roles:
             sandbox_run, sandbox_environment, sandbox_status, artifact_publish, artifact_list, artifact_feedback,
             index_overview, index_transcript, index_shots, media_frame, media_contact_sheet,
             integration_status, integration_tools, integration_call,
-            canvas_get, canvas_check, canvas_list, canvas_query, qc_run, qc_peek, render_info, flags_list, memory_note,
+            canvas_renderers, canvas_get, canvas_check, canvas_list, canvas_query, qc_run, qc_peek, render_info, flags_list, memory_note,
             repo_files, repo_search, repo_read, repo_context, repo_diff, repo_history, repo_lsp, repo_status,
             asset_view, chart_read, output_compare, file_list, file_read, file_grep]
   code_explorer:                   # isolated navigation context; no native shell or writes

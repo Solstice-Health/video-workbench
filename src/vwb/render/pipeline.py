@@ -10,6 +10,7 @@ from typing import Any
 from vwb.canvas.compile import plan
 from vwb.canvas.model import Canvas
 from vwb.canvas.paths import checked_path, output_id, read_record, version_number
+from vwb.canvas.renderers import validate_renderer
 from vwb.canvas.store import CanvasStore
 from vwb.config import load_profile
 from vwb.render import audio_mix, plates
@@ -43,6 +44,7 @@ def ensure_plates(ws: Workspace, canvases: list[Canvas]) -> None:
 
 def render(ws: Workspace, output: str, version: int | None = None, actor: str = "render", force: bool = False) -> dict[str, Any]:
     canvas = CanvasStore(ws.canvas).get(output, version)
+    validate_renderer(canvas)
     out_dir = render_dir(ws, output, canvas.version)
     receipt_path = out_dir / "receipt.json"
     if receipt_path.exists() and not force:
@@ -74,7 +76,8 @@ def _render_locked(ws: Workspace, canvas: Canvas, output: str, out_dir: Path, re
     receipt = {"output": output, "version": canvas.version, "file": str(final), "sha256": sha256_file(final),
                "frames": canvas.length, "fps": canvas.fps, "seconds": round(canvas.length / canvas.fps, 3),
                "inputs": inputs,
-               "tools": {"compositor": COMPOSITOR_VERSION, "ffmpeg": ffmpeg_version(), "generator": plates.GENERATOR_PIN,
+               "tools": {"compositor": COMPOSITOR_VERSION, "ffmpeg": ffmpeg_version(),
+                         "renderer": canvas.renderer, "generator": validate_renderer(canvas).pin,
                          "x264": {k: profile["video"][k] for k in ("crf", "preset", "profile")}},
                "audio": audio_info, "render_seconds": round(time.time() - t0, 1), "attestation": "rendered-from-canvas"}
     write_json(receipt_path, receipt)

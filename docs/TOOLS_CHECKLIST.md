@@ -155,6 +155,7 @@ Spec references: D = decision, X = experiment, R/S = sources (see the spec and t
 - [x] `chart_read`: measure a bar chart (bars by colour, value axis fitted from OCR'd ticks, legend series, category labels, annotated preview) so unlabelled charts can be recreated in any form; measured values become authored copy with a provenance note (flagged)
 - [x] `clip` layers: registry clips (generated, keyed with alpha) on their own clock: start, clip_in, rate, loop or hold
 - [x] `canvas_schema`, `layout_facts`, `canvas_new`, `canvas_check`, `canvas_preview`, `canvas_commit`, `canvas_get`, `canvas_diff`, `canvas_list`
+- [x] `canvas_renderers`, `canvas_set_renderer`, and `canvas_new(renderer=...)`: capability-checked working-canvas swaps, immutable renderer pins, separate plate caches and per-render attribution. See `docs/ADAPTABLE_CANVAS.md`.
 - [x] Copy deck: `copy_add` mints strings from OCR, transcript or authored text (with a provenance note) ; `copy_list` (D21)
 - [x] `canvas_snapshot`: a designed frame (all layers, chosen layers, or without text) as an image asset, for Omni transitions between screens and as a sunburst reference
 - [x] Remake checks in `canvas_check` and the verifier: source text shown as image pixels below the legibility floor (fine print has its own floor), source pixels in image layers above 1.25x (UPSCALED)

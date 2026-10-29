@@ -1,5 +1,22 @@
 # Roadmap
 
+## Deferred: renderer setup and repair from Workbench, 2026-10-29
+
+- **Observed gap:** a checkout without Remotion dependencies blocked canvas
+  previews/renders. The agent could only ask the user to install them because its
+  command tools run in Docker while the renderer lives on the host. Manual
+  `scripts/setup.sh` and `vwb doctor` already exist; an agent-accessible repair
+  workflow is missing.
+- **Follow-up:** expose renderer readiness and a bounded host setup/repair action
+  through Workbench, reusing the pinned dependency, font and render-browser setup.
+  Coordinate with active render jobs, report progress and failures, and verify a
+  small preview/render before reporting readiness. Keep general agent commands
+  inside the sandbox.
+- **Current workaround completed:** installed with `npm ci`, ran
+  `npm run setup-fonts`, installed the Remotion render browser, and verified a PNG
+  preview plus a 12-frame video in the QC checkout. The repair workflow remains
+  deferred.
+
 ## Non-QC spec review, 2026-10-14
 
 Compared the supplied *Video Workbench Plain Spec*, version 7, with the current

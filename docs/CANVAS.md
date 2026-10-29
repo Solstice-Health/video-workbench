@@ -8,6 +8,26 @@ placeholders, not a look to copy.
 Work on `outputs/<id>/canvas.json` in the work folder, check it with `canvas_check`, look with
 `canvas_preview`, commit with `canvas_commit` (job lead only).
 
+## Renderer selection
+
+`canvas_renderers` lists the trusted adapters. `canvas_new(..., renderer="browser")`
+chooses one; `canvas_set_renderer(output="short-01", renderer="gsap")` swaps an
+existing working canvas without changing its layers, assets or time map. Preview
+after swapping, then commit a new immutable version. The committed document pins
+the adapter revision and the render receipt records it. Earlier versions retain
+their original renderer. A missing renderer field means legacy `remotion`.
+
+- `remotion`: the existing React video renderer.
+- `browser`: React HTML typography and SVG shapes, driven by explicit frames.
+- `gsap`: the HTML/SVG scene with paused GSAP animation sampled at explicit frames.
+- `canvas2d`: Canvas 2D shape plates; text and captions require another adapter.
+
+Video, image and clip layers still use the common compositor. Unsupported layers
+block selection/commit instead of being flattened or dropped. These adapters
+accept the same canvas data; they do not execute arbitrary scripts in a canvas.
+The composer can pass multiple preferred adapters to the agent, which selects one
+per output. Auto leaves that choice to the agent (the tool default remains Remotion).
+
 ## Units and time
 - Output pixels: x right, y down, origin top-left. YouTube Shorts is 1080 x 1920 at 30 fps.
 - Source pixels (for a `video` layer's `crop`): the source frame, for example 1920 x 1080.

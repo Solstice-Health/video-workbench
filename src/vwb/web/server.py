@@ -668,6 +668,9 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) >= 4 and parts[:2] == ["api", "requests"] and parts[3] == "qc":
             self._check_qc_session()
         if self.command in {"GET", "HEAD"}:
+            if parts == ["api", "canvas-renderers"]:
+                from vwb.canvas.renderers import catalog as renderer_catalog
+                return self._json(renderer_catalog())
             if parts == ["api", "bootstrap"]:
                 return self._json({"csrf_token": self.app.csrf_token, "capabilities": {
                     "upload": True, "queue": True, "steer": "interrupt_then_resume", "compact": "native",

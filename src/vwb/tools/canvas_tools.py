@@ -20,6 +20,8 @@ from vwb.canvas import copydeck
 from vwb.canvas.compile import check, expand, load_working, plan, working_path
 from vwb.canvas.model import font_library
 from vwb.canvas.paths import output_id, read_record, version_number
+from vwb.canvas.renderers import RENDERERS, get_renderer, validate_renderer
+from vwb.canvas.renderers import catalog as renderer_catalog
 from vwb.canvas.store import CanvasStore
 from vwb.config import DOCS_DIR, load_profile
 from vwb.index.paths import SourceIndexes, source
@@ -51,6 +53,26 @@ def canvas_schema(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     return ToolResult(text=(DOCS_DIR / "CANVAS.md").read_text())
 
 
+def canvas_renderers(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
+    return ToolResult.json(renderer_catalog())
+
+
+def canvas_set_renderer(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
+    """Change only the working document. Immutable versions and their receipts remain intact."""
+    try:
+        renderer = get_renderer(a["renderer"])
+        c = load_working(ctx.ws, a["output"])
+        c.renderer, c.renderer_pin = renderer.id, renderer.pin
+        validate_renderer(c)
+        data = read_record(ctx.ws.work, "outputs", output_id(a["output"]), "canvas.json")
+        data.update(renderer=renderer.id, renderer_pin=renderer.pin)
+        write_json(working_path(ctx.ws, a["output"]), data)
+    except (ValueError, FileNotFoundError) as exc:
+        return ToolResult.error(str(exc))
+    return ToolResult.json({"output": a["output"], "renderer": renderer.id, "renderer_pin": renderer.pin,
+                            "note": "Working canvas updated. Preview and commit a new version to render this choice; previous versions are unchanged."})
+
+
 def layout_facts(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     """Facts for composing, not a layout: canvas size, safe zone, UI bands, floors, fonts, the source's look, assets."""
     prof = _profile(ctx)
@@ -65,6 +87,7 @@ def layout_facts(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     m = st.media() if st else None
     return ToolResult.json({
         "canvas": [W, H], "fps": prof["fps"], "max_duration_s": prof["max_duration_s"],
+        "renderers": renderer_catalog(),
         "safe_zone": {"x": sz["left"], "y": sz["top"], "w": W - sz["left"] - sz["right"], "h": H - sz["top"] - sz["bottom"],
                       "source": sz["source"]},
         "platform_ui": "Shorts overlays: header icons at the top; channel name, title and description at the bottom; "
@@ -83,6 +106,10 @@ def layout_facts(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
 
 
 def canvas_new(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
+    try:
+        renderer = get_renderer(a.get("renderer", "remotion"))
+    except ValueError as exc:
+        return ToolResult.error(str(exc))
     out = a["output"]
     p = working_path(ctx.ws, out)
     if p.exists() and not a.get("overwrite"):
@@ -120,12 +147,13 @@ def canvas_new(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
         src = source(ctx.ws, a.get("media_id"), require_explicit=True)
         time_map = [{"media": src.ref, "src_in": x, "src_out": y} for x, y in spans]
         n = sum(y - x for x, y in spans)
-    doc = {"schema": "vwb.canvas/2", "profile": prof["id"],
+    doc = {"schema": "vwb.canvas/2", "profile": prof["id"], "renderer": renderer.id, "renderer_pin": renderer.pin,
            "format": {"width": prof["width"], "height": prof["height"], "fps": prof["fps"]},
            "time_map": time_map, **({"duration_frames": n} if duration is not None else {}),
            "intent": a.get("intent", ""), "layers": []}
     write_json(p, doc)
     return ToolResult.json({"path": str(p.relative_to(ctx.ws.work)), "frames": n, "seconds": round(n / prof["fps"], 2),
+                            "renderer": renderer.id, "renderer_pin": renderer.pin,
                             "media": src.ref if src else None, "sources": list(dict.fromkeys(s["media"] for s in time_map)),
                             "note": "Add layers by editing this file (see canvas_schema). Nothing is "
                                                       "placed for you: you design the composition."})
@@ -213,7 +241,7 @@ def canvas_preview(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
             d.rectangle([sz["left"], sz["top"], W - sz["right"], H - sz["bottom"]], outline=(0, 255, 160), width=3)
         cells.append((f"{fmt(f / c.fps)}", np.asarray(img)))
     sheet = contact_sheet(cells, cols=min(int(a.get("cols", 3)), len(cells)), cell_width=int(a.get("cell_width", 320)))
-    return ToolResult(text=f"{a['output']} working canvas, {len(cells)} frames (green = platform safe zone)",
+    return ToolResult(text=f"{a['output']} working canvas via {c.renderer}, {len(cells)} frames (green = platform safe zone)",
                       images=[jpeg_bytes(sheet)])
 
 
@@ -482,12 +510,18 @@ def deliver_submit(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
 OUT = {"output": {"type": "string"}, "outputs": {"type": "array", "items": {"type": "string"}}, "version": {"type": "integer"}}
 
 TOOLS = [
+    Tool("canvas_renderers", "List trusted canvas renderer adapters and their capabilities. Select one per output; unsupported layers block a swap.",
+         schema({}), canvas_renderers, "canvas.inspect", "canvas"),
+    Tool("canvas_set_renderer", "Swap the working canvas renderer without changing layers or prior versions. Preview, then commit a new version. Rejects incompatible layers.",
+         schema({"output": {"type": "string"}, "renderer": {"type": "string", "enum": list(RENDERERS)}}, ["output", "renderer"]),
+         canvas_set_renderer, "canvas.configure", "canvas"),
     Tool("canvas_schema", "The canvas file reference (vwb.canvas/2): layer types, properties, keyframes, eases, text "
          "styles, masks, effects. Read it before writing a canvas.", schema({}), canvas_schema, "tool", "canvas"),
     Tool("layout_facts", "Facts for composing (not a layout): canvas size, safe zone, platform UI, legibility floors, "
          "fonts, brand colours from the readings, recovered assets.", schema({}), layout_facts, "tool", "canvas"),
     Tool("canvas_new", "Create work/outputs/<output>/canvas.json with no layers. Use duration_s to make a new video from a brief or design references, without source video. For source edits, use spans instead. You then write the layers.", schema({"output": {"type": "string"}, "intent": {"type": "string"},
          "duration_s": {"type": "number", "exclusiveMinimum": 0},
+         "renderer": {"type": "string", "enum": list(RENDERERS)},
          "spans": {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}}, "overwrite": {"type": "boolean"}},
          ["output"]), canvas_new, "tool", "canvas"),
     Tool("copy_add", "Mint a typeset string into the copy deck. source: shot_title (shot id: that slide's title, two "
