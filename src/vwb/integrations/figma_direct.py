@@ -18,6 +18,7 @@ from jsonschema.exceptions import ValidationError
 from vwb.config import RUNS_DIR
 
 from .artifacts import import_result
+from .callbacks import validate_callback
 from .store import IntegrationError, Store
 
 API = "https://api.figma.com"
@@ -47,18 +48,7 @@ TOOLS = [
 
 
 def _callback(value: str) -> str:
-    try:
-        parsed = urlsplit(value)
-        port = parsed.port
-        valid = (parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
-                 and parsed.path == CALLBACK_PATH and not parsed.username and not parsed.password
-                 and not parsed.query and not parsed.fragment and "\\" not in value
-                 and not any(ord(c) < 33 for c in value) and (port is None or port > 0))
-    except (TypeError, ValueError):
-        valid = False
-    if not valid:
-        raise IntegrationError("Use the exact local Figma callback URL shown in Workbench.")
-    return value
+    return validate_callback(value, CALLBACK_PATH)
 
 
 def _error_kind(raw: bytes) -> str:

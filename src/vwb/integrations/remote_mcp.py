@@ -2,7 +2,7 @@
 
 The SDK owns OAuth discovery, PKCE, registration and token renewal. Host-only
 storage binds credentials to one connection generation. Interactive authorization
-runs in a bounded background thread; a loopback callback resumes that exact flow.
+runs in a bounded background thread; a validated callback resumes that exact flow.
 Agent operations never start a browser flow or grant new tool permissions.
 """
 
@@ -39,6 +39,7 @@ from mcp.shared.auth import (
     ProtectedResourceMetadata,
 )
 
+from .callbacks import validate_callback
 from .store import IntegrationError, Store
 
 CALLBACK_PATH = "/api/integrations/mcp/callback"
@@ -81,11 +82,13 @@ for _logger_name in ("mcp.client.auth.oauth2", "mcp.client.streamable_http", "mc
 
 
 def _url(value: str, *, callback=False) -> str:
+    if callback:
+        return validate_callback(value, CALLBACK_PATH, require_loopback_port=True)
     if not isinstance(value, str) or not value or len(value) > 2048:
         raise IntegrationError("Enter a valid MCP server URL.")
     try:
         parsed = urlsplit(value)
-        port = parsed.port
+        _ = parsed.port  # Validate malformed/out-of-range ports even for server URLs.
     except ValueError:
         raise IntegrationError("Enter a valid MCP server URL.") from None
     if (not parsed.hostname or parsed.username is not None or parsed.password is not None
@@ -94,9 +97,6 @@ def _url(value: str, *, callback=False) -> str:
     loopback = parsed.hostname.lower() in {"localhost", "127.0.0.1", "::1"}
     if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
         raise IntegrationError("Use HTTPS for remote servers, or HTTP on localhost for a local server.")
-    if callback and (not loopback or parsed.scheme != "http" or not port
-                     or parsed.path != CALLBACK_PATH or parsed.query):
-        raise IntegrationError("MCP sign-in requires the Workbench loopback callback URL.")
     if any(re.search(r"(?:token|secret|password|api[_-]?key|authorization)", key, re.I)
            for key in parse_qs(parsed.query)):
         raise IntegrationError("Keep credentials out of URLs. Use the bearer token or OAuth fields.")

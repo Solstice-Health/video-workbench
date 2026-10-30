@@ -20,6 +20,7 @@ from vwb.config import RUNS_DIR
 from vwb.desktop.after_effects import AfterEffects
 
 from .blender_mcp import DesktopBlender
+from .callbacks import validate_callback
 from .figma_direct import DirectFigma
 from .figma_mcp import DesktopFigma
 from .remote_mcp import RemoteMCP
@@ -58,16 +59,7 @@ def _local_schema(schema: dict) -> None:
 
 
 def _callback(value: str) -> str:
-    try:
-        parsed = urlsplit(value)
-        port = parsed.port
-    except (ValueError, TypeError):
-        raise IntegrationError("Use the exact registered loopback callback URL.") from None
-    if (parsed.scheme != "http" or parsed.hostname not in ("localhost", "127.0.0.1", "::1")
-            or parsed.path != CALLBACK_PATH or parsed.username or parsed.password or parsed.query or parsed.fragment
-            or any(ord(c) < 33 for c in value) or "\\" in value or (port is not None and port < 1)):
-        raise IntegrationError("Use the exact registered loopback callback URL.")
-    return value
+    return validate_callback(value, CALLBACK_PATH)
 
 
 def _payload(result: dict) -> dict:
