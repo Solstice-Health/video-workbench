@@ -228,15 +228,31 @@ reference-guided edits expose Transparent background and Allow text controls.
   redraw it. Fidelity and text comparisons remain in its tool result and receipt.
   No source-aligned mask is inferred from the model's bounding-box registration.
 
-Video defaults to Omni 1.1. Choose a prompt, first and optional last frames, up to
-three image references, or a video to edit/extend. Controls expose 3–10 seconds,
-720p or 1080p, and 9:16 or 16:9. Generated clips retain their provider audio. The
-model picker comes from compatible configurations in `config/slots.yaml`: the
-current image catalog includes Sunburst and its configured Flare alternative;
-the current video catalog has only Omni 1.1. Adding a compatible configured model
-enables a real choice without claiming support for a different vendor's protocol.
-The selected model stays pinned for that job, including retries. Provider keys
-remain in the host gateway and are managed through Models and APIs.
+Video has a **Provider** selector: **Google / Omni** preserves the existing
+Omni 1.1 prompt, frame, reference, edit and extend workflow with 3–10 seconds,
+720p/1080p and 9:16/16:9 controls. **OpenRouter** adds a searchable model-path
+input, initially `minimax/hailuo-3` (H3). Search names or paste an exact path;
+select a model from the live video catalog. No source-code allowlist limits future
+video models. A catalog entry is not a guarantee of account access.
+
+OpenRouter durations, resolutions, aspects, first/last-frame support, audio and
+seed controls follow the selected model's advertised capabilities. **Provider
+default** omits that parameter. Unknown or incompatible selections are blocked
+before dispatch. Prompt, first/last frames and up to three image references are
+supported; reference acceptance remains provider-dependent. Edit/extend stays on
+the Google / Omni route. Input selections survive provider/model changes so the
+user can resolve incompatibilities explicitly. Draft provider/model choices also
+survive reload in the current conversation.
+
+The image model picker and Google video picker still use compatible configurations
+in `config/slots.yaml`. Every job pins its selected provider and model. OpenRouter
+capabilities are checked again at dispatch, then one native video job is submitted,
+polled and downloaded through `model_request`. Its provider job ID/status and
+response paths are saved separately from the local job, including on interruption
+or download failure. A local failure does not mean the provider stopped: inspect
+that saved ID before starting another generation. The worker never automatically
+resubmits an existing dispatch. Reference bytes are checksum-checked before the
+network request. Keys remain on the host and are managed through Models and APIs.
 
 Uploads are saved under `work/studio/inputs/<upload-id>/`. Job inputs, outputs and
 `receipt.json` are kept under `work/studio/images/<job-id>/` or
@@ -256,7 +272,7 @@ Nothing automatically replays or resumes a generation. Stopping the local worker
 cannot guarantee cancellation or refund of a request already accepted by a provider.
 
 API routes are request-scoped under `/api/requests/:id/studio`: GET
-`/capabilities`, GET/POST `/jobs`, GET `/jobs/:job-id`, POST
+`/capabilities`, GET `/video-models?query=…&limit=50&offset=0`, GET/POST `/jobs`, GET `/jobs/:job-id`, POST
 `/jobs/:job-id/cancel`, and POST `/uploads` for binary media. Mutations use the
 same loopback Host, Origin and CSRF checks as chat. Job responses include reusable
 input/mask metadata and capability-scoped preview URLs; no provider credentials

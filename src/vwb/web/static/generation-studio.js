@@ -1,6 +1,7 @@
 import htm from './vendor/htm.mjs';
 import {WORKSPACE_FILE_MIME, isActiveJob, pointInCanvas, fitPlacement, scalePlacement, movePlacement,
-  boxFromPoints, imageSize, workspaceDrop, inputLimit, draftDefaults, requestBody, paintStrokes, safeDraft} from './generation-geometry.js';
+  boxFromPoints, imageSize, workspaceDrop, inputLimit, draftDefaults, requestBody, paintStrokes, safeDraft,
+  videoProviders, videoProvider, selectVideoProvider, videoOptions, videoSettingsError} from './generation-geometry.js';
 const {createElement, useState, useEffect, useRef} = window.React;
 const html = htm.bind(createElement);
 const {Button, Icon, Tooltip, MessageBar, SolsticeMark} = window.Eeva;
@@ -24,7 +25,8 @@ function readDraft(key, kind) {
   if (drafts.has(key)) return drafts.get(key);
   try {
     const value = JSON.parse(window.sessionStorage.getItem(`vwb-studio:${key}`));
-    if (value && Array.isArray(value.sources) && Array.isArray(value.strokes)) return {...draftDefaults(kind), ...value};
+    if (value && Array.isArray(value.sources) && Array.isArray(value.strokes)) return {...draftDefaults(kind),
+      ...(kind === 'video' && value.provider === 'openrouter' ? {seconds: '', resolution: '', aspect: ''} : {}), ...value};
   } catch { /* A restricted browser still keeps drafts while this page is open. */ }
   return draftDefaults(kind);
 }
@@ -46,6 +48,13 @@ function IconAction({label, name, ...props}) {
 }
 function Field({label, children, hint, className = ''}) {
   return html`<label className=${`studio-field ${className}`}><span>${label}</span>${children}${hint && html`<small>${hint}</small>`}</label>`;
+}
+function VideoOption({label, value, values, disabled, onChange, suffix = ''}) {
+  const selected = value ?? '', unsupported = selected !== '' && !values.some(item => String(item) === String(selected));
+  return html`<${Field} label=${label}><select aria-label=${label} value=${selected} disabled=${disabled} onChange=${onChange}>
+    <option value="">Provider default</option>
+    ${unsupported && html`<option value=${selected}>${selected}${suffix} · Not advertised</option>`}
+    ${values.map(item => html`<option key=${item} value=${item}>${item}${suffix}</option>`)}</select><//>`;
 }
 function WaitingField({kind}) {
   const canvas = useRef(null);
@@ -180,6 +189,7 @@ function StudioWorkspace({kind, api, requestId, onOpen}) {
   const [capabilities, setCapabilities] = useState(null), [jobs, setJobs] = useState([]), [job, setJob] = useState(null);
   const [error, setError] = useState(''), [loading, setLoading] = useState(true), [busy, updateBusy] = useState(() => busyDrafts.has(key)), [dragging, setDragging] = useState(false);
   const [workspacePath, setWorkspacePath] = useState(''), [showPath, setShowPath] = useState(false), [revision, setRevision] = useState(0);
+  const [catalog, setCatalog] = useState({query: '', status: 'idle', items: []}), [catalogRetry, setCatalogRetry] = useState(0);
   const setDraft = fn => {
     const previous = drafts.get(key) || draftRef.current, next = typeof fn === 'function' ? fn(previous) : {...previous, ...fn};
     draftRef.current = next; remember(key, next); if (alive.current) updateDraft(next);
@@ -198,9 +208,17 @@ function StudioWorkspace({kind, api, requestId, onOpen}) {
     return () => {listeners.delete(listener); if (!listeners.size) subscribers.delete(key);};
   }, [key]);
   const cap = capabilities?.[kind], active = isActiveJob(job), locked = active || busy;
+  const provider = kind === 'video' ? videoProvider(cap, draft.provider || 'google') : null;
+  const openrouter = kind === 'video' && draft.provider === 'openrouter';
+  const modelQuery = (draft.model || '').trim();
+  const currentCatalog = catalog.query === modelQuery ? catalog : {status: 'loading', items: []};
+  const selectedModel = openrouter && currentCatalog.status === 'ready' ? currentCatalog.items.find(model => model.id === modelQuery) : null;
+  const options = videoOptions(provider, selectedModel), operations = kind === 'video' ? provider?.operations || [] : cap?.operations || [];
+  const videoError = kind === 'video' ? videoSettingsError(draft, provider, selectedModel) : '';
   const localBackground = kind === 'image' && draft.operation === 'remove_background' && draft.background_method === 'matte';
   const localJob = job?.kind === 'image' && job.operation === 'remove_background' && job.input?.background_method === 'matte';
-  const canRun = localBackground ? cap?.background_methods?.some(method => method.id === 'matte' && method.available) : cap?.available;
+  const providerAvailable = kind === 'video' ? provider?.available : cap?.available;
+  const canRun = localBackground ? cap?.background_methods?.some(method => method.id === 'matte' && method.available) : providerAvailable;
   const videoSize = draft.resolution === '720p' ? [720, 1280] : [1080, 1920];
   const size = kind === 'image' ? imageSize(draft.size, cap?.size_constraints) || [1024, 1024]
     : draft.aspect === '16:9' ? [...videoSize].reverse() : videoSize;
@@ -232,8 +250,17 @@ function StudioWorkspace({kind, api, requestId, onOpen}) {
       if (current) {setJob(current); setDraft(d => ({...d, jobId: current.id, pendingSubmission: recovered ? null : d.pendingSubmission,
         showResult: current.status === 'completed' ? d.showResult ?? true : false}));}
       const settings = caps[kind];
-      if (settings) setDraft(d => ({...d, model: settings.models.some(m => m.id === d.model) ? d.model : (settings.models.find(m => m.default) || settings.models[0])?.id || '',
-        operation: settings.operations.includes(d.operation) ? d.operation : settings.operations[0]}));
+      if (settings) setDraft(d => {
+        if (kind === 'video') {
+          if (!d.model && !d.videoPreferences && settings.provider && settings.provider !== (d.provider || 'google')) return selectVideoProvider(d, settings.provider, settings);
+          const selected = videoProvider(settings, d.provider || 'google');
+          // A persisted custom path and operation survive refresh, missing keys,
+          // and catalog failures. Never silently route a paid request to Google.
+          return {...d, provider: d.provider || 'google', model: d.model || selected?.default_model || (selected?.models?.find(m => m.default) || selected?.models?.[0])?.id || ''};
+        }
+        return {...d, model: settings.models.some(m => m.id === d.model) ? d.model : (settings.models.find(m => m.default) || settings.models[0])?.id || '',
+          operation: settings.operations.includes(d.operation) ? d.operation : settings.operations[0]};
+      });
       // URLs are re-resolved after reload; only durable paths are stored.
       const restored = await Promise.all(draftRef.current.sources.map(async s => s.url ? s : {...s, ...await loadMetadata(s.path)}));
       const savedMask = draftRef.current.savedMask;
@@ -242,6 +269,23 @@ function StudioWorkspace({kind, api, requestId, onOpen}) {
     }).catch(e => {if (live) setError(e.message);}).finally(() => {if (live) setLoading(false);});
     return () => {live = false; alive.current = false;};
   }, [requestId, kind, revision]);
+  useEffect(() => {
+    if (!openrouter || loading || !provider?.available) return;
+    let live = true;
+    const controller = new AbortController();
+    setCatalog({query: modelQuery, status: 'loading', items: []});
+    const timer = setTimeout(async () => {
+      try {
+        const result = await api(`${base}/video-models?query=${encodeURIComponent(modelQuery)}&limit=50`, {signal: controller.signal});
+        if (!live) return;
+        if (!Array.isArray(result.items)) throw new Error('The video catalog returned an invalid response.');
+        setCatalog({query: modelQuery, status: 'ready', items: result.items.filter(row => row && typeof row.id === 'string'), total: result.total, next_offset: result.next_offset});
+      } catch (e) {
+        if (live) setCatalog({query: modelQuery, status: 'error', items: [], error: e.message});
+      }
+    }, 300);
+    return () => {live = false; clearTimeout(timer); controller.abort();};
+  }, [openrouter, modelQuery, base, loading, provider?.available, catalogRetry, revision]);
   useEffect(() => {
     if (!job || !isActiveJob(job)) return;
     let live = true, timer;
@@ -261,6 +305,7 @@ function StudioWorkspace({kind, api, requestId, onOpen}) {
     timer = setTimeout(poll, 1000); return () => {live = false; clearTimeout(timer);};
   }, [job?.id, isActiveJob(job)]);
   const changedOperation = operation => {
+    if (kind === 'video') {setError(''); setDraft({operation, showResult: false}); return;}
     setError(''); setDraft(d => ({...d, operation, strokes: [], savedMask: null, box: null, place: d.sources[0]?.width ? fitPlacement(d.sources[0], size) : null,
       markup: false, showResult: false, sources: operation === 'text' ? [] : d.sources.slice(0, inputLimit(kind, operation)).filter(s => (kind === 'video' && ['edit', 'extend'].includes(operation)) === (s.kind === 'video'))}));
   };
@@ -307,6 +352,10 @@ function StudioWorkspace({kind, api, requestId, onOpen}) {
     setBusy(true); setError('');
     try {
       const d = draftRef.current;
+      if (kind === 'video') {
+        const invalid = videoSettingsError(d, provider, selectedModel);
+        if (invalid) throw new Error(invalid);
+      }
       // Validate the form before uploading any optional drawing.
       let payload = requestBody(d, kind, crypto.randomUUID(), d.operation === 'inpaint' ? {path: 'pending-mask'} : null, cap.size_constraints);
       const {idempotency_key, ...identity} = payload;
@@ -363,7 +412,8 @@ function StudioWorkspace({kind, api, requestId, onOpen}) {
         return {...entry, ...await loadMetadata(entry.path)};
       }));
       const savedMask = selected.reusable_mask ? {...selected.reusable_mask, ...await loadMetadata(selected.reusable_mask.path)} : null;
-      if (alive.current) setDraft(d => ({...d, ...Object.fromEntries(['operation', 'background_method', 'prompt', 'model', 'quality', 'size', 'transparent', 'allow_text', 'subject', 'seconds', 'resolution', 'aspect', 'place', 'box'].filter(k => input[k] !== undefined).map(k => [k, input[k]])),
+      if (alive.current) setDraft(d => ({...d, ...(kind === 'video' ? {provider: input.provider || 'google', seconds: input.seconds ?? '', resolution: input.resolution ?? '', aspect: input.aspect ?? '', generate_audio: input.generate_audio ?? '', seed: input.seed ?? ''} : {}),
+        ...Object.fromEntries(['operation', 'background_method', 'prompt', 'model', 'quality', 'size', 'transparent', 'allow_text', 'subject', 'seconds', 'resolution', 'aspect', 'place', 'box'].filter(k => input[k] !== undefined).map(k => [k, input[k]])),
         background_method: input.background_method || (input.operation === 'remove_background' ? 'sunburst' : d.background_method),
         sources: restored, strokes: [], savedMask, markup: false, showResult: false}));
       if (input.mask && !savedMask) setError('Settings restored. Draw a new mask before generating another inpaint.');
@@ -372,7 +422,7 @@ function StudioWorkspace({kind, api, requestId, onOpen}) {
   const updateSize = (index, value) => setDraft(d => {const next = [...d.size]; next[index] = value === '' ? '' : Number(value);
     const normalized = imageSize(next, cap?.size_constraints); return {...d, size: next, showResult: false,
       place: normalized && d.sources[0]?.width ? fitPlacement(d.sources[0], normalized) : d.place};});
-  const status = error ? {tone: 'error', text: error} : !loading && !canRun && !active ? {tone: 'info', text: `The ${kind === 'image' ? 'image' : 'video'} provider is not configured. Add its gateway credentials to enable generation.${cap?.background_methods?.some(method => method.id === 'matte' && method.available) ? ' Local background removal remains available.' : ''}`}
+  const status = error ? {tone: 'error', text: error} : !loading && !canRun && !active ? {tone: 'info', text: `The ${kind === 'image' ? 'image' : provider?.label || draft.provider || 'video'} provider is not configured. Add its gateway credentials to enable generation.${cap?.background_methods?.some(method => method.id === 'matte' && method.available) ? ' Local background removal remains available.' : ''}`}
     : active ? {tone: 'progress', text: job.status === 'queued' ? 'Queued. This job will start when a generation slot is free.' : `${localJob ? 'Preparing your cutout and background mask' : `Creating your ${kind}`}. You can keep working in another tab.`}
     : job?.status === 'failed' || job?.status === 'interrupted' ? {tone: 'error', text: job.error || 'This job stopped before an output was saved. Review the settings and try again.'}
     : job?.status === 'cancelled' ? {tone: 'info', text: localJob ? 'Background removal stopped.' : 'Stopped locally. A provider request may still finish and incur charges.'}
@@ -386,28 +436,54 @@ function StudioWorkspace({kind, api, requestId, onOpen}) {
       <${Tooltip} content="Refresh jobs and capabilities"><${Button} variant="text" iconOnly aria-label="Refresh studio" disabled=${busy} onClick=${() => setRevision(n => n + 1)}><${Icon} name="refresh" size=${16}/><//><//></header>
     ${status && html`<div className="studio-status"><${MessageBar} tone=${status.tone}>${status.text}<//></div>`}
     ${loading ? html`<div className="studio-initial">Loading studio controls…</div>` : html`<form className="studio-form" onSubmit=${submit}>
-      <div className="studio-mode-row"><${Field} label="Operation"><select value=${draft.operation} disabled=${locked} onChange=${e => changedOperation(e.target.value)}>${(cap?.operations || []).map(op => html`<option key=${op} value=${op}>${labels[op] || op}</option>`)}</select><//>
-        <${Field} label="Model">${localBackground ? html`<div className="studio-local-model">Local matte · No model call</div>` : html`<select value=${draft.model} disabled=${locked || !cap?.models?.length} onChange=${e => setDraft({model: e.target.value})}>${(cap?.models || []).map(model => html`<option key=${model.id} value=${model.id}>${model.label}</option>`)}</select>`}<//></div>
+      ${kind === 'video' && html`<div className="studio-video-provider"><${Field} label="Video provider"><select aria-label="Video provider" value=${draft.provider || 'google'} disabled=${locked} onChange=${e => {setError(''); setDraft(d => selectVideoProvider(d, e.target.value, cap));}}>
+        ${!provider && html`<option value=${draft.provider}>${draft.provider} · Unavailable</option>`}
+        ${videoProviders(cap).map(row => html`<option key=${row.id} value=${row.id}>${row.label || row.id}${row.available ? '' : ' · Not configured'}</option>`)}</select><//></div>`}
+      <div className="studio-mode-row"><${Field} label="Operation"><select aria-label="Operation" value=${draft.operation} disabled=${locked} onChange=${e => changedOperation(e.target.value)}>
+        ${!operations.includes(draft.operation) && html`<option value=${draft.operation}>${labels[draft.operation] || draft.operation} · Unsupported</option>`}
+        ${operations.map(op => html`<option key=${op} value=${op}>${labels[op] || op}</option>`)}</select><//>
+        ${openrouter ? html`<${Field} label="OpenRouter model path" hint="Search by name or enter an exact provider/model path."><input aria-label="OpenRouter model path" type="search" list=${`studio-video-models-${requestId}`} value=${draft.model} disabled=${locked} autoComplete="off" spellCheck="false" maxLength="180"
+          placeholder="minimax/hailuo-3" aria-describedby=${`studio-video-model-status-${requestId}`} onChange=${e => {setError(''); setDraft({model: e.target.value, showResult: false});}}/>
+          <datalist id=${`studio-video-models-${requestId}`}>${currentCatalog.items.map(row => html`<option key=${row.id} value=${row.id}>${row.name || row.id}</option>`)}</datalist><//>`
+        : html`<${Field} label="Model">${localBackground ? html`<div className="studio-local-model">Local matte · No model call</div>` : html`<select value=${draft.model} disabled=${locked || !(kind === 'video' ? provider : cap)?.models?.length} onChange=${e => setDraft({model: e.target.value})}>
+          ${kind === 'video' && !(provider?.models || []).some(row => row.id === draft.model) && html`<option value=${draft.model}>${draft.model || 'Choose a model'} · Unavailable</option>`}
+          ${((kind === 'video' ? provider : cap)?.models || []).map(model => html`<option key=${model.id} value=${model.id}>${model.label || model.name || model.id}</option>`)}</select>`}<//>`}</div>
+      ${openrouter && html`<div className="studio-video-model-status" id=${`studio-video-model-status-${requestId}`} role="status" aria-live="polite">
+        ${!provider?.available ? 'Configure OpenRouter on the host to search models and generate video. Your model path is saved.'
+          : currentCatalog.status === 'error' ? html`<span>Could not load the OpenRouter video catalog: ${currentCatalog.error} Your model path is saved.</span><${Button} type="button" variant="text" size="sm" disabled=${locked} onClick=${() => setCatalogRetry(n => n + 1)}>Retry model search<//>`
+          : currentCatalog.status !== 'ready' ? 'Searching the live OpenRouter video catalog…'
+          : selectedModel ? html`<strong>${selectedModel.name || selectedModel.id}</strong>${selectedModel.description && html`<p>${selectedModel.description}</p>`}`
+          : html`<span>${currentCatalog.items.length ? `${currentCatalog.items.length} matching models. Choose an exact path from the suggestions.` : 'No matching video model found. Check the exact provider/model path.'}${currentCatalog.next_offset != null ? ' Refine your search to see more matches.' : ''}</span>`}
+        ${selectedModel && html`<small>Options come from the live catalog. Provider default leaves an option unset.${draft.operation === 'reference' ? ' Reference support requires a provider check; the catalog does not declare it.' : ''}</small>`}
+      </div>`}
+      ${kind === 'video' && videoError && (!openrouter || selectedModel) && html`<p className="studio-video-validation" role="status">${videoError}</p>`}
       ${kind === 'image' && draft.operation === 'remove_background' && html`<div className="studio-background-method"><${Field} label="Background removal method"><select value=${draft.background_method} disabled=${locked} onChange=${e => setDraft({background_method: e.target.value, showResult: false})}>${(cap?.background_methods || []).map(method => html`<option key=${method.id} value=${method.id} disabled=${!method.available}>${method.label}${method.available ? '' : ' · Not configured'}</option>`)}</select><//></div>`}
       <p className="studio-operation-note">${localBackground ? 'Keep the source pixels and remove their background locally. Draw a region around the subject if needed. Inspect the cutout and refine its background mask before using it.' : kind === 'video' && draft.operation === 'edit' ? 'Add one video and describe the changes to its scene or motion.' : instructions[draft.operation]}</p>
       <div className=${`studio-stage ${active ? 'working' : ''}`}>
         ${active ? html`<${WaitingField} kind=${localJob ? 'cutout' : kind}/>` : resultVisible ? html`<div className="studio-result-preview">${kind === 'image' ? html`<img src=${output.url} alt=${localJob ? 'Source-preserving cutout' : 'Generated image'}/>` : html`<video src=${output.url} controls playsInline preload="metadata"/>`}<span>${output.width && output.height ? `${output.width} × ${output.height}` : ''}${output.seconds ? ` · ${output.seconds.toFixed(1)} s` : ''}</span></div>`
           : source && source.kind !== 'video' && source.width && source.height ? html`<${SourceCanvas} draft=${draft} setDraft=${setDraft} size=${size} disabled=${locked} onError=${setError}/>`
           : source?.kind === 'video' ? html`<div className="studio-result-preview"><video src=${source.url} controls playsInline preload="metadata"/><span>Source video</span></div>`
-          : html`<div className="studio-empty"><div className="studio-empty-frame" style=${{aspectRatio: kind === 'image' ? `${size[0]}/${size[1]}` : draft.aspect.replace(':', '/')}}><${Icon} name=${kind === 'image' ? 'sparkles' : 'file'} size=${18}/></div>
+          : html`<div className="studio-empty"><div className="studio-empty-frame" style=${{aspectRatio: kind === 'image' ? `${size[0]}/${size[1]}` : (draft.aspect || '16:9').replace(':', '/')}}><${Icon} name=${kind === 'image' ? 'sparkles' : 'file'} size=${18}/></div>
             <strong>${kind === 'image' ? 'Your next image starts here' : 'Your next clip starts here'}</strong><p>${maxInputs ? 'Drop a file from your computer or workspace, or start with a prompt below.' : 'Write a prompt below, or choose an operation that uses a source.'}</p>
             ${maxInputs > 0 && html`<${Button} variant="secondary" size="sm" type="button" disabled=${locked} onClick=${() => uploadInput.current.click()}><${Icon} name="upload" size=${14}/>Add ${acceptsVideo ? 'video' : 'image'}<//>`}</div>`}
       </div>
-      ${resultVisible && html`<div className="studio-result-actions"><${Button} type="button" size="sm" variant="secondary" onClick=${() => useOutput(output)}>Edit this ${kind}<//>
+      ${resultVisible && html`<div className="studio-result-actions">${(kind === 'image' || operations.includes('edit')) && html`<${Button} type="button" size="sm" variant="secondary" onClick=${() => useOutput(output)}>Edit this ${kind}<//>`}
         ${job.result.background_mask && html`<${Button} type="button" size="sm" variant="secondary" disabled=${busy} onClick=${useBackgroundMask}>Use background mask<//>`}
         <${Button} type="button" size="sm" variant="text" onClick=${() => onOpen?.({id: `file:${output.path}`, kind: 'file', title: output.path.split('/').at(-1), path: output.path})}>Open file<//>
         <a href=${output.url} download>Download</a><${Button} type="button" size="sm" variant="text" onClick=${() => setDraft({showResult: false})}>Back to source<//></div>`}
       ${resultVisible && html`<details className="studio-output-details"><summary>Generation details</summary><dl>
-        <dt>Model</dt><dd>${localJob ? 'Local matte. No model call.' : job.result.model || job.input?.model}</dd><dt>Operation</dt><dd>${labels[job.operation] || job.operation}</dd>
+        ${kind === 'video' && html`<dt>Provider</dt><dd>${job.input?.provider || 'google'}</dd>`}<dt>Model</dt><dd>${localJob ? 'Local matte. No model call.' : job.result.model || job.input?.model}</dd><dt>Operation</dt><dd>${labels[job.operation] || job.operation}</dd>
         ${kind === 'image' && !localJob && html`<dt>Effort</dt><dd>${job.input?.quality}</dd>`}<dt>File</dt><dd>${output.path}</dd>
         <dt>Provenance</dt><dd>${typeof output.provenance === 'string' ? output.provenance : localJob ? 'Source pixels retained. Inspect the segmentation and receipt.' : 'Generated. See the receipt for source lineage.'}</dd>
         ${(job.result.warnings || []).length > 0 && html`<dt>Checks</dt><dd>${job.result.warnings.join(' ')}</dd>`}</dl>
         ${job.result.receipt_path && html`<${Button} type="button" variant="text" size="sm" onClick=${() => onOpen?.({id: `file:${job.result.receipt_path}`, kind: 'file', title: 'Generation receipt', path: job.result.receipt_path})}>Open receipt<//>`}</details>`}
+      ${kind === 'video' && job?.provider_job && html`<details className="studio-output-details studio-provider-job" open=${['failed', 'cancelled', 'interrupted'].includes(job.status)}><summary>Provider job details</summary><dl>
+        <dt>Provider</dt><dd>${job.provider_job.provider || job.input?.provider}</dd>
+        <dt>Model</dt><dd>${job.provider_job.model || job.input?.model}</dd>
+        <dt>Job ID</dt><dd>${job.provider_job.id || 'Not recorded'}</dd>
+        <dt>Last status</dt><dd>${job.provider_job.status || 'Unknown'}</dd></dl>
+        ${['failed', 'cancelled', 'interrupted'].includes(job.status) && html`<p>Local ${job.status === 'cancelled' ? 'cancellation' : 'failure'} does not confirm that the provider stopped. Check this job before submitting another paid request.</p>`}
+      </details>`}
       ${!resultVisible && source && kind === 'image' && html`<div className="studio-canvas-tools">
         ${draft.operation === 'edit' && html`<${Button} type="button" size="sm" variant="secondary" pressed=${!!draft.markup} disabled=${locked} onClick=${() => setDraft(d => ({...d, markup: !d.markup}))}><${Icon} name="pen" size=${14}/>Markup<//>`}
         ${drawing && html`<div className="studio-segment" aria-label="Drawing tool"><button type="button" aria-pressed=${draft.tool === 'brush'} disabled=${locked} onClick=${() => setDraft({tool: 'brush'})}>Brush</button><button type="button" aria-pressed=${draft.tool === 'erase'} disabled=${locked} onClick=${() => setDraft({tool: 'erase'})}>Erase</button></div>
@@ -433,15 +509,19 @@ function StudioWorkspace({kind, api, requestId, onOpen}) {
       ${showPath && html`<div className="studio-path-input"><label>Workspace file path<input value=${workspacePath} placeholder="work/image.png" onChange=${e => setWorkspacePath(e.target.value)} onKeyDown=${e => {if (e.key === 'Enter') {e.preventDefault(); addWorkspace(workspacePath);}}}/></label><${Button} type="button" size="sm" variant="secondary" disabled=${locked || !workspacePath.trim()} onClick=${() => addWorkspace(workspacePath.trim())}>Add file<//></div>`}
       <div className="studio-prompt-panel">${localBackground ? html`<p className="studio-local-note">Local segmentation is approximate. It creates a cutout and a source-sized background mask you can refine in Inpaint. No provider request is made.</p>` : draft.operation === 'remove_background' ? html`<${Field} label="Subject to keep"><textarea rows="2" value=${draft.subject} disabled=${locked} maxLength="2000" placeholder="The glass bottle in the foreground" onChange=${e => setDraft({subject: e.target.value})}/><//>`
         : html`<${Field} label=${kind === 'image' ? 'Describe your image' : 'Describe your video'}><textarea rows="3" value=${draft.prompt} disabled=${locked} maxLength="20000" placeholder=${draft.operation === 'inpaint' ? 'What should replace the marked area?' : draft.operation === 'outpaint' ? 'Describe the space around your image…' : kind === 'image' ? 'A subject, a setting, a mood. Make it yours…' : 'Describe the scene, movement and camera…'} onChange=${e => setDraft({prompt: e.target.value})}/><//>`}
-        <div className="studio-settings">${kind === 'image' ? html`
+        <div className=${`studio-settings ${kind === 'video' ? 'studio-video-settings' : ''}`}>${kind === 'image' ? html`
           ${!['inpaint', 'remove_background'].includes(draft.operation) && html`<${Field} label="Width"><input type="number" min="16" max=${cap?.size_constraints?.max_edge || 3840} step="16" value=${draft.size[0]} disabled=${locked} onChange=${e => updateSize(0, e.target.value)}/><//><span className="studio-size-times">×</span><${Field} label="Height"><input type="number" min="16" max=${cap?.size_constraints?.max_edge || 3840} step="16" value=${draft.size[1]} disabled=${locked} onChange=${e => updateSize(1, e.target.value)}/><//>`}
           ${!localBackground && html`<${Field} label="Effort"><select value=${draft.quality} disabled=${locked} onChange=${e => setDraft({quality: e.target.value})}>${(cap?.quality || []).map(q => html`<option key=${q} value=${q}>${q === 'xhigh' ? 'Extra high' : q[0].toUpperCase() + q.slice(1)}</option>`)}</select><//>`}
           ${['create', 'edit'].includes(draft.operation) && html`<label className="studio-check"><input type="checkbox" checked=${draft.transparent} disabled=${locked} onChange=${e => setDraft({transparent: e.target.checked})}/>Transparent background</label><label className="studio-check"><input type="checkbox" checked=${draft.allow_text} disabled=${locked} onChange=${e => setDraft({allow_text: e.target.checked})}/>Allow text</label>`}
-          ` : html`<${Field} label="Duration"><select value=${draft.seconds} disabled=${locked} onChange=${e => setDraft({seconds: Number(e.target.value)})}>${Array.from({length: (cap?.seconds?.max || 10) - (cap?.seconds?.min || 3) + 1}, (_, i) => i + (cap?.seconds?.min || 3)).map(s => html`<option key=${s} value=${s}>${s} seconds</option>`)}</select><//>
-            <${Field} label="Resolution"><select value=${draft.resolution} disabled=${locked} onChange=${e => setDraft({resolution: e.target.value})}>${(cap?.resolutions || []).map(r => html`<option key=${r}>${r}</option>`)}</select><//>
-            <${Field} label="Aspect"><select value=${draft.aspect} disabled=${locked} onChange=${e => setDraft({aspect: e.target.value})}>${(cap?.aspects || []).map(a => html`<option key=${a}>${a}</option>`)}</select><//>`}</div>
+          ` : html`<${VideoOption} label="Duration" value=${draft.seconds} values=${options.seconds} suffix=" seconds" disabled=${locked || openrouter && !selectedModel} onChange=${e => setDraft({seconds: e.target.value === '' ? '' : Number(e.target.value)})}/>
+            <${VideoOption} label="Resolution" value=${draft.resolution} values=${options.resolutions} disabled=${locked || openrouter && !selectedModel} onChange=${e => setDraft({resolution: e.target.value})}/>
+            <${VideoOption} label="Aspect" value=${draft.aspect} values=${options.aspects} disabled=${locked || openrouter && !selectedModel} onChange=${e => setDraft({aspect: e.target.value})}/>
+            ${options.audio && html`<${Field} label="Generate audio"><select value=${draft.generate_audio === true ? 'true' : draft.generate_audio === false ? 'false' : ''} disabled=${locked} onChange=${e => setDraft({generate_audio: e.target.value === '' ? '' : e.target.value === 'true'})}>
+              <option value="">Provider default</option><option value="true">On</option><option value="false">Off</option></select><//>`}
+            ${options.seed && html`<${Field} label="Seed"><input type="number" min="0" max="2147483647" step="1" value=${draft.seed ?? ''} placeholder="Random" disabled=${locked} onChange=${e => setDraft({seed: e.target.value})}/><//>`}
+            <${Button} type="button" variant="text" size="sm" disabled=${locked} onClick=${() => setDraft({seconds: '', resolution: '', aspect: '', generate_audio: '', seed: ''})}>Reset video options<//>`}</div>
         <div className="studio-submit-row"><span>${kind === 'image' && !['inpaint', 'remove_background'].includes(draft.operation) ? `Canvas ${size[0]} × ${size[1]} px. ` : ''}Saved in work/studio. ${(active ? localJob : localBackground) ? 'No provider charges.' : 'Provider charges apply.'}</span>
-          ${active ? html`<${Button} type="button" variant="secondary" size="sm" disabled=${busy} onClick=${cancel}><${Icon} name="square" size=${14}/>Stop job<//>` : html`<${Button} type="submit" variant="secondary" disabled=${busy || !canRun || !localBackground && !draft.model} loading=${busy}><${Icon} name="sparkles" size=${14}/>${draft.operation === 'remove_background' ? 'Remove background' : `Generate ${kind}`}<//>`}</div>
+          ${active ? html`<${Button} type="button" variant="secondary" size="sm" disabled=${busy} onClick=${cancel}><${Icon} name="square" size=${14}/>Stop job<//>` : html`<${Button} type="submit" variant="secondary" disabled=${busy || !canRun || !!videoError || !localBackground && !draft.model} loading=${busy}><${Icon} name="sparkles" size=${14}/>${draft.operation === 'remove_background' ? 'Remove background' : `Generate ${kind}`}<//>`}</div>
       </div>
       ${jobs.length > 0 && html`<details className="studio-history"><summary>Recent generations <span>${jobs.length}</span></summary><div>${jobs.map(previous => html`<div className="studio-history-row" key=${previous.id}><button type="button" disabled=${active || busy} onClick=${() => {setJob(previous); setDraft({jobId: previous.id, showResult: previous.status === 'completed'});}}><strong>${labels[previous.operation] || previous.operation}</strong><span>${previous.status}</span><small>${previous.created ? new Date(typeof previous.created === 'number' ? previous.created * 1000 : previous.created).toLocaleString() : ''}</small></button>
         <${Button} variant="text" type="button" size="sm" disabled=${locked || !previous.input} onClick=${() => reuse(previous)}>Reuse settings<//>
