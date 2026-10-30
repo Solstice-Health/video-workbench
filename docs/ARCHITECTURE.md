@@ -136,8 +136,10 @@ required and there is no host execution/installation fallback.
 Chat attachments use immutable originals under `.attachments/<id>/` and independent
 editable copies under `work/attachments/<id>/`. Public chat and queued messages store
 IDs, SHA-256, MIME/kind, filename, byte count and work path; no base64 blobs. PDF/text/
-image/unknown files do not become video sources. Valid video uploads retain source
-indexing. `attachment_list`, `attachment_read` and `attachment_remember` provide
+image/unknown files do not become video sources. Video uploads get stable source
+identities; uploading or mentioning a file does not launch analysis. Chat defaults
+to on-demand indexing through `index_build`, with explicit CLI
+`--no-skip-index` available for eager indexing. `attachment_list`, `attachment_read` and `attachment_remember` provide
 pinned inspection and persistent summaries. Unknown binaries are retained for an
 appropriate sandbox parser, never automatically executed or unpacked.
 Bulk path selections use `ChatTurn.context.folders/files`, independently of the

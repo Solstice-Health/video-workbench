@@ -245,7 +245,12 @@ try{
  const search=page.getByRole('combobox',{name:'Search workflows'});
  const list=page.getByRole('listbox',{name:'Choose a workflow'});
  const option=page.getByRole('option',{name:/Build brand context/});
- const open=async()=>{await entry.click();await list.waitFor();await option.waitFor();};
+ // Reopening briefly exposes the old catalog before its refresh effect clears
+ // it. Wait for the new response and focus before issuing keyboard input.
+ const open=async()=>{
+  const refreshed=page.waitForResponse(response=>new URL(response.url()).pathname.endsWith('/features'));
+  await entry.click();await refreshed;await list.waitFor();await option.waitFor();await waitFocused(search);
+ };
  const focused=locator=>locator.evaluate(node=>document.activeElement===node);
  const waitFocused=async locator=>{await page.waitForFunction(node=>document.activeElement===node,await locator.elementHandle());};
  await input.fill('Keep my draft');await open();assert.equal(await focused(search),true);

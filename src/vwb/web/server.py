@@ -181,7 +181,7 @@ class Workbench:
                     if edited is not None:
                         job = self.queue.enqueue(target, message=edited["text"], mode="now",
                             attachment_refs=edited["attachments"], context=edited["context"],
-                            skip_index=not any(ref["kind"] == "video" for ref in edited["attachments"]),
+                            skip_index=True,
                             main_config=main_config, idempotency_key=f"history:{operation}", turn_lock_held=target.id == ws.id)
                     response = {"request_id": target.id, "history": result, "job": job}
                     saved["response"] = response
@@ -434,7 +434,7 @@ class Workbench:
             if main_config:
                 models.set_selection(ws, main_config["selection"], self.runs_dir)
             prompts.set_selection(ws, prompts.selection(runs_dir=self.runs_dir))
-            job = self.queue.enqueue(ws, message=message, attachment_refs=refs, skip_index=not sources, context=context, main_config=main_config)
+            job = self.queue.enqueue(ws, message=message, attachment_refs=refs, skip_index=True, context=context, main_config=main_config)
         except BaseException:
             shutil.rmtree(ws.root)
             raise
@@ -947,7 +947,7 @@ class Handler(BaseHTTPRequestHandler):
                         refs = chat_attachments.ingest(ws, attachments)
                         job = self.app.queue.enqueue(ws, message=message, mode=body.get("mode", "queue"),
                                                      attachment_refs=refs,
-                                                     skip_index=not any(ref["kind"] == "video" for ref in refs),
+                                                     skip_index=True,
                                                      context=body.get("context"),
                                                      main_config=models.explicit_runtime(ws, self.app.runs_dir))
                         return self._json({"job": job}, 202)

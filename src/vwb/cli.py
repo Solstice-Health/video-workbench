@@ -41,7 +41,8 @@ def chat(message: Optional[str] = typer.Argument(None, help="What you want, in p
          attach: list[Path] = typer.Option(None, "--attach", "-a", help="Files to attach: videos, documents, images or other files."),
          request: Optional[str] = typer.Option(None, "--request", "-r", help="Continue an existing request."),
          interactive: bool = typer.Option(False, "--interactive", "-i", help="Keep chatting: one conversation, many turns."),
-         skip_index: bool = typer.Option(False, help="Do not (re)build the index first.")):
+         skip_index: bool = typer.Option(True, "--skip-index/--no-skip-index",
+                                        help="Defer indexing to the agent; --no-skip-index explicitly builds it before the turn.")):
     """Chat with the main agent. Each request is one continuous conversation: a new message continues it."""
     from vwb.orchestrator import chat as run_chat
     if message is None and not interactive:

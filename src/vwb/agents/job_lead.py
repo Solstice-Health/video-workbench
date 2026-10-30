@@ -286,7 +286,9 @@ def _opening(ws: Workspace, message: str) -> str:
         return (f"{message}\n\n[harness] Request {ws.id}; no source video is attached. Start from the brief and "
                 "authorized references (including the selected Figma integration). No video index or source narration "
                 "exists. Use canvas_new with duration_s, not source spans; never require a dummy source video.")
-    return f"{message}\n\n[harness] Request {ws.id}; source {req.source().ref}; the edit index is built."
+    return (f"{message}\n\n[harness] Request {ws.id}; available source refs: " + ", ".join(src.ref for src in req.sources)
+            + ". Frame inspection and generation can use these immediately. Do not assume an edit index exists. "
+            "Use index_build(media_id=<ref>) when the task needs indexed transcript, OCR, shot or layout analysis.")
 
 
 def _docs() -> dict[str, Path]:

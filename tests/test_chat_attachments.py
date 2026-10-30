@@ -91,7 +91,7 @@ def test_original_tampering_is_not_sent_to_provider(ws, tmp_path):
         attachments.image_payload(ws, ref)
 
 
-def test_orchestrator_keeps_nonvideo_refs_and_video_legacy_behavior(ws, tmp_path, monkeypatch):
+def test_orchestrator_keeps_all_refs_without_eager_video_indexing(ws, tmp_path, monkeypatch):
     from vwb import orchestrator
     video = tmp_path / "My source.mp4"
     video.write_bytes(b"\x00\x00\x00\x18ftypisom-fake-video-for-intake")
@@ -106,7 +106,7 @@ def test_orchestrator_keeps_nonvideo_refs_and_video_legacy_behavior(ws, tmp_path
     orchestrator.chat("", attach=[document, video], request_id=str(ws.root))
     req = ws.load()
     assert len(req.sources) == 1 and Path(req.sources[0].original_path).name == video.name
-    assert len(req.chat[-1].attachments) == 2 and indexed == [ws.id]
+    assert len(req.chat[-1].attachments) == 2 and indexed == []
     refs = req.chat[-1].attachments
     orchestrator.chat("Follow up", request_id=str(ws.root), attachment_refs=refs, skip_index=True)
     assert len(ws.load().sources) == 1

@@ -79,7 +79,7 @@ def _turn_lock(ws: Workspace) -> _TurnLocks:
 
 
 def chat(message: str, attach: list[Path] | None = None, request_id: str | None = None,
-         skip_index: bool = False, context: dict[str, list[str]] | None = None,
+         skip_index: bool = True, context: dict[str, list[str]] | None = None,
          main_config: dict[str, Any] | None = None,
          attachment_refs: list[dict[str, Any]] | None = None,
          resume_message: str | None = None, workflow_origin: str | None = None) -> dict[str, Any]:
@@ -116,11 +116,9 @@ def chat(message: str, attach: list[Path] | None = None, request_id: str | None 
             req.chat[0].context = context
             req.chat[0].attachments = refs
         ws.save(req)
-        selected_video = any(Path(path).suffix.lower() in chat_attachments.VIDEO_EXTENSIONS
-                             for path in context.get("files", []))
-        # Context-only web turns use skip_index, but an explicit video selection
-        # must become usable before the saved lead session resumes.
-        if ws.load().sources and (not skip_index or selected_video):
+        # Snapshotting gives files stable identities, not a prerequisite for
+        # expensive transcript/OCR analysis. The lead can index when needed.
+        if ws.load().sources and not skip_index:
             console.print("[bold]index[/] building the edit index (cached stages are skipped)")
             build_index(ws, progress=lambda m: console.print(f"  [dim]{m}[/]"))
         kwargs = {"cfg": main_config} if main_config else {}
@@ -134,8 +132,8 @@ def chat(message: str, attach: list[Path] | None = None, request_id: str | None 
                         if resume_message is not None else "")
         media_note = ("\n\n[harness] Videos registered for this turn (immutable snapshots; no upload needed):\n"
                       + "\n".join(f"{src.original_path} -> {src.ref}" for src in registered)
-                      + "\nUse index_overview for all sources; pass media_id to index tools or target='source:<ref>' "
-                      "to media tools to inspect a specific source." if registered else "")
+                      + "\nInspect frames directly with target='source:<ref>'. No index is assumed. "
+                      "Use index_build(media_id) when indexed analysis is needed; index_overview summarizes existing indexes." if registered else "")
         project = ws.project_root
         project_note = ""
         if project:
@@ -143,10 +141,10 @@ def chat(message: str, attach: list[Path] | None = None, request_id: str | None 
             project_note = (f"\n\n[harness] Current project: {name} ({project.name}). Current work directory: {ws.work}. "
                             "Work files are shared across this project's conversations. Media/asset refs and committed "
                             "outputs are scoped to this conversation. The project and working directory can change "
-                            "between turns; use this current location, not a saved path from an earlier turn. Register "
-                            "discovered project videos with media_register(path relative to work/) before using them "
-                            "as media sources, then index_build(media_id) as needed. Explicitly selected videos above "
-                            "are already registered.")
+                            "between turns; use this current location, not a saved path from an earlier turn. Pass "
+                            "project video paths relative to work/ directly to inspection/generation tools; they create "
+                            "stable snapshots automatically. media_register remains available for explicit pinning. "
+                            "Use index_build(media_id) only when the task needs indexed analysis.")
         reply = job_lead.run(ws, message + references.prompt(context) + media_note + project_note + continuation,
                              first_turn=first, **kwargs)
         outputs = ensure_review(ws)

@@ -94,6 +94,10 @@ One folder reference covers its nested files without applying the 12-file
 inline attachment limit to each child. Files are inspected as needed, not
 automatically loaded into model context. Bulk imported videos are work files,
 not automatically indexed media sources; sandbox scripts can transform them.
+Uploading or tagging an individual video also leaves indexing to the agent.
+Frames, contact sheets and generation can use the file immediately; the agent
+builds an index when the requested work needs transcript, OCR, shots or indexed
+layout analysis. Files remain available even if that analysis is unavailable.
 
 Choose up to 100 references across skills, paths and plugins, then write your message. Each conversation keeps its
 own unsent reference selections while switching between chats. These drafts are

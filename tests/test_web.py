@@ -521,7 +521,7 @@ def test_upload_and_create_do_not_attach_source_twice(http):
     assert len(ws.load().sources) == 1
     assert Path(ws.load().sources[0].path).read_bytes() == b"\x00\x00\x00\x18ftypisom-video-bytes"
     assert result["job"]["attachments"] == []  # already staged at intake, not reattached by worker
-    assert not result["job"]["skip_index"]
+    assert result["job"]["skip_index"]
 
 
 def test_create_from_design_without_video_preserves_plugin_and_skips_video_index(http):

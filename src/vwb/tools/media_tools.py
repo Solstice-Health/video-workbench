@@ -228,9 +228,10 @@ def watch_ask(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
 
 
 TOOLS = [
-    Tool("media_register", "Register a downloaded or authored video under work/ as an immutable source, deduplicated "
-         "by SHA-256. Pass a relative path (e.g. downloads/clip.mp4). No re-upload needed. Then use index_build(media_id) "
-         "to index it; registration itself makes no model calls.",
+    Tool("media_register", "Optionally pin a downloaded or authored video under work/ as an immutable source, deduplicated "
+         "by SHA-256. Pass a relative path (e.g. downloads/clip.mp4). Inspection and generation already accept paths "
+         "directly and snapshot automatically. Use index_build(media_id) only for analysis that needs an index; "
+         "registration itself makes no model calls.",
          schema({"path": {"type": "string"}}, ["path"]), media_register, "media.register", "media"),
     Tool("media_frame", "One frame as an image, from the source or a rendered output ('output:short-01' or "
          "'output:short-01@v2'). Give t (seconds) or frame. Optional crop [x,y,w,h], width, and show=['text','blocks',"

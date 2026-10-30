@@ -47,7 +47,7 @@ def test_selected_video_snapshot_is_independent_and_digest_deduplicated(ws):
 
 
 @pytest.mark.parametrize("skip_index", [False, True])
-def test_all_attachments_and_selected_videos_reach_index_before_lead(ws, tmp_path, monkeypatch, skip_index):
+def test_video_inputs_reach_lead_and_only_explicit_indexing_runs_first(ws, tmp_path, monkeypatch, skip_index):
     uploads = [video(tmp_path / f"upload{i}.mp4", str(i).encode()) for i in range(3)]
     video(ws.work / "download.mp4", b"download")
     video(ws.work / "duplicate.mp4", b"1")
@@ -60,7 +60,7 @@ def test_all_attachments_and_selected_videos_reach_index_before_lead(ws, tmp_pat
         events.append("index")
 
     def lead(workspace, message, **kw):
-        assert events[-1] == "index"
+        assert events == ([] if skip_index else ["index"])
         assert all(src.ref in message for src in workspace.load().sources)
         events.append("lead")
         return "done"
@@ -71,11 +71,12 @@ def test_all_attachments_and_selected_videos_reach_index_before_lead(ws, tmp_pat
     monkeypatch.setattr(orchestrator.page, "build", lambda _: Path("review.html"))
     context = {"files": ["download.mp4", "duplicate.mp4", "notes.txt"], "folders": ["."]}
     orchestrator.chat("Use these", attach=uploads, request_id=str(ws.root), context=context, skip_index=skip_index)
-    assert events == ["index", "lead"]
+    assert events == (["lead"] if skip_index else ["index", "lead"])
     turn = ws.load().chat[-1]
     assert turn.text == "Use these" and len(turn.attachments) == 3
-    # Replaying the same attachment refs and selections does not add sources.
-    orchestrator.chat("Again", attachment_refs=turn.attachments, request_id=str(ws.root), context=context)
+    # Replaying the same refs does not add sources or implicitly build an index.
+    events.clear()
+    orchestrator.chat("Again", attachment_refs=turn.attachments, request_id=str(ws.root), context=context, skip_index=skip_index)
     assert len(ws.load().sources) == 4
 
 
@@ -89,6 +90,32 @@ def test_work_mapping_and_folder_selection_remains_lazy(ws, tmp_path, monkeypatc
     src, = register_inputs(ws, [], {"files": ["clip.mp4"]})
     assert src.original_path == str(project / "work" / "clip.mp4")
     assert Path(src.path).read_bytes() == (ws.work / "clip.mp4").read_bytes()
+
+
+def test_opening_lists_all_sources_without_claiming_an_index_exists(ws):
+    from vwb.agents.job_lead import _opening
+    refs = [register_work_file(ws, video(ws.work / f"clip{i}.mp4", str(i).encode()).name) for i in range(2)]
+    message = _opening(ws, "Inspect these clips")
+    assert all(ref.ref in message for ref in refs)
+    assert "index_build" in message and "Do not assume an edit index exists" in message
+    assert "edit index is built" not in message and not list(ws.index.rglob("*.sqlite"))
+
+
+@pytest.mark.parametrize("flags,eager", [([], False), (["--skip-index"], False), (["--no-skip-index"], True)])
+def test_cli_requires_explicit_eager_indexing(ws, monkeypatch, flags, eager):
+    from typer.testing import CliRunner
+
+    from vwb.cli import app
+    calls = []
+
+    def chat(message, **kwargs):
+        calls.append(kwargs)
+        return {"reply": "Ready", "request": ws.id, "outputs": [], "review_page": ws.review / "index.html"}
+
+    monkeypatch.setattr(orchestrator, "chat", chat)
+    result = CliRunner().invoke(app, ["chat", "Inspect this", "--request", str(ws.root), *flags])
+    assert result.exit_code == 0, result.output
+    assert calls[0]["skip_index"] is not eager
 
 
 def test_lead_gets_current_project_note_after_moving_between_turns(ws, tmp_path, monkeypatch):
