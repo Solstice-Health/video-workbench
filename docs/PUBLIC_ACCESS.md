@@ -1,6 +1,8 @@
 # Protected public access
 
-Public access is opt-in. With no public options or `VWB_UI_PUBLIC_URL`, `uv run vwb ui`
+Public access is opt-in on branch `codex/feat-adaptable-canvas`; use the
+[branch-specific clone/update instructions](SETUP.md). With no public options or
+`VWB_UI_PUBLIC_URL` in the process environment or selected `.env`, `uv run vwb ui`
 keeps its existing localhost behavior at `http://127.0.0.1:8765`. Public mode still
 binds to loopback; ngrok or your reverse proxy supplies the HTTPS endpoint.
 
@@ -30,19 +32,35 @@ uv run vwb ui --ngrok --public-url https://workbench.example --no-open
 ```
 
 `workbench.example` is a placeholder; replace it with your public hostname.
-With neither `--public-url` nor `VWB_UI_PUBLIC_URL`, Workbench discovers the HTTPS
-origin assigned by ngrok.
+With neither `--public-url` nor `VWB_UI_PUBLIC_URL` in the environment or `.env`,
+Workbench discovers the HTTPS origin assigned by ngrok. Prefer a stable hostname
+for OAuth; a temporary hostname requires its exact callback to be registered and
+configured before sign-in, and may change at the next launch.
 `--no-open` prints the links without opening a browser. The managed tunnel disables
 ngrok traffic inspection. Press **Ctrl-C** in the launching terminal to stop the
 UI and its managed ngrok process and clean up temporary tunnel logs. Queued
 messages are kept.
 
-`VWB_UI_PUBLIC_URL` is an optional, nonsecret alternative to `--public-url`;
-the flag takes precedence. Export it in the launching shell or service environment.
-The provider-key `.env` loader does not export UI settings. The value must be an
+`VWB_UI_PUBLIC_URL` is an optional, nonsecret alternative to `--public-url`.
+Set it in the launching shell/service or the nearest `.env` at or above the
+checkout (`VWB_ENV_FILE` selects a different file):
+
+```dotenv
+VWB_UI_PUBLIC_URL=https://workbench.example
+```
+
+The flag takes precedence, then explicit process values (including empty strings),
+then `.env`. Workbench reads this allowlisted setting without sourcing or
+bulk-exporting `.env`. Once public startup selects an origin, it pins the canonical
+value in the server environment for callback validation, including a discovered
+ngrok origin. This does not populate the saved Solstice callback. The value must be an
 HTTPS origin with a public hostname and optional port, with no trailing slash,
 path, credentials, query or fragment. For default local mode, leave this setting
-unset and omit both public flags.
+unset in both sources and omit both public flags, or explicitly override it:
+
+```bash
+VWB_UI_PUBLIC_URL= uv run vwb ui --no-open --port 8765
+```
 
 ## Open and share the private link
 
@@ -81,19 +99,29 @@ the host that owns them. Workbench does not enable pooling.
 
 ## Register the Solstice callback
 
-On the **Workbench public/native Auth0 client**, register the exact public HTTPS
-callback printed at startup, for example:
+Obtain an organization-approved **Workbench public/native Auth0 Client ID** from
+the Solstice tenant administrator, or have them register that client for
+authorization-code PKCE without a client secret. Solstice disables dynamic client
+registration, and Workbench ships no default Client ID. The approved client can
+be reused across approved installations if Auth0 allowlists each exact callback;
+teammates do not each need a separate application. Grants remain host-local.
+Register the exact public HTTPS callback printed at startup, for example:
 
 ```text
 https://workbench.example/api/integrations/solstice/callback
 ```
 
-Use that same callback and the Workbench client's Solstice Client ID in
-**Plugins → Manage connections**, then Connect and complete Solstice sign-in
-from the browser that opened the public launch link. The tunnel and access grant
-do not replace client registration or provider sign-in. Do not repurpose an
-unrelated client's callback or borrow its Client ID. A changed public URL needs
-its new exact callback registered and configured before reconnecting.
+Set that same literal callback and the registered public Client ID in `.env`
+(`VWB_SOLSTICE_REDIRECT_URI`, `VWB_SOLSTICE_CLIENT_ID`) or
+**Plugins → Manage connections**. Saved UI integration settings take precedence
+over the environment/file defaults. Workbench does not derive the callback from
+`VWB_UI_PUBLIC_URL` or `--public-url`; verify it explicitly. Then Connect and
+complete Solstice sign-in from the browser that opened the public launch link.
+The tunnel and access grant do not replace client registration or provider sign-in.
+Do not repurpose an unrelated client's callback or borrow its Client ID. Register
+stable public and local callbacks separately, with each exact hostname, port and
+path allowlisted. A changed public URL needs its new exact callback registered
+and configured before reconnecting.
 See [integration setup](INTEGRATIONS.md#required-deployment-and-one-time-sign-in)
 for Auth0 grants/scopes and the other providers' callback paths.
 

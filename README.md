@@ -60,13 +60,14 @@ vwb chat -i -r <request-id>      # keep talking to the same agent: "make short-0
 ## Set up frontend and backend
 
 The complete application is in [Solstice-Health/video-workbench](https://github.com/Solstice-Health/video-workbench).
+Use branch `codex/feat-adaptable-canvas` for the features documented here.
 The Python server includes the React/Eeva frontend. They ship together and use one
 origin; there is no separate frontend build or server. Use macOS on Apple Silicon
 for the full video-indexing workflow. Install uv, Node 22 or 24 with npm, FFmpeg and
 Docker Desktop, then:
 
 ```bash
-git clone git@github.com:Solstice-Health/video-workbench.git
+git clone --branch codex/feat-adaptable-canvas --single-branch git@github.com:Solstice-Health/video-workbench.git
 cd video-workbench
 ./scripts/setup.sh --with-agent --with-browser
 .venv/bin/vwb ui
@@ -84,14 +85,21 @@ uv run vwb ui                       # http://127.0.0.1:8765, opens your browser
 uv run vwb ui --no-open --port 8765  # start without opening a tab
 ```
 
+These commands use local mode when `VWB_UI_PUBLIC_URL` is unset in both the shell
+and `.env`. To override a saved public origin for a local launch, use
+`VWB_UI_PUBLIC_URL= uv run vwb ui --no-open`.
+
 For a trusted group's shared Workbench, use `uv run vwb ui --ngrok --no-open`;
 add `--public-url https://workbench.example` to reuse your configured ngrok domain
 (replace the placeholder). This requires host-installed/configured ngrok. Share
 the printed private launch link only with trusted collaborators: it grants full
 access to that host's Workbench, without per-user isolation. Default localhost
-behavior is unchanged. See [protected public access](docs/PUBLIC_ACCESS.md) for
-URL ownership, OAuth registration and shutdown. If 8765 is busy, coordinate a
-restart; do not start another UI against the same runs directory.
+behavior is unchanged. `VWB_UI_PUBLIC_URL` can also be set in `.env`;
+`--public-url` overrides it. Use a stable URL for OAuth, and explicitly configure
+the exact registered Solstice callback in `.env` or Manage connections; Workbench
+does not derive or register it automatically. See [protected public access](docs/PUBLIC_ACCESS.md)
+for reverse-proxy launch commands, URL ownership, OAuth registration and shutdown.
+If 8765 is busy, coordinate a restart; do not start another UI against the same runs directory.
 
 The Eeva frontend opens your existing conversations, rendered videos and review
 flags. It supports source uploads, live provider activity, expandable thinking
@@ -124,10 +132,20 @@ The composer model picker switches the main agent and exposes context, effort an
 supported speed modes. Models and APIs manages visible models and provider keys.
 See [model and API settings](docs/MODELS.md) for available IDs and runtime behavior.
 
-Keys come from the nearest `.env` above the repo (or `VWB_ENV_FILE`); see `.env.example`. Provider keys saved in
-Workbench override these baseline values through a private host file. The Claude fallback uses
-the direct Anthropic API and requires an Anthropic key. Local hardware for full video indexing: Apple Silicon
-(MLX Whisper, Apple Vision).
+Keys come from the nearest `.env` at or above the repo (or `VWB_ENV_FILE`); see `.env.example`.
+The same file supports only four public host settings: `VWB_UI_PUBLIC_URL`,
+`VWB_SOLSTICE_MCP_URL`, `VWB_SOLSTICE_CLIENT_ID` and `VWB_SOLSTICE_REDIRECT_URI`.
+For these settings, shell/service values, including explicit empty strings, override
+the file; saved UI integration settings take precedence over Solstice defaults.
+Workbench reads these settings without exporting the whole `.env`. See the
+[optional Solstice example](docs/INTEGRATIONS.md#required-deployment-and-one-time-sign-in).
+No default Solstice Client ID ships with Workbench; an organization-approved
+public client can be reused across approved installations with each exact callback
+allowlisted in Auth0. Grants remain local to each host.
+Provider keys saved in Workbench override their baseline values through a private
+host file. The Claude fallback uses the direct Anthropic API and requires an
+Anthropic key. Local hardware for full video indexing: Apple Silicon (MLX Whisper,
+Apple Vision).
 
 After a run:
 ```bash

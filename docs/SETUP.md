@@ -1,6 +1,7 @@
 # Set up and run Video Workbench
 
 The complete application lives in [Solstice-Health/video-workbench](https://github.com/Solstice-Health/video-workbench).
+Use branch `codex/feat-adaptable-canvas` for this setup.
 The Python backend serves the bundled React/Eeva frontend on the same origin.
 There is one version to install and one server to start. No separate frontend
 build, frontend development server or CORS configuration is needed. Node is used
@@ -14,10 +15,12 @@ native API agents, workspace previews, Docker sandbox and renderer, but is not a
 drop-in replacement for the full source-video indexing pipeline. Windows is not
 currently a supported host; the setup script and process controls use POSIX APIs.
 
-Keep this as one trusted user's control-plane service. It binds to loopback and
-stores provider keys, sign-ins and workspaces on that host. Remote access uses an
-SSH tunnel below. Public multi-user hosting needs authentication and workspace
-isolation that this build does not provide.
+The control-plane service binds to loopback and stores provider keys, sign-ins and
+workspaces on that host. Use an SSH tunnel for private remote access, or the
+protected public mode below for a trusted group's shared instance. Public mode
+requires a private launch link/access code and a session cookie. Everyone admitted
+shares the host's conversations, files, settings and integrations; there are no
+per-user accounts, permissions or workspace isolation.
 
 ## Install prerequisites
 
@@ -39,7 +42,7 @@ start a model call, a browser session or a video job.
 ## Clone and set up
 
 ```bash
-git clone git@github.com:Solstice-Health/video-workbench.git
+git clone --branch codex/feat-adaptable-canvas --single-branch git@github.com:Solstice-Health/video-workbench.git
 cd video-workbench
 ./scripts/setup.sh --with-agent --with-browser
 ```
@@ -94,14 +97,23 @@ and `model_request`. Scripts use `sandbox_run(models=true)` and the credential-f
 unset. See [model access from tools and scripts](MODEL_ACCESS.md) for discovery,
 supported operations and generated-file handling.
 
-Keys are resolved from `VWB_ENV_FILE`, or the nearest `.env` above the source
+Keys are resolved from `VWB_ENV_FILE`, or the nearest `.env` at or above the source
 checkout. Provider overrides saved through the UI take precedence and live in
 the host's private `runs/.keys` store. The browser and agent containers do not
 receive provider keys. See [models](MODELS.md), [browser setup](BROWSER.md) and
 [MCP/Figma connections](INTEGRATIONS.md) for capability-specific setup.
 
+That same file also supports the allowlisted public host settings
+`VWB_UI_PUBLIC_URL`, `VWB_SOLSTICE_MCP_URL`, `VWB_SOLSTICE_CLIENT_ID` and
+`VWB_SOLSTICE_REDIRECT_URI`. For these four settings, an explicit shell/service
+value (including an empty string) overrides `.env`; Solstice configuration saved
+in Manage connections takes precedence over those defaults. Values are literal,
+without variable interpolation. Workbench reads only the allowlisted host settings;
+do not source or bulk-export `.env`. See the
+[optional Solstice settings example](INTEGRATIONS.md#required-deployment-and-one-time-sign-in).
+
 To select explicit host paths, export them in the shell before starting the
-server; these are process settings, not provider keys in `.env`:
+server; these path selectors are process settings, not `.env` host settings:
 
 ```bash
 export VWB_ENV_FILE=/absolute/private/path/workbench.env
@@ -125,6 +137,11 @@ Choose the model, context budget, effort and agent prompt in the composer. The
 default prompt is Descriptive; Minimal, Loose and three industry-inspired
 profiles are also available.
 
+For local mode when `.env` contains a public origin, launch with
+`VWB_UI_PUBLIC_URL= .venv/bin/vwb ui --no-open --port 8765`. This explicit empty
+override disables public mode for that process. Select the separately registered
+local Solstice callback in `.env` or Manage connections before connecting locally.
+
 Optional native creative applications are configured in **Plugins and MCPs →
 Manage connections**. After Effects uses macOS ExtendScript and `aerender`;
 Blender MCP prepares its own pinned bridge and matching add-on. Neither desktop
@@ -144,6 +161,27 @@ Open the same localhost URL on your computer. Keep the tunnel running. The
 backend's integrations and files belong to the remote host. A Figma desktop MCP
 connection needs Figma on the control-plane host; it does not automatically reach
 your laptop's desktop app through this tunnel.
+
+For a protected shared HTTPS instance, choose one launch method:
+
+```bash
+# Host-installed/configured ngrok, using your reserved stable hostname:
+.venv/bin/vwb ui --ngrok --public-url https://workbench.example --no-open --port 8765
+# Or an existing HTTPS reverse proxy forwarding to 127.0.0.1:8765:
+.venv/bin/vwb ui --public-url https://workbench.example --no-open --port 8765
+```
+
+Replace the placeholder hostname. `--public-url` overrides `VWB_UI_PUBLIC_URL`
+from the shell or `.env`; public startup pins the canonical origin in the server
+environment for callback validation. Open the printed private launch link.
+Register and configure the exact public Solstice callback separately; setting the
+origin does not fill it in. See [public access](PUBLIC_ACCESS.md) for proxy Host
+headers, temporary ngrok URLs, URL ownership and shutdown, and
+[integration setup](INTEGRATIONS.md#required-deployment-and-one-time-sign-in) for
+the pre-registered public/native Auth0 client, PKCE and sign-in requirements.
+An organization-approved client can serve approved installations with each exact
+callback allowlisted; a separate Client ID per teammate is not required. No
+default Client ID ships with Workbench, and grants stay local to each host.
 
 ## Verify an installation without spending model tokens
 
@@ -170,10 +208,18 @@ Node packages, render-browser downloads, Docker or the shared browser binary.
    before replacing dependencies. A server restart interrupts its current main
    worker, so this build does not promise zero-downtime model turns.
 2. Stop the UI server with Ctrl-C. Keep the same environment file and runs folder.
-3. Record `git rev-parse HEAD`, then `git pull --ff-only` and rerun the setup
-   command used for the installation. Python and renderer lockfiles update
-   together with the UI and backend.
-4. Restart `.venv/bin/vwb ui --no-open --port 8765` and reload the browser once.
+3. Record `git rev-parse HEAD`, then update this feature branch:
+
+   ```bash
+   git fetch origin codex/feat-adaptable-canvas
+   git switch codex/feat-adaptable-canvas
+   git pull --ff-only origin codex/feat-adaptable-canvas
+   ./scripts/setup.sh --with-agent --with-browser
+   ```
+
+   Reuse the setup options chosen for your installation, such as `--ui-only`.
+   Python and renderer lockfiles update together with the UI and backend.
+4. Restart with the same local or public launch command and reload the browser once.
    Queued messages remain paused after a restart. **Resume turn** continues an
    interrupted turn; **Resume queued messages** releases its pending queue.
 
@@ -190,6 +236,8 @@ OAuth grants, provider overrides, browser profiles, conversations, uploaded medi
 renders, caches, virtual environments and `node_modules` remain local and ignored.
 Moving to a new machine requires a separate private data transfer and fresh
 sign-ins where required; a Git clone intentionally does not contain them.
+A repository push does not register an Auth0 client or deploy the upstream
+Solstice gateway/Figma extension. Those are separate administrator actions.
 
 `Solstice-Health/VideoHarnessFrontend` is an older frontend-only export. Use the
 frontend bundled with this repository's backend for matching APIs. Deploying that

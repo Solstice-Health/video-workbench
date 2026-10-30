@@ -258,21 +258,34 @@ The public Solstice repository at commit
 provides content/review tools, optional memory, and a sibling-server directory. Its
 `figma-to-solstice` plugin combines a separate Figma connection with Solstice; it is
 not a Figma proxy. The optional upstream Figma extension prepared with this work
-requires separate review and deployment. No production gateway or Auth0 settings
-are changed by installing Workbench.
+requires separate review and deployment. Installing Workbench or pushing this
+repository does not register an Auth0 application, change tenant settings or
+deploy the upstream gateway/extension.
 
 The reviewable patch, validation results and deployment prerequisites are in
 [`integrations/solstice-figma/`](../integrations/solstice-figma/README.md).
 
-1. Register a **Workbench public/native Auth0 application** with authorization-code
-   and refresh-token grants. Do not reuse Cursor's, Codex's or another unrelated
-   client's registered application or repurpose its callback.
+1. Obtain an organization-approved **Workbench public/native Client ID** from the
+   Solstice Auth0 tenant administrator, or have them pre-register that application.
+   Workbench ships no default Client ID. One approved public client can be reused
+   across approved installations if Auth0 allowlists each exact callback; teammates
+   do not each need a distinct OAuth application or Client ID. Grants remain
+   local to each host. Solstice disables dynamic client registration (DCR);
+   Workbench cannot register it automatically. Use
+   authorization-code with S256 PKCE and refresh-token grants, with token endpoint
+   authentication set to **None**; this client needs no secret.
+   Do not reuse Cursor's, Codex's or another unrelated client's registered
+   application or repurpose its callback.
    Enable API offline access and rotating refresh tokens. Register the exact callback,
    for example `http://127.0.0.1:8765/api/integrations/solstice/callback` locally,
    or `https://workbench.example/api/integrations/solstice/callback` for public
-   access (replace the placeholder with the exact origin printed at startup).
+   access (replace the placeholder with the canonical origin printed at startup).
+   Register local and stable public callbacks separately, including each exact
+   host, port and path needed by your installation.
 2. Configure the registered public `client_id`, `redirect_uri` and documented
-   `gateway_url` in the Integrations panel. The default gateway is
+   `gateway_url` in **Plugins → Manage connections** or the optional `.env`
+   settings below. Workbench does not derive or save the callback from the public
+   origin; explicitly enter the exact registered URI. The default gateway is
    `https://api.solsticehealth.co/mcp`. The Auth0 issuer is
    `https://login-solstice.us.auth0.com/`; the exact gateway URL is the token audience.
    Requested scopes are `mcp:connect openid email offline_access`.
@@ -292,9 +305,9 @@ For ngrok or an existing HTTPS reverse proxy, follow [protected public
 access](PUBLIC_ACCESS.md). Register the exact public HTTPS callback on the
 Workbench Auth0 client and use the same `redirect_uri` in Manage connections.
 Open the private launch link before connecting, and finish sign-in in that
-browser on the same origin. Public access still requires the registered Solstice
-Client ID and user sign-in. A launch link grants access to the shared host;
-it does not create a separate integration account for each visitor.
+browser on the same origin. Connecting Solstice in public mode still requires its
+registered Client ID and user sign-in. A launch link grants access to the shared
+host; it does not create a separate integration account for each visitor.
 
 One shared URL belongs to one host at a time. Separate per-person installations
 need separate URLs, runs/integration state and exact registered callbacks; do not
@@ -302,11 +315,32 @@ pool their endpoints. A changed URL requires updating the registered and configu
 callback before reconnecting. Restarting the UI expires its launch links and
 access cookies, while stored integration grants persist.
 
-The same host configuration can be seeded with `VWB_SOLSTICE_MCP_URL`,
-`VWB_SOLSTICE_CLIENT_ID`, and `VWB_SOLSTICE_REDIRECT_URI`. These are public settings;
-no access token, refresh token, client secret or personal Figma token is accepted
-from the agent. Existing `.env` provider credentials are not used to impersonate a
-Solstice or Figma user.
+Optional Solstice defaults in the nearest `.env` at or above the checkout (or the
+file selected by `VWB_ENV_FILE`):
+
+```dotenv
+VWB_SOLSTICE_MCP_URL=https://api.solsticehealth.co/mcp
+VWB_SOLSTICE_CLIENT_ID=YOUR_REGISTERED_PUBLIC_WORKBENCH_CLIENT_ID
+VWB_SOLSTICE_REDIRECT_URI=https://workbench.example/api/integrations/solstice/callback
+```
+
+Replace the public Client ID and callback placeholders with the registered values.
+For local sign-in, explicitly use the separately registered
+`http://127.0.0.1:8765/api/integrations/solstice/callback` instead. These values are
+literal: `${VWB_UI_PUBLIC_URL}` interpolation is not supported, and setting
+`VWB_UI_PUBLIC_URL` or `--public-url` does not change `VWB_SOLSTICE_REDIRECT_URI`.
+Saved UI integration configuration wins over process settings; explicit process
+values, including empty strings, win over `.env`, followed by built-in defaults.
+If `.env` changes appear ignored, update the saved fields in Manage connections.
+Public startup pins its canonical origin in the server environment for callback
+validation; use that origin's exact callback for public sign-in.
+
+Only these three public integration settings and `VWB_UI_PUBLIC_URL` are read
+through the host-setting allowlist. Do not source or bulk-export `.env`, import
+real credentials from another installation, or seed Solstice tokens or a client
+secret. Provider keys do not impersonate a Solstice or Figma user; Connect still
+requires the user's sign-in. No access token, refresh token, client secret or
+personal Figma token is accepted from the agent.
 
 OAuth state and credentials are stored in `runs/.integrations/solstice/connection.json`
 (file mode 0600, parent directories 0700), outside every request's agent-mounted work
