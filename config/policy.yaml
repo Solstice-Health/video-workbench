@@ -32,6 +32,7 @@ capabilities:
   canvas.configure: allow           # change a working canvas renderer; immutable versions stay pinned
   design_context.read: allow        # scoped source evidence and deterministic authoring checks
   design_context.write: allow       # snapshot/bind user-authorized context; does not grant approval
+  project_memory.read: allow       # current project cited memory and retrieval
   human.ask: allow
   agent.manage: allow             # supervised, permission-inheriting subagents; bounded tree per turn
   artifact.publish: allow         # request-local HTML artifacts and explicit review selections
