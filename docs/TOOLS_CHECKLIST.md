@@ -30,7 +30,8 @@ Spec references: D = decision, X = experiment, R/S = sources (see the spec and t
 - [x] Spawn bounds: depth 3, 6 children per parent, 24 agents total and 6 active by default. At capacity spawning refuses promptly; parents waiting on descendants cannot deadlock a fixed worker pool.
 - [x] Peer messages and child results arrive at tool/model boundaries; durable mailbox and public activity events. They convey no additional permissions.
 - [ ] Automatic RUN-DEGRADED worker restart after 150 calls / 150k context (call-budget notices exist)
-- [x] image_inspect: bounded workspace/asset image crops and zoom with exact display-to-source coordinate mappings
+- [x] image_inspect: bounded attachment/workspace/asset image crops and zoom with exact display-to-source coordinate mappings; shares original-pixel loading and EXIF orientation with image generation/editing
+- [x] Direct image inputs (2026-10-30): image editing, tracing, chart reading and generation references accept attachment IDs or work-relative paths without video registration/indexing; immutable attachment/asset hash checks and input-byte lineage; finite mask bounds, explicit missing region errors and cropped-index-mask rejection
 - [x] sandbox_run: temporary/reusable scripts for any provider, Docker execution, shared work/ only, offline default or separately governed public HTTP(S) proxy; 30-minute deadline, resource/output bounds, background jobs and cancellation; no host execution fallback
 - [x] sandbox_environment: persistent request-local Python venvs, pip/package or Git HTTPS installs, freeze receipts; loose pip --target installs also supported
 - [x] sandbox_status: cross-turn job polling/cancellation and paged logs; four concurrent jobs/request, no automatic replay after supervisor loss

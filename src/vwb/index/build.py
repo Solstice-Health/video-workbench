@@ -135,7 +135,7 @@ class IndexBuilder:
 
         self._stage("shots", {"engine": "adaptive", "v": 1}, self.stage_shots)
         self._shots = self.store.all("SELECT * FROM shots ORDER BY id")
-        self._stage("vision", {"fps": SAMPLE_FPS, "ocr_gap": OCR_MAX_GAP_S, "v": 2}, self.stage_vision)
+        self._stage("vision", {"fps": SAMPLE_FPS, "ocr_gap": OCR_MAX_GAP_S, "v": 3}, self.stage_vision)
         self._stage("text", {"reader2": lever_serves("index.ocr_reader2"), "v": 5}, self.stage_text)
         self._stage("layout", {"v": 3}, self.stage_layout)
         self._stage("asr", asr_settings, lambda: self.stage_asr(reader2_future))
@@ -198,7 +198,6 @@ class IndexBuilder:
         step = max(1, int(round(self.fps / SAMPLE_FPS)))
         small = (960, int(round(960 * self.info["height"] / self.info["width"])))
         sx = self.info["width"] / small[0]
-        pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="vision")
         pending: dict[int, list[Future]] = {}
         results_small: dict[int, vision.VisionResult] = {}
         results_ocr: dict[int, list[dict[str, Any]]] = {}
@@ -215,20 +214,22 @@ class IndexBuilder:
                     results_ocr[idx] = [{"text": ln.text, "conf": ln.conf, "box": ln.box} for ln in res.lines
                                         if ln.text.strip()]
 
-        for idx, rgb in sample_frames(self.src.path, step):
-            thumb = cv2.resize(cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY), (96, 54), interpolation=cv2.INTER_AREA)
-            diff = 999.0 if last_thumb is None else float(np.mean(np.abs(thumb.astype(np.int16) - last_thumb.astype(np.int16))))
-            near_cut = any(0 <= idx - s < step for s in shot_starts)
-            do_ocr = diff > 1.6 or (idx - last_ocr) >= OCR_MAX_GAP_S * self.fps or near_cut
-            small_rgb = cv2.resize(rgb, small, interpolation=cv2.INTER_AREA)
-            futs = [pool.submit(vision.analyze, small_rgb, ocr=False)]
-            if do_ocr:
-                futs.append(pool.submit(vision.analyze, rgb.copy(), faces=False, humans=False, saliency=False))
-                last_thumb, last_ocr = thumb, idx
-            pending[idx] = futs
-            drain(24)
-        drain(0)
-        pool.shutdown(wait=True)
+        with ThreadPoolExecutor(max_workers=6, thread_name_prefix="vision") as pool:
+            for idx, rgb in sample_frames(self.src.path, step):
+                thumb = cv2.resize(cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY), (96, 54), interpolation=cv2.INTER_AREA)
+                diff = 999.0 if last_thumb is None else float(np.mean(np.abs(thumb.astype(np.int16) - last_thumb.astype(np.int16))))
+                near_cut = any(0 <= idx - s < step for s in shot_starts)
+                do_ocr = diff > 1.6 or (idx - last_ocr) >= OCR_MAX_GAP_S * self.fps or near_cut
+                small_rgb = cv2.resize(rgb, small, interpolation=cv2.INTER_AREA)
+                futs = [pool.submit(vision.analyze, small_rgb, ocr=False)]
+                if do_ocr:
+                    futs.append(pool.submit(vision.analyze, rgb.copy(), faces=False, humans=False, saliency=False))
+                    last_thumb, last_ocr = thumb, idx
+                pending[idx] = futs
+                drain(24)
+            drain(0)
+        if not results_small:
+            raise ValueError("Video decoding produced no samples; the vision index was not saved. Check the media file.")
 
         faces, persons, sal = [], [], []
         prev: list[dict[str, Any]] = []

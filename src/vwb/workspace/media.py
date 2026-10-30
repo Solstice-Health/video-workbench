@@ -35,7 +35,7 @@ def _snapshot(ws: Workspace, incoming: BinaryIO, name: str, original_path: str) 
                 raise ValueError("The video changed during registration; finish writing it and retry media_register.")
             out.flush()
             if attachments.describe(staged, name)["kind"] != "video":
-                raise ValueError("The selected file is not a supported video.")
+                raise ValueError("The selected file is not a supported video; media_register accepts videos only. For an image, pass its work-relative path or attachment:<id> directly to image_inspect, sunburst_inpaint/extract/outpaint, or image reference inputs. No video conversion, registration or index is needed.")
             sha = digest.hexdigest()
             # Workers may register different downloads concurrently. Reload inside
             # the lock so IDs and digest deduplication use the latest source list.

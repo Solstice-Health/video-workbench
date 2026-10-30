@@ -33,7 +33,7 @@ def attachment_read(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     if row["kind"] == "image":
         payload = attachments.image_payload(ctx.ws, row)
         return ToolResult.json({"file": row, "inspection": "Pinned original, bounded image preview. "
-                                "Use image_inspect on the work path for crop/zoom; that copy may have been edited."},
+                                "Use image_inspect or image editing tools with attachment:<id> for this original, or the work path for its current edited copy. No video registration or index is needed."},
                                images=[base64.b64decode(payload["base64"])])
     if row["kind"] in {"text", "html"}:
         offset = _integer(args.get("offset_bytes", 0), "offset_bytes", 0, attachments.MAX_BYTES)

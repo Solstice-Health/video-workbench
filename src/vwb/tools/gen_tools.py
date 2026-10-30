@@ -12,6 +12,7 @@ for every output that uses it.
 from __future__ import annotations
 
 import json
+import math
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -31,8 +32,11 @@ from vwb.tools.base import Tool, ToolContext, ToolResult, parse_json_arg, schema
 from vwb.util.hashing import new_id
 from vwb.workspace.registry import Registry
 
-REF = {"type": "string", "description": "source:<media ref>#t=<seconds> or #f=<frame>; t:<seconds>/f:<frame> only with one source; or slot:<name>@<rev> (asset; "
-                                        "slot:<name>@<rev>#t=<s> for a frame of a clip)"}
+REF = {"type": "string", "description": "attachment:<id> (immutable uploaded image), a work-relative image path "
+       "(optional work: prefix), slot:<name>@<rev>, or source:<media ref>#t=<seconds>/#f=<frame>. "
+       "Images need no video conversion/registration; frame pixels need no index. "
+       "t:<seconds>/f:<frame> only with one source; slot:<name>@<rev>#t=<s>/#f=<n> for a clip frame. "
+       "Image coordinates use EXIF-oriented pixels, matching image_inspect."}
 BOX = {"type": "array", "items": {"type": "number"}, "description": "[x, y, w, h] in the pixels of what it applies to"}
 QUALITY = {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]}
 
@@ -141,7 +145,10 @@ def sunburst_extract(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
             notes.append(f"fidelity {fid['psnr']} dB at scale {fid['scale']}: the model redrew the element noticeably; "
                          "compare the preview, or use method=matte to keep the source pixels")
     if not text["match"]:
-        notes.append(f"text differs from the source region ({text['found']} vs {text['source']}): GEN-TEXT")
+        if "source" in text:
+            notes.append(f"text differs from the source region ({text['found']} vs {text['source']}): GEN-TEXT")
+        else:
+            notes.append(f"text in the cut-out is unverified ({text['found']}): GEN-TEXT; compare it with the source")
     return ToolResult.json({"ref": ref, "placed_in_source": res["placed"], "size": fit["native_size"], "alpha": res["alpha"],
                             "text": text, **({"fidelity": res["fidelity"]} if method != "matte" else {"method": res["method"]}),
                             "notes": notes, "preview": "left: the source region; right: the cut-out on a checkerboard",
@@ -151,10 +158,14 @@ def sunburst_extract(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
 
 def _mask_from(ctx: ToolContext, a: dict[str, Any], src_ref: str, shape: tuple[int, int]) -> np.ndarray:
     spec = parse_json_arg(a.get("mask") or {})
+    if not isinstance(spec, dict):
+        raise ValueError("mask must be an object containing boxes, indexed regions, or an alpha mask image.")
     H, W = shape
     m = np.zeros((H, W), np.uint8)
-    pad = float(spec.get("pad", 6))
-    boxes = [list(b) for b in spec.get("boxes", [])]
+    pad = spec.get("pad", 6)
+    if isinstance(pad, bool) or not isinstance(pad, (int, float)) or not math.isfinite(pad) or pad < 0:
+        raise ValueError("mask pad must be a finite nonnegative number.")
+    boxes = list(spec.get("boxes", []))
     if spec.get("text_tracks") or spec.get("blocks"):
         if not src_ref.startswith(("t:", "f:", "source:")):
             raise ValueError("text_tracks and blocks require a source frame: source:<ref>#t=<seconds> or #f=<frame>.")
@@ -165,16 +176,31 @@ def _mask_from(ctx: ToolContext, a: dict[str, Any], src_ref: str, shape: tuple[i
             r = st.one("SELECT x, y, w, h FROM text_tracks WHERE id=?", (int(tid),))
             if r:
                 boxes.append([r["x"], r["y"], r["w"], r["h"]])
+            else:
+                raise ValueError(f"Text track {tid} does not exist in source {src.ref}.")
         for bid in spec.get("blocks", []):
             r = st.one("SELECT x, y, w, h FROM blocks WHERE id=?", (int(bid),))
             if r:
                 boxes.append([r["x"], r["y"], r["w"], r["h"]])
-    for x, y, w, h in boxes:
-        x0, y0 = int(max(0, x - pad)), int(max(0, y - pad))
-        x1, y1 = int(min(W, x + w + pad)), int(min(H, y + h + pad))
+            else:
+                raise ValueError(f"Block {bid} does not exist in source {src.ref}.")
+    for box in boxes:
+        if (not isinstance(box, (list, tuple)) or len(box) != 4
+                or any(isinstance(v, bool) or not isinstance(v, (float, int)) or not math.isfinite(v) for v in box)
+                or box[2] <= 0 or box[3] <= 0):
+            raise ValueError("Each mask box must be [x,y,positive width,positive height] using finite numbers.")
+        x, y, w, h = box
+        x0, y0 = max(0, math.floor(x - pad)), max(0, math.floor(y - pad))
+        x1, y1 = min(W, math.ceil(x + w + pad)), min(H, math.ceil(y + h + pad))
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError(f"Mask box {box} does not intersect the {W}x{H} image.")
         m[y0:y1, x0:x1] = 1
     if spec.get("asset"):
-        alpha = resolve(ctx.ws, spec["asset"]).rgba[..., 3]
+        mask_image = resolve(ctx.ws, spec["asset"])
+        if not mask_image.lineage.get("has_alpha"):
+            raise ValueError("Mask images need an alpha channel: opaque selected pixels, transparent retained pixels. "
+                             "A black-and-white RGB image is not an alpha mask.")
+        alpha = mask_image.rgba[..., 3]
         if alpha.shape != (H, W):
             raise ValueError(f"mask asset is {alpha.shape[1]}x{alpha.shape[0]}; the image is {W}x{H}")
         m |= (alpha > 127).astype(np.uint8)
@@ -185,7 +211,8 @@ def _mask_from(ctx: ToolContext, a: dict[str, Any], src_ref: str, shape: tuple[i
 
 def sunburst_inpaint(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     src = resolve(ctx.ws, a["source"], a.get("crop"))
-    if a.get("crop") and parse_json_arg(a.get("mask") or {}).get("text_tracks"):
+    spec = parse_json_arg(a.get("mask") or {})
+    if a.get("crop") and isinstance(spec, dict) and (spec.get("text_tracks") or spec.get("blocks")):
         return ToolResult.error("text_tracks/blocks are in source-frame pixels; inpaint the full frame, then crop when placing")
     mask = _mask_from(ctx, a, a["source"], src.rgba.shape[:2])
     res = sb.inpaint(ctx.gateway, src.rgba, mask, a["prompt"], quality=a.get("quality"), tries=int(a.get("tries", 1)),
@@ -467,7 +494,8 @@ TOOLS = [
          "size [w, h] (any aspect 1:3 to 3:1; e.g. [1024, 1024], [1024, 1536]). n up to 4 variants. Returns asset refs, "
          "alpha stats, any text or faces found, and a preview.",
          schema({"prompt": {"type": "string"}, "size": {"type": "array", "items": {"type": "number"}},
-                 "transparent": {"type": "boolean"}, "refs": {"type": "array", "items": {"type": "object"}},
+                 "transparent": {"type": "boolean"}, "refs": {"type": "array", "items": {"type": "object",
+                     "properties": {"ref": REF, "crop": BOX}, "required": ["ref"]}},
                  "quality": QUALITY, "n": {"type": "integer"}, "slot": {"type": "string"}, "note": {"type": "string"},
                  "allow_text": {"type": "boolean"}}, ["prompt"]), sunburst_create, "gen.image", "gen"),
     Tool("sunburst_extract", "Cut one element out of a frame or asset as a transparent cut-out: a chart, an illustration, "

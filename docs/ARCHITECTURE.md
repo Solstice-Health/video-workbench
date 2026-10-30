@@ -168,6 +168,23 @@ Native compaction checkpoints the catalog without changing chat/files; original
 images can always be reopened through tools. Other providers still have no manual
 native compaction operation.
 
+File input contract (2026-10-30): reading pixels does not require an edit index
+or a manual registration call. Image inspection and generation share bounded
+full-resolution raster loading: `attachment:<id>` selects the immutable uploaded
+original; `work:<path>` or a bare work-relative path selects current working
+bytes; `slot:<name>@<rev>` selects a pinned asset. Reads reject symlink traversal,
+verify attachment/asset hashes, and record the exact input byte hash. EXIF
+orientation is applied before defining crop/mask coordinates. Animation inputs
+must be exported to a chosen still frame. Bounds are 40 MP and 50 MiB; model
+preview downsampling never substitutes for editing the original pixels.
+
+Video frame pixels use shared lightweight stream metadata rather than the full
+OCR/transcript/layout index. Probe and decode use the same timing fallback;
+incomplete decodes raise diagnostics instead of returning partial frame maps.
+An empty decode cannot become a successful vision-index stage. Index-derived
+mask regions still require that source's index, while explicit pixel boxes do
+not. Indexed masks cannot be mixed with a crop whose coordinate origin differs.
+
 `pdf_info`, `pdf_read`, `pdf_search` and `pdf_render` share the preview's two-worker
 limit and inspect PDFs in bounded disposable PDFium processes. Inputs are pinned
 no-follow descriptors, limited to 64 MiB/10,000 pages. `attachment:<id>` reads the
