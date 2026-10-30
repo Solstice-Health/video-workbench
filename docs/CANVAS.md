@@ -10,6 +10,12 @@ Work on `outputs/<id>/canvas.json` in the work folder, check it with `canvas_che
 
 ## Renderer selection
 
+The composer now uses a searchable target modal. After Effects is a native `.aep`
+authoring target using `after_effects_*` tools, not a value of this document's
+`renderer` field. See [desktop applications](DESKTOP_APPS.md). Bind brand context
+with `design_context_bind` to enforce selected structural rules during canvas
+checks/commits; see [design context](DESIGN_CONTEXT.md).
+
 `canvas_renderers` lists the trusted adapters. `canvas_new(..., renderer="browser")`
 chooses one; `canvas_set_renderer(output="short-01", renderer="gsap")` swaps an
 existing working canvas without changing its layers, assets or time map. Preview

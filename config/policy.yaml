@@ -30,6 +30,8 @@ capabilities:
   canvas.commit: allow              # role check still applies: job lead only
   canvas.inspect: allow             # discover trusted data-only renderer adapters
   canvas.configure: allow           # change a working canvas renderer; immutable versions stay pinned
+  design_context.read: allow        # scoped source evidence and deterministic authoring checks
+  design_context.write: allow       # snapshot/bind user-authorized context; does not grant approval
   human.ask: allow
   agent.manage: allow             # supervised, permission-inheriting subagents; bounded tree per turn
   artifact.publish: allow         # request-local HTML artifacts and explicit review selections
@@ -79,7 +81,7 @@ roles:
     deny: [qc_item_create, qc_recheck_report]
   worker:                         # general helper; intersects its parent's effective permissions
     allow: ["*"]
-    deny: [canvas_commit, qc_item_create, qc_recheck_report]
+    deny: [canvas_commit, qc_item_create, qc_recheck_report, design_context_bind]
   scene_miner:      # Gemini, watches the source natively
     allow: [model_providers, model_catalog, model_request,
             agent_spawn, agent_list, agent_send, agent_inbox, agent_wait, agent_interrupt, agent_followup,
@@ -92,6 +94,7 @@ roles:
             file_list, file_read, file_grep, file_write]
   planner_b:        # GPT-6.1-Sol, an independent plan from another family
     allow: [model_providers, model_catalog, model_request,
+            design_context_schema, design_context_list, design_context_resolve, design_context_read,
             agent_spawn, agent_list, agent_send, agent_inbox, agent_wait, agent_interrupt, agent_followup,
             image_inspect, pdf_info, pdf_read, pdf_search, pdf_render, attachment_list, attachment_read, attachment_remember,
             sandbox_run, sandbox_environment, sandbox_status, artifact_publish, artifact_list, artifact_feedback,
@@ -103,6 +106,7 @@ roles:
             file_list, file_read, file_grep, file_write]
   composer:         # GPT-6.1-Sol (Codex in Docker): drafts a composition; the job lead commits
     allow: [model_providers, model_catalog, model_request,
+            design_context_schema, design_context_list, design_context_resolve, design_context_read, design_context_check, design_context_copy, design_context_asset,
             after_effects_status, after_effects_run, after_effects_render, after_effects_job,
             agent_spawn, agent_list, agent_send, agent_inbox, agent_wait, agent_interrupt, agent_followup,
             image_inspect, pdf_info, pdf_read, pdf_search, pdf_render, attachment_list, attachment_read, attachment_remember,
@@ -117,6 +121,7 @@ roles:
             file_list, file_read, file_grep, file_write, file_edit, memory_note]
   critic:           # GPT-6.1-Sol, another family; checks renders, never certifies
     allow: [model_providers, model_catalog, model_request,
+            design_context_schema, design_context_list, design_context_resolve, design_context_read, design_context_check,
             agent_spawn, agent_list, agent_send, agent_inbox, agent_wait, agent_interrupt, agent_followup,
             image_inspect, pdf_info, pdf_read, pdf_search, pdf_render, attachment_list, attachment_read, attachment_remember,
             sandbox_run, sandbox_environment, sandbox_status, artifact_publish, artifact_list, artifact_feedback,

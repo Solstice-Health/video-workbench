@@ -400,6 +400,8 @@ def _run_host(ws: Workspace, registry: Registry, swarm: Swarm, message: str, fir
     full_chat = bool(c.get("selection")) or bool(read_checkpoint(ws))
     current_refs = attachment_inputs.latest(ws)
     message += attachment_prompt(current_refs) + attachment_inputs.catalog_note(ws)
+    from vwb.design_context.store import prompt as design_context_prompt
+    message += design_context_prompt(ws)
     from vwb.code.editor import read_context
     editor = read_context(ws)
     if editor.get("path"):

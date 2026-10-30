@@ -23,6 +23,7 @@ PROV_RANK = ["master", "original_pixel", "fused", "segmented", "traced", "genera
 RECEIPT_PROV = {
     "human.upload": "master",
     "integration.import": "original_pixel",     # exact imported design pixels, with external evidence lineage
+    "design_context.import": "original_pixel",  # exact library bytes; approval metadata remains an assertion
     "asset_lab.rung0": "original_pixel",
     "asset_lab.rung1": "fused",
     "asset_lab.rung2": "segmented",

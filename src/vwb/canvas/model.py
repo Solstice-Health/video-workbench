@@ -279,6 +279,7 @@ class Canvas(BaseModel):
     renderer: Literal["remotion", "browser", "gsap", "canvas2d"] = "remotion"
     renderer_pin: str | None = None
     renderer_environment: dict[str, Any] | None = None
+    design_context: dict[str, Any] | None = None  # host-selected immutable pack and brief facts
     format: dict[str, int]              # width, height, fps
     time_map: list[Span]
     duration_frames: int | None = Field(default=None, ge=1, strict=True)

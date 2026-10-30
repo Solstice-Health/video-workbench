@@ -63,6 +63,8 @@ def load_working(ws: Workspace, output: str) -> Canvas:
     data.pop("version", None)
     data.pop("parent", None)
     data.pop("renderer_environment", None)  # host captures actual dependencies at preview/commit
+    from vwb.design_context.store import binding
+    data["design_context"] = binding(ws, output)  # editable JSON cannot remove active constraints
     try:
         return Canvas.model_validate(data)
     except ValidationError as exc:
@@ -190,6 +192,8 @@ def check(ws: Workspace, c: Canvas) -> list[Problem]:
                                                    f"{b[1] + b[3]:.0f}) leaves the safe zone x {safe[0]}-{safe[2]}, y {safe[1]}-"
                                                    f"{safe[3]}; text, marks and calls to action belong inside"))
                     break
+    from vwb.design_context.checks import canvas_problems
+    P.extend(Problem(**problem) for problem in canvas_problems(ws, c))
     return P
 
 

@@ -201,6 +201,8 @@ def canvas_check(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
 
 def _render_frames(ctx: ToolContext, c, frames: list[int], with_plates: bool = True) -> dict[int, np.ndarray]:
     """Composite chosen output frames of an expanded canvas; plates are rendered as stills of just those frames."""
+    from vwb.design_context.checks import assert_renderable
+    assert_renderable(ctx.ws, c)
     stills: dict[str, dict[int, np.ndarray]] = {}
     if with_plates:
         from vwb.render import environment

@@ -63,6 +63,8 @@ def render(ws: Workspace, output: str, version: int | None = None, actor: str = 
 
 def _render_locked(ws: Workspace, canvas: Canvas, output: str, out_dir: Path, receipt_path: Path, actor: str) -> dict[str, Any]:
     t0 = time.time()
+    from vwb.design_context.checks import assert_renderable
+    assert_renderable(ws, canvas)
     profile = load_profile(canvas.profile)
     ensure_plates(ws, [canvas])
     comp = Compositor(ws, canvas)
@@ -83,6 +85,7 @@ def _render_locked(ws: Workspace, canvas: Canvas, output: str, out_dir: Path, re
                "tools": {"compositor": COMPOSITOR_VERSION, "ffmpeg": ffmpeg_version(),
                          "renderer": canvas.renderer, "generator": validate_renderer(canvas).pin,
                          **({"renderer_environment": canvas.renderer_environment} if canvas.renderer_environment else {}),
+                         **({"design_context": canvas.design_context} if canvas.design_context else {}),
                          "x264": {k: profile["video"][k] for k in ("crf", "preset", "profile")}},
                "audio": audio_info, "render_seconds": round(time.time() - t0, 1), "attestation": "rendered-from-canvas"}
     write_json(receipt_path, receipt)
@@ -97,6 +100,9 @@ def render_many(ws: Workspace, outputs: list[str], actor: str = "render", worker
     """Every missing plate in one Remotion batch, then composite and encode in parallel."""
     store = CanvasStore(ws.canvas)
     canvases = [store.get(o) for o in outputs]
+    from vwb.design_context.checks import assert_renderable
+    for canvas in canvases:
+        assert_renderable(ws, canvas)
     ensure_plates(ws, canvases)
 
     def one(c: Canvas) -> dict[str, Any]:

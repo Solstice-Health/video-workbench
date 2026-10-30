@@ -57,6 +57,13 @@ tldraw or Three.js editor is embedded in this increment.
 
 ## Composer behavior
 
+The 2026-10-30 increment replaces the dropdown with a searchable Apply/Cancel
+modal and adds After Effects as a native project target. It follows its own
+author, render and import workflow; editable layers remain in its `.aep` file.
+Installation and human enablement appear in the picker. See
+[desktop applications](DESKTOP_APPS.md) and the
+[brand-context foundation](DESIGN_CONTEXT.md).
+
 Ask / Storyboard / Agentic appear beside the chat input and persist per
 conversation. **These modes are UI previews only.** They do not change agent
 permissions, tool access or execution. In particular, Ask is not enforced read-only.
@@ -215,3 +222,20 @@ Validation recorded on 2026-10-29:
   persistence after reload and inclusion in the sent user message. They used an
   isolated fixture server without model calls; live model routing quality has
   not been benchmarked.
+
+Additional validation on 2026-10-30:
+
+- Full Python suite: **2,271 passed, 18 skipped**. A subsequent final context
+  regression run passed **91 tests**, including one newly added equivalent-color
+  case and the final audio-role conflict fix. Wheel and source distribution builds
+  passed; runtime modules and documentation were checked in the wheel.
+- Composer behavior tests: **54 passed**. Five opt-in Chromium viewport checks
+  passed, including 320px, 484px, landscape and desktop layouts. Search, draft
+  selection, Apply/Cancel, keyboard focus, stale handlers and conversation
+  isolation are covered. A separate in-app browser pass confirmed native target
+  selection, reload persistence and the saved message's native-tool instruction.
+- Native target and bridge tests use a synthetic application/process host and
+  real movie import. No Adobe After Effects installation was available, so native
+  Adobe execution remains unverified.
+- Context tests and local real-source render validation are recorded in
+  [DESIGN_CONTEXT.md](DESIGN_CONTEXT.md). Private source files stay outside Git.
