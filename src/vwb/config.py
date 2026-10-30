@@ -35,6 +35,8 @@ GENERATORS_DIR = RESOURCE_ROOT / "generators"
 RUNS_DIR = Path(os.environ.get("VWB_RUNS_DIR", REPO_ROOT / "runs"))
 
 _SECRET_KEYS = ("OPENAI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "EXA_API_KEY", "OPENROUTER_API_KEY")
+_HOST_SETTINGS = frozenset({"VWB_UI_PUBLIC_URL", "VWB_SOLSTICE_MCP_URL",
+                            "VWB_SOLSTICE_CLIENT_ID", "VWB_SOLSTICE_REDIRECT_URI"})
 PROVIDERS = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
              "google": "GOOGLE_API_KEY", "openrouter": "OPENROUTER_API_KEY"}
 _PROVIDER_ALIASES = {"google": ("GEMINI_API_KEY",)}
@@ -124,6 +126,24 @@ def find_env_file() -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+def host_setting(name: str, default: str = "") -> str:
+    """Read an allowlisted public host setting without exporting the .env file.
+
+    Explicit environment values (including empty strings) override the file.
+    Expansion is disabled so a public setting cannot interpolate a secret.
+    """
+    if name not in _HOST_SETTINGS:
+        raise ValueError("Unknown public host setting.")
+    if name in os.environ:
+        return os.environ[name]
+    env_file = find_env_file()
+    if env_file and env_file.is_file():
+        value = dotenv_values(env_file, interpolate=False).get(name)
+        if value is not None:
+            return value
+    return default
 
 
 @dataclass(frozen=True)

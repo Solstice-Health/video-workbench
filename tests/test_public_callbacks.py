@@ -19,8 +19,9 @@ VALIDATORS = [
 
 
 @pytest.fixture(autouse=True)
-def isolated_origin(monkeypatch):
+def isolated_origin(monkeypatch, tmp_path):
     monkeypatch.delenv("VWB_UI_PUBLIC_URL", raising=False)
+    monkeypatch.setenv("VWB_ENV_FILE", str(tmp_path / "empty-test.env"))
 
 
 def test_public_origin_disabled_explicit_and_environment(monkeypatch):

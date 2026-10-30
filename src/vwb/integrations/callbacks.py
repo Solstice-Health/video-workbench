@@ -7,9 +7,10 @@ must use the same configured origin when constructing its callback URLs.
 from __future__ import annotations
 
 import ipaddress
-import os
 import re
 from urllib.parse import SplitResult, urlsplit
+
+from vwb.config import host_setting
 
 from .store import IntegrationError
 
@@ -51,7 +52,7 @@ def public_origin(value: str | None = None) -> str:
     validates hostname syntax and excludes local names and IP literals, while
     deployment and access controls remain the host server's responsibility.
     """
-    value = os.getenv("VWB_UI_PUBLIC_URL", "") if value is None else value
+    value = host_setting("VWB_UI_PUBLIC_URL") if value is None else value
     if value == "":
         return ""
     parsed = _parse(value, _ORIGIN_ERROR)

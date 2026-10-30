@@ -6,7 +6,6 @@ import base64
 import hashlib
 import json
 import math
-import os
 import re
 import secrets
 import time
@@ -16,7 +15,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 
-from vwb.config import RUNS_DIR
+from vwb.config import RUNS_DIR, host_setting
 from vwb.desktop.after_effects import AfterEffects
 
 from .blender_mcp import DesktopBlender
@@ -92,9 +91,9 @@ class IntegrationService:
 
     def _config(self, state: dict) -> dict:
         configured = state.get("config", {})
-        return {"gateway_url": configured.get("gateway_url", os.getenv("VWB_SOLSTICE_MCP_URL", GATEWAYS[0])),
-                "client_id": configured.get("client_id", os.getenv("VWB_SOLSTICE_CLIENT_ID", "")),
-                "redirect_uri": configured.get("redirect_uri", os.getenv("VWB_SOLSTICE_REDIRECT_URI", "")),
+        return {"gateway_url": configured.get("gateway_url", host_setting("VWB_SOLSTICE_MCP_URL", GATEWAYS[0])),
+                "client_id": configured.get("client_id", host_setting("VWB_SOLSTICE_CLIENT_ID")),
+                "redirect_uri": configured.get("redirect_uri", host_setting("VWB_SOLSTICE_REDIRECT_URI")),
                 "read_tools": configured.get("read_tools", [])}
 
     @staticmethod
