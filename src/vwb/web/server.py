@@ -726,6 +726,10 @@ class Handler(BaseHTTPRequestHandler):
                 ws = self.app.workspace(parts[2])
                 if parts[4] == "capabilities" and len(parts) == 5:
                     return self._json(studio_capabilities())
+                if parts[4] == "video-models" and len(parts) == 5:
+                    from vwb.studio.openrouter import video_models
+                    return self._json(video_models(ws, query.get("query", [""])[0],
+                                                   int(query.get("limit", [50])[0]), int(query.get("offset", [0])[0])))
                 if parts[4] == "jobs":
                     if len(parts) == 6:
                         return self._json(self.app.studio_entry(ws, self.app.studio.get(ws, parts[5])))

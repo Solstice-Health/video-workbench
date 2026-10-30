@@ -26,6 +26,9 @@ from vwb.workspace.request import now_iso
 
 def tool_call(row: dict) -> tuple[str, dict]:
     spec, prepared = row['input'], row['prepared']
+    if spec['kind'] == 'video' and spec.get('provider') == 'openrouter':
+        from vwb.studio.openrouter import create_args
+        return 'model_request', create_args(row)
     refs = [item['ref'] for item in prepared['inputs']]
     args = {'slot': f"studio-{row['id']}", 'prompt': spec['prompt']}
     if spec['kind'] == 'image':
@@ -100,10 +103,16 @@ def execute(row: dict, *, registry=None, gateway=None) -> dict:
     ws = Workspace(Path(row['request_root']))
     registry = registry or build_registry()
     local_matte = row['operation'] == 'remove_background' and row['input'].get('background_method') == 'matte'
-    gateway = gateway or (Gateway(ws, actor='studio') if local_matte else
+    router = row['kind'] == 'video' and row['input'].get('provider') == 'openrouter'
+    gateway = gateway or (Gateway(ws, actor='studio') if local_matte or router else
                           StudioGateway(ws, kind=row['kind'], model=row['input']['model']))
     name, args = tool_call(row)
-    result = registry.call(ToolContext(ws=ws, agent='studio', role='job_lead', gateway=gateway), name, args)
+    ctx = ToolContext(ws=ws, agent='studio', role='job_lead', gateway=gateway)
+    if router:
+        from vwb.studio.openrouter import generate
+        result = generate(ctx, row, registry)
+    else:
+        result = registry.call(ctx, name, args)
     if result.is_error:
         # Provider responses can include credentials, request headers or host
         # paths. Public errors deliberately avoid copying arbitrary SDK strings.
@@ -183,7 +192,7 @@ def main() -> int:
         payload = {'ok': True, 'result': result}
     except Exception as exc:
         # Only errors authored by this module are public. No arbitrary SDK text.
-        safe = str(exc) if type(exc) is RuntimeError and str(exc).startswith(('The generation tool', 'The policy requires', 'The generated video')) else 'Generation failed. Check provider access and try a new job.'
+        safe = str(exc) if type(exc) is RuntimeError and str(exc).startswith(('The generation tool', 'The policy requires', 'The generated video', 'OpenRouter video')) else 'Generation failed. Check provider access and try a new job.'
         payload = {'ok': False, 'error': safe}
     write_json(path.with_suffix('.result'), payload)
     return 0 if payload['ok'] else 1

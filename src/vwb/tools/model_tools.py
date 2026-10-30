@@ -12,6 +12,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
 from vwb.gateway.model_access import ModelAccess
+from vwb.gateway.model_recommendations import REQUEST_GUIDANCE, freshness, recommendations
 from vwb.tools.base import Registry, Tool, ToolContext, ToolResult, schema
 from vwb.util.hashing import sha256_file
 from vwb.web.workspace_files import open_file
@@ -36,7 +37,7 @@ def _access(ctx):
 def model_providers(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     if args:
         return ToolResult.error("model_providers takes no arguments.")
-    return ToolResult.json(_access(ctx).providers())
+    return ToolResult.json({**_access(ctx).providers(), "model_guidance": recommendations()})
 
 
 def model_catalog(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
@@ -55,6 +56,7 @@ def model_catalog(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         items.append(item)
         size += len(encoded)
     result["items"] = items
+    result["model_guidance"] = recommendations(provider=args["provider"])
     return ToolResult.json(result)
 
 
@@ -189,15 +191,18 @@ def _request(ctx, args):
     result["notice"] = (result.get("notice", "") + " Generated media retains model provenance. "
                          "Use asset_ref in canvases; inspect outputs before use. "
                          "A provider key does not guarantee access to every model.").strip()
+    # Guidance is advisory. Keep the user's native payload and chosen ID intact,
+    # even when the reviewed suggestions have aged out. Never replay generation.
+    result["model_guidance"] = freshness()
     return ToolResult.json(result, images=images, artifacts=[a.get("asset_ref") or a["sha256"]
                                                           for a in result.get("artifacts", [])])
 
 
 TOOLS = [
-    Tool("model_providers", "Discover configured model providers and supported operation names, payload fields and API documentation. Host loads .env keys; no credentials are returned. Use this before composing a native model request.",
+    Tool("model_providers", "Discover configured model providers, supported operations and dated task-specific model guidance with runtime age and stale-refresh instructions. Host loads .env keys; no credentials are returned. Use this before choosing a model and composing its native request.",
          schema({}), model_providers, "model.call", "models"),
-    Tool("model_catalog", "Query live provider model catalogs, optionally filter by name/modality and page with offset. Discover current model IDs instead of guessing. Capability metadata varies by provider; listed models still require account access. No generation occurs.",
+    Tool("model_catalog", "Query live provider model catalogs, optionally filter by name/modality and page with offset. OpenRouter modality=video reads the detailed video-generation catalog; video understanding instead requires video INPUT support. Includes separate dated selection guidance and runtime stale status. Discover current IDs and supported parameters; listings do not guarantee account access. No generation occurs.",
          CATALOG, model_catalog, "model.call", "models"),
-    Tool("model_request", "Call a configured OpenAI, Google, Anthropic or OpenRouter model using its native payload and a discovered operation. Supports text/vision, embeddings and model-dependent image/audio/video requests. File inputs use {$file: 'path-under-work', encoding: 'data_url'|'base64'|'text'}; omit encoding for multipart file fields. Outputs and full JSON save in model-output/; media gets asset_ref and provenance. Poll asynchronous video jobs explicitly. No automatic retry after dispatch. For scripts use sandbox_run(models=true) and Python vwb_models. Provider keys stay on the host.",
+    Tool("model_request", "Call a configured OpenAI, Google, Anthropic or OpenRouter model using its native payload and a discovered operation. Supports text/vision, embeddings and model-dependent image/audio/video requests. File inputs use {$file: 'path-under-work', encoding: 'data_url'|'base64'|'text'}; omit encoding for multipart file fields. Optional sha256 pins input bytes and fails before network if changed. Outputs and full JSON save in model-output/; media gets asset_ref and provenance. Poll asynchronous video jobs explicitly. No automatic retry after dispatch. For scripts use sandbox_run(models=true) and Python vwb_models. Provider keys stay on the host." + REQUEST_GUIDANCE,
          REQUEST, model_request, "model.call", "models"),
 ]

@@ -74,7 +74,7 @@ def prepare(ws, spec: JobInput, job_id: str) -> dict:
 
 def worker_environment() -> dict[str, str]:
     names = {'PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'LC_ALL', 'VIRTUAL_ENV', 'PYTHONPATH',
-             'VWB_ENV_FILE', 'VWB_RUNS_DIR', 'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'SSL_CERT_FILE',
+             'VWB_ENV_FILE', 'VWB_RUNS_DIR', 'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'OPENROUTER_API_KEY', 'SSL_CERT_FILE',
              'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE'}
     return {key: value for key, value in os.environ.items() if key in names}
 
@@ -88,6 +88,19 @@ class StudioJobs:
         self.timeout = timeout
         self.owned: dict[str, dict] = {}
 
+    @staticmethod
+    def _same_submission(row, fingerprint):
+        if row['fingerprint'] == fingerprint:
+            return True
+        if 'provider' not in row['input']:
+            # Pending drafts from the pre-provider UI must retain idempotency.
+            try:
+                prior = JobInput.model_validate({k: v for k, v in row['input'].items() if k in JobInput.model_fields})
+                return sha256_text(canonical_json(prior.model_dump(mode='json'))) == fingerprint
+            except ValidationError:
+                return False
+        return False
+
     def _read(self, ws, job_id: str) -> dict:
         path = private_job(ws, job_id)
         if path.is_symlink():
@@ -95,6 +108,11 @@ class StudioJobs:
         row = read_json(path)
         if not row:
             raise FileNotFoundError('That studio job was not found.')
+        if row.get('input', {}).get('provider') == 'openrouter':
+            from vwb.studio.openrouter import read_progress
+            progress = read_progress(ws, job_id)
+            if progress:
+                row['provider_job'] = progress
         if row['status'] not in TERMINAL and job_id not in self.owned:
             row.update(status='interrupted', ended=now_iso(), error='The server stopped. Start a new job to retry; no generation was replayed.')
             write_json(path, row)
@@ -138,6 +156,22 @@ class StudioJobs:
                         for error in exc.errors(include_input=False, include_url=False)]
             raise ValueError('; '.join(messages)[:1500]) from None
         fingerprint = sha256_text(canonical_json(spec.model_dump(mode='json')))
+        model_capabilities = None
+        if spec.kind == 'video' and spec.provider == 'openrouter':
+            # Avoid a network call under the job lock, and avoid rediscovery for
+            # an idempotent repeat of an already-created job.
+            with self.lock:
+                if self.closed:
+                    raise ValueError('The studio is shutting down. Reopen the workbench before starting a job.')
+                for path in directory(ws, '.studio/jobs').glob('*.json'):
+                    if JOB_ID.fullmatch(path.stem):
+                        row = self._read(ws, path.stem)
+                        if row['input']['idempotency_key'] == spec.idempotency_key:
+                            if not self._same_submission(row, fingerprint):
+                                raise ValueError('This submission key was already used for different settings. Start a new job.')
+                            return self.public(row)
+            from vwb.studio.openrouter import validate_model
+            model_capabilities = validate_model(ws, spec)
         with self.lock:
             if self.closed:
                 raise ValueError('The studio is shutting down. Reopen the workbench before starting a job.')
@@ -146,11 +180,13 @@ class StudioJobs:
                     continue
                 row = self._read(ws, path.stem)
                 if row['input']['idempotency_key'] == spec.idempotency_key:
-                    if row['fingerprint'] != fingerprint:
+                    if not self._same_submission(row, fingerprint):
                         raise ValueError('This submission key was already used for different settings. Start a new job.')
                     return self.public(row)
             local_matte = spec.kind == 'image' and spec.operation == 'remove_background' and spec.background_method == 'matte'
-            if not local_matte and not capabilities()[spec.kind]['available']:
+            settings = capabilities()[spec.kind]
+            selected_provider = next((p for p in settings.get('providers', []) if p['id'] == spec.provider), settings)
+            if not local_matte and not selected_provider['available']:
                 raise ValueError('Configure the studio provider in Settings before generating.')
             if sum(not item['cancel'].is_set() for item in self.owned.values()) >= 12:
                 raise ValueError('The studio queue is full. Wait for a job to finish.')
@@ -160,6 +196,8 @@ class StudioJobs:
                    'operation': spec.operation, 'status': 'queued', 'created': now_iso(), 'started': None,
                    'ended': None, 'error': None, 'result': None, 'fingerprint': fingerprint, **prepared,
                    'cancellation_note': 'Stopping the local worker cannot guarantee cancellation or refund at the provider.'}
+            if model_capabilities:
+                row['model_capabilities'] = model_capabilities
             write_json(private_job(ws, job_id), row)
             owner = {'ws': ws, 'cancel': threading.Event(), 'process': None}
             self.owned[job_id] = owner

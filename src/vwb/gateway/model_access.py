@@ -363,8 +363,8 @@ class ModelAccess:
             raise ValueError("Model payload nesting exceeds 50 levels.")
         if isinstance(value, dict):
             if "$file" in value:
-                if set(value) - {"$file", "encoding", "mime_type"}:
-                    raise ValueError("A file marker accepts only $file, encoding and optional mime_type.")
+                if set(value) - {"$file", "encoding", "mime_type", "sha256"}:
+                    raise ValueError("A file marker accepts only $file, encoding, optional mime_type and sha256.")
                 while len(budget) < 3:
                     budget.append(0)
                 budget[1] += 1
@@ -372,6 +372,10 @@ class ModelAccess:
                 if budget[1] > MAX_INPUT_MARKERS or budget[2] > MAX_INPUT_METADATA:
                     raise ValueError("A model request accepts at most 128 file markers and 32 KiB of input metadata.")
                 upload = self._read_file(value["$file"])
+                expected = value.get("sha256")
+                if expected is not None and (not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected)
+                                             or hashlib.sha256(upload.data).hexdigest() != expected):
+                    raise ValueError("File marker input no longer matches its pinned SHA-256; no request was sent.")
                 budget[0] += len(upload.data)
                 if budget[0] > MAX_INPUT_FILES:
                     raise ValueError("Combined model file inputs exceed 128 MiB.")

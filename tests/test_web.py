@@ -670,3 +670,21 @@ def test_canvas_renderer_catalog_is_same_origin_and_describes_capabilities(http)
     assert rows['canvas2d']['plate_layers'] == ['shape']
     assert rows['browser']['pin'].startswith('browser-scene@1:')
     assert request('GET', '/api/canvas-renderers', headers={'Sec-Fetch-Site': 'cross-site'})[0] == 403
+
+
+def test_video_model_search_is_request_scoped_same_origin_and_read_only(http, monkeypatch):
+    request, app, ws, _ = http
+    calls = []
+    def catalog(workspace, query, limit, offset):
+        calls.append((workspace.id, query, limit, offset))
+        return {'provider': 'openrouter', 'items': [{'id': 'minimax/hailuo-3', 'supported_resolutions': ['2K']}],
+                'total': 1, 'next_offset': None, 'fetched_at': '2026-10-30T00:00:00Z'}
+    monkeypatch.setattr('vwb.studio.openrouter.video_models', catalog)
+    path = f'/api/requests/{ws.id}/studio/video-models?query=minimax%2Fhailuo-3&limit=20&offset=0'
+    status, _, body = request('GET', path)
+    assert status == 200 and json.loads(body)['items'][0]['supported_resolutions'] == ['2K']
+    assert calls == [(ws.id, 'minimax/hailuo-3', 20, 0)]
+    assert request('GET', path, headers={'Sec-Fetch-Site': 'cross-site'})[0] == 403
+    assert request('GET', path.replace(ws.id, 'missing-request'))[0] == 404
+    assert request('GET', path.replace('limit=20', 'limit=bad'))[0] == 400
+    assert len(calls) == 1 and not app.studio.owned

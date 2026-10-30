@@ -1,6 +1,7 @@
 """Studio controls describe only the adapters already supported by the toolkit."""
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -42,11 +43,20 @@ def capabilities() -> dict:
                             'Inpaint retains source dimensions and every pixel outside the painted mask.',
                             'Inpaint keeps the original alpha channel; use outpaint to extend into empty canvas.',
                             'Outpaint preserves the placed source except for a 32-pixel blended edge.']},
-        'video': {'available': available.get('google', False), 'provider': 'google', 'models': models('video'),
+        'video': {'available': available.get('google', False) or available.get('openrouter', False),
+                  'provider': 'google' if available.get('google', False) or not available.get('openrouter', False) else 'openrouter', 'models': models('video'),
+                  'providers': [
+                      {'id': 'google', 'label': 'Google / Omni', 'available': available.get('google', False),
+                       'models': models('video'), 'operations': VIDEO_OPS, 'seconds': {'min': 3, 'max': 10, 'default': 6},
+                       'resolutions': ['720p', '1080p'], 'aspects': ['9:16', '16:9'],
+                       'default_resolution': '1080p', 'default_aspect': '9:16'},
+                      {'id': 'openrouter', 'label': 'OpenRouter', 'available': available.get('openrouter', False),
+                       'custom_model': True, 'default_model': 'minimax/hailuo-3',
+                       'operations': ['text', 'frames', 'reference']}],
                   'operations': VIDEO_OPS, 'seconds': {'min': 3, 'max': 10, 'default': 6},
                   'resolutions': ['720p', '1080p'], 'aspects': ['9:16', '16:9'],
                   'default_resolution': '1080p', 'default_aspect': '9:16',
-                  'notes': ['Only models configured for the Omni Interactions adapter are offered.',
+                  'notes': ['Google uses the configured Omni adapter; OpenRouter model paths use its live video catalog.',
                             'Stopping a local job cannot guarantee cancellation or refund of a provider request.']},
         'uploads': {'image_max_bytes': 40 * 1024**2, 'video_max_bytes': 250 * 1024**2,
                     'image_formats': ['png', 'jpeg', 'webp'], 'mask_format': 'png'},
@@ -73,6 +83,7 @@ class JobInput(BaseModel):
     operation: str
     prompt: str = Field(default='', max_length=20000)
     model: str | None = Field(default=None, max_length=180)
+    provider: Literal['openai', 'google', 'openrouter'] | None = None
     quality: Literal['low', 'medium', 'high', 'xhigh', 'max'] = 'high'
     size: list[int] = Field(default_factory=lambda: [1024, 1024], min_length=2, max_length=2)
     transparent: bool = False
@@ -83,19 +94,37 @@ class JobInput(BaseModel):
     box: list[int] | None = Field(default=None, min_length=4, max_length=4)
     subject: str = Field(default='', max_length=2000)
     background_method: Literal['matte', 'sunburst'] = 'matte'
-    seconds: int = Field(default=6, ge=3, le=10)
-    resolution: Literal['720p', '1080p'] = '1080p'
-    aspect: Literal['9:16', '16:9'] = '9:16'
+    seconds: int | None = Field(default=6, ge=1, le=600)
+    resolution: str | None = Field(default='1080p', min_length=1, max_length=40)
+    aspect: str | None = Field(default='9:16', min_length=1, max_length=40)
+    generate_audio: bool | None = None
     seed: int | None = Field(default=None, ge=0, le=2147483647)
 
     @model_validator(mode='after')
     def controls(self):
+        self.provider = self.provider or ('openai' if self.kind == 'image' else 'google')
+        router = self.kind == 'video' and self.provider == 'openrouter'
+        if self.kind == 'image' and self.provider != 'openai' or self.kind == 'video' and self.provider not in {'google', 'openrouter'}:
+            raise ValueError('Choose a provider supported by this studio.')
+        if not router:
+            self.seconds = 6 if self.seconds is None else self.seconds
+            self.resolution = self.resolution or '1080p'
+            self.aspect = self.aspect or '9:16'
+            if not 3 <= self.seconds <= 10 or self.resolution not in {'720p', '1080p'} or self.aspect not in {'9:16', '16:9'}:
+                raise ValueError('The existing adapter supports 3–10 seconds, 720p/1080p and 9:16/16:9.')
+            if self.generate_audio is not None:
+                raise ValueError('The audio control is supported only by OpenRouter video models.')
         ops = IMAGE_OPS if self.kind == 'image' else VIDEO_OPS
         if self.operation not in ops:
             raise ValueError('This operation is not supported by the selected studio.')
         local_matte = self.kind == 'image' and self.operation == 'remove_background' and self.background_method == 'matte'
         if local_matte:
             self.model = None
+        elif router:
+            if not isinstance(self.model, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_./:-]*', self.model) or '..' in self.model.split('/'):
+                raise ValueError('Enter an exact OpenRouter model path, such as minimax/hailuo-3.')
+            if self.operation not in {'text', 'frames', 'reference'}:
+                raise ValueError('OpenRouter Studio currently supports prompt, frame and image-reference generation.')
         else:
             configs = model_configs(self.kind)
             if not configs:

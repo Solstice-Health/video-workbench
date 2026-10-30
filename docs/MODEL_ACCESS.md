@@ -24,13 +24,18 @@ receiving a provider API key.
 ## Discover before requesting
 
 - `model_providers` reports configuration status, allowed operations and their
-  request guidance. It returns no credential values.
+  request guidance, plus dated task-specific `model_guidance`. It returns no
+  credential values.
 - `model_catalog(provider, query="", modality="", limit=30, offset=0)` reads
   the provider's current catalog. Page through `next_offset` rather than assuming
   the first page contains every model. Use current IDs and advertised capabilities
   instead of guessing names from a model family. OpenRouter's modality filter
   selects output capabilities: `video` means video generation. To choose a model
   that can watch video or read images, inspect its advertised input modalities.
+  `model_catalog(provider="openrouter", modality="video")` uses the dedicated
+  `/api/v1/videos/models` catalog and preserves advertised capabilities such as
+  durations, resolutions and reference limits. Selection guidance is returned
+  separately from the live `items`; recommendations never filter the catalog.
 - `model_request(provider, operation, payload, purpose="")` makes one supported
   native API operation. `payload` uses that provider's request shape. Use the
   discovered operation guidance and official API documentation for fields that
@@ -38,7 +43,8 @@ receiving a provider API key.
 
 `model_providers` is the live source of supported operation names. Operations
 include OpenAI Responses/chat, image generation and editing, embeddings, speech,
-transcription and video; OpenRouter's supported chat/multimodal and audio routes;
+transcription and video; OpenRouter's supported chat/multimodal, audio and
+asynchronous video routes;
 Google content generation, embeddings and prediction/video operations; and
 Anthropic Messages. These are native provider requests rather than one fabricated
 schema shared by every model. Optional model-specific fields remain available
@@ -61,6 +67,52 @@ Dedicated text/embedding operations retain their ordinary model policy.
 The generic request tool complements the existing Sunburst and Omni tools. Prefer
 those tools when their registered extraction, inpainting, outpainting, masking,
 keying and composition workflows fit the task.
+
+## Dated model selection guidance
+
+**Last updated: 2026-10-30.** These are task-specific evaluation starting points,
+not a universal leaderboard or automatic routing defaults. The executable source
+is `src/vwb/gateway/model_recommendations.py`. `model_request` includes a concise
+summary in its tool description; `model_providers` returns the full guidance and
+`model_catalog` returns candidates relevant to the selected provider. Native
+catalog `items` remain separate and unchanged.
+
+| Task | Candidates to evaluate | Evidence and selection notes |
+|---|---|---|
+| Video understanding | Gemini 4 Argon | User-preferred starting point. Google's ID is `gemini-4-argon`; OpenRouter documents `google/gemini-4-argon`. Verify video input on the chosen route. [Google model card](https://ai.google.dev/gemini-api/docs/models/gemini-4-argon), [OpenRouter listing](https://openrouter.ai/google/gemini-4-argon). |
+| Video generation | H3, Gemini Omni 1.1, Seedance 2.5; Kling 4 pending verification | OpenRouter's reviewed video catalog lists `minimax/hailuo-3` and `bytedance/seedance-2.5`. H3 Max is a separate model. Omni's verified Google ID is `gemini-omni-1.1-flash`; prefer the existing Omni tools for editing/extension. No Omni or Kling 4 ID was found in that OpenRouter catalog. Do not invent IDs or silently replace Kling 4 with Kling 3. [OpenRouter video catalog](https://openrouter.ai/api/v1/videos/models), [video API guide](https://openrouter.ai/docs/guides/overview/multimodal/video-generation), [Seedance 2.5](https://openrouter.ai/bytedance/seedance-2.5), [Google Omni](https://ai.google.dev/gemini-api/docs/models/gemini-omni-flash). |
+| Text and reasoning | GPT-6.1 Sol / GPT-6 Astra; Claude Opus 5.5 / Fable 5.1 | Evaluate Sol or Opus for complex work, Astra or Fable for more demanding reasoning. [OpenAI selection guide](https://developers.openai.com/api/docs/guides/model-selection), [Claude models](https://platform.claude.com/docs/en/models/overview). |
+| Code | GPT-6.1 Sol, GPT-6.1 Terra, Claude Opus 5.5 | Terra is a candidate for scoped fixes and visual workflows; evaluate Sol/Opus for sustained coding. Validate with repository tests. OpenAI tool calling uses Responses. [OpenAI models](https://developers.openai.com/api/docs/models), [Claude models](https://platform.claude.com/docs/en/models/overview). |
+| Image understanding | Gemini 4 Argon, GPT-6.1 Terra | Inspect original pixels/crops; distinguish observation from inference. [Argon modalities](https://ai.google.dev/gemini-api/docs/models/gemini-4-argon), [OpenAI selection guide](https://developers.openai.com/api/docs/guides/model-selection). |
+| Image generation/editing | GPT Image 2.5 Sunburst / Flare; Nano Banana 2.1 | Sunburst for demanding edits, Flare for speed; Nano Banana 2.1 for iterative image work. Prefer registered Sunburst tools where applicable. [OpenAI image guide](https://developers.openai.com/api/docs/guides/image-generation), [Google models](https://ai.google.dev/gemini-api/docs/models). |
+| Speech generation | Gemini 3.8 Flash TTS / Flash-Lite TTS | Evaluate expressive narration versus throughput; use documented voices and supported non-streaming routes. [Google models](https://ai.google.dev/gemini-api/docs/models). |
+| Audio analysis / transcription | Gemini 4 Argon / GPT-Transcribe | Argon for semantic analysis; `gpt-transcribe` for completed audio-file transcripts. [Argon modalities](https://ai.google.dev/gemini-api/docs/models/gemini-4-argon), [GPT-Transcribe](https://developers.openai.com/api/docs/models/gpt-transcribe). |
+| Embeddings | Gemini Embedding 2; Text Embedding 3 Small / Large | Gemini for multimodal retrieval, Small/Large for text cost/quality tradeoffs. Version numbers alone do not establish obsolescence. Preserve index model/dimensions or re-embed. [Gemini Embedding 2](https://ai.google.dev/gemini-api/docs/models/gemini-embedding-2), [OpenAI embeddings](https://developers.openai.com/api/docs/guides/embeddings). |
+
+`verified_ids` means an exact ID was found in the cited official documentation or
+catalog **on the review date**. It does not mean that a generation was tested,
+that every route implements the family’s capabilities, or that an account has
+access. Google/Anthropic/OpenAI IDs must not be turned into OpenRouter paths by
+guessing a prefix. The full guidance distinguishes an `unverified_candidate`
+such as Kling 4 from documented IDs, and contains source URLs for rechecking.
+
+Every discovery tool call computes `as_of`, `age_days`, `stale_after`, `stale` and
+`requires_refresh` at runtime using the UTC date. The interval is **four calendar
+months**, with the day clamped at month end. For this review, `stale_after` is
+2027-02-28; it becomes stale on 2027-03-01. The boundary date itself is still
+within four months. A future-dated review also requires verification rather than
+being presented as fresh. The model request result includes the same freshness
+metadata, without altering its native provider response.
+
+Before choosing from stale guidance, the agent is instructed to browse official
+provider documentation **and** refresh `model_catalog`, then check exact IDs,
+modalities, operation support and access. A fresh catalog does not refresh the
+quality assessment or silently change `last_updated`. If research is unavailable,
+the agent must disclose the uncertainty. This is advisory guidance, not a new
+generation policy gate. Explicit user requests—including older models—retain
+their exact native payload; no alias rewriting, retirement list, forced upgrade
+or fallback is introduced. Historical examples such as Gemini 3.1 Pro are not
+default model choices.
 
 ## Use a script
 
@@ -188,6 +240,33 @@ Gemini file URI; retrieve it through `file.content` with `name` set to the retur
 URI or `files/<id>`. These content operations accept only their fixed provider's
 file endpoint, not arbitrary URLs.
 
+OpenRouter video uses the same separate `video.create`, `video.status` and
+`video.content` operations. For example, after checking the live catalog for H3:
+
+```python
+from vwb_models import catalog, request
+
+print(catalog("openrouter", query="hailuo-3", modality="video"))
+# Inspect the exact matching row and its supported controls before submission.
+job = request("openrouter", "video.create", {
+    "model": "minimax/hailuo-3",
+    "prompt": "A slow camera move over a sand dune.",
+    "duration": 5, "resolution": "2K", "aspect_ratio": "16:9",
+}, purpose="Create a background clip")
+job_id = job["response"]["id"]
+status = request("openrouter", "video.status", {"id": job_id})
+# Poll later if pending/in_progress; never resubmit creation to poll.
+if status["response"]["status"] == "completed":
+    clip = request("openrouter", "video.content", {"id": job_id})
+    print(clip["artifacts"])
+```
+
+These example controls were catalog-supported on the review date; current
+model capabilities take precedence. H3 does not advertise seed support in the
+reviewed catalog. Do not reuse another model's resolution, reference handling or
+duration assumptions. Native asynchronous APIs can fail after accepting a job;
+record that failure rather than substituting a different model.
+
 ## Files and generated outputs
 
 Refer to an input file with a work-relative marker inside the native payload:
@@ -197,6 +276,10 @@ format. An optional `mime_type` names the input type. Multipart inputs use a
 `$file` marker without an encoding, for example an OpenAI image-edit `image` or
 transcription `file` field. This lets
 scripts work with durable paths rather than putting binary blobs in chat.
+An optional `sha256` in the marker pins the expected input bytes, for example
+`{"$file":"references/source.png","encoding":"data_url","sha256":"<64-hex-digest>"}`.
+The host checks that digest before the provider request and fails if the file
+changed. It is an integrity pin, not a credential or a model-selection hint.
 
 Results identify the provider, operation and model, and include the native
 `response`, reported `usage`, `artifacts` and `response_path`. Generated binaries
