@@ -54,7 +54,10 @@ def canvas_schema(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
 
 
 def canvas_renderers(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
-    return ToolResult.json(renderer_catalog())
+    from vwb.desktop.after_effects import AfterEffects
+    bridge = getattr(ctx.state.get("integration_service"), "after_effects", None)
+    host = (bridge if bridge is not None else AfterEffects()).status()
+    return ToolResult.json(renderer_catalog(after_effects_status=host))
 
 
 def canvas_set_renderer(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:

@@ -670,7 +670,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.command in {"GET", "HEAD"}:
             if parts == ["api", "canvas-renderers"]:
                 from vwb.canvas.renderers import catalog as renderer_catalog
-                return self._json(renderer_catalog())
+                from vwb.desktop.after_effects import AfterEffects
+                return self._json(renderer_catalog(after_effects_status=AfterEffects(self.app.runs_dir).status()))
             if parts == ["api", "bootstrap"]:
                 return self._json({"csrf_token": self.app.csrf_token, "capabilities": {
                     "upload": True, "queue": True, "steer": "interrupt_then_resume", "compact": "native",

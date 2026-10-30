@@ -43,14 +43,16 @@ SETUP_STEPS = [
 ]
 
 
-def _private_root(runs_dir=None):
+def _private_root(runs_dir=None, *, create=True):
     root = Path(runs_dir if runs_dir is not None else config.RUNS_DIR).resolve()
-    root.mkdir(parents=True, exist_ok=True)
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
     for part in (root / '.desktop', root / '.desktop' / 'after-effects'):
         if part.is_symlink():
             raise ValueError('After Effects host settings must not be a symlink')
-        part.mkdir(mode=0o700, exist_ok=True)
-        part.chmod(0o700)
+        if create:
+            part.mkdir(mode=0o700, exist_ok=True)
+            part.chmod(0o700)
     return part
 
 
@@ -82,7 +84,7 @@ def _write_json(path, value):
 
 
 def _settings(runs_dir=None):
-    value = _read_json(_private_root(runs_dir) / 'settings.json', {})
+    value = _read_json(_private_root(runs_dir, create=False) / 'settings.json', {})
     if not isinstance(value, dict):
         raise ValueError('Invalid After Effects host settings')
     return value
@@ -155,7 +157,7 @@ def _pending(root):
 
 
 def settings_status(runs_dir=None):
-    root = _private_root(runs_dir)
+    root = _private_root(runs_dir, create=False)
     settings = _settings(runs_dir)
     app, render = _discover(settings) if platform.system() == 'Darwin' else (None, None)
     enabled, supported = bool(settings.get('enabled', False)), platform.system() == 'Darwin'
@@ -329,7 +331,22 @@ def _timeout(value, maximum):
 def _public(row):
     hidden = {'request_root', 'runs_dir', 'nonce', 'arguments', 'supervisor_pid', 'command_pid',
               'watchdog_pid', 'command_identity'}
-    return {key: value for key, value in row.items() if key not in hidden}
+    result = {key: value for key, value in row.items() if key not in hidden}
+    result['authoring_target'] = 'after_effects'
+    result['review'] = {'status': 'not_evaluated',
+                        'reason': 'Native project/output; completion and file hashes do not evaluate design fidelity or approve delivery.'}
+    if row['kind'] == 'render' and row['status'] == 'completed' and row.get('output'):
+        path = row['output']['path']
+        # media_register currently recognizes MOV/MP4 among AE's movie outputs.
+        # Other native formats stay workspace files; do not offer a broken import.
+        if Path(path).suffix.lower() in {'.mov', '.mp4'}:
+            result['import_hint'] = {
+                'tool': 'media_register', 'arguments': {'path': path},
+                'note': 'Optional separate Registry call, subject to media.register policy and role permissions. '
+                        'Imports rendered video as an immutable source, not editable AE layers or effects. '
+                        'Keep the saved .aep and receipts for further native edits.',
+            }
+    return result
 
 
 def update(directory, **changes):
@@ -528,7 +545,7 @@ def _jsx_literal(value):
 
 def build_wrapper(row, directory):
     """ES3-compatible JSX with its own serializer; AE does not guarantee global JSON."""
-    ws = Path(row['request_root']) / 'work'
+    ws = Path(row['workspace_path'])
     args = row['arguments']
     project = ws / row['output_directory'] / 'project.aep'
     source_project = str(ws / args['project_path']) if args.get('project_path') else ''
@@ -614,7 +631,7 @@ def command(row, directory):
                  'end tell\nend timeout')
         return ['/usr/bin/osascript', '-e', apple]
     args = row['arguments']
-    root = Path(row['request_root']) / 'work'
+    root = Path(row['workspace_path'])
     output = root / args['output_path']
     output.parent.mkdir(parents=True, exist_ok=True)
     argv = [row['aerender_path'], '-project', str(root / args['project_path']), '-output', str(output)]

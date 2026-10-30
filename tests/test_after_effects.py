@@ -385,6 +385,8 @@ def test_agent_status_uses_injected_host_configuration(native, monkeypatch, tmp_
     result = status(ctx, {})
     assert result.data['connected']
     assert result.data['workspace_path'] == str(native.ws.work.resolve())
+    assert result.data['target']['id'] == 'after_effects'
+    assert result.data['target']['availability']['status'] == 'available'
 
 
 def test_actual_detached_worker_entrypoint_renders_and_finishes(native, monkeypatch):
@@ -526,3 +528,167 @@ process.stdout.write(JSON.stringify({receipt,events}));
             assert 'close' not in output['events'] and 'save' not in output['events']
         else:
             assert output['events'].count('save') == 2
+
+
+def native_context(native):
+    from vwb.tools import build_registry
+    from vwb.tools.base import ToolContext
+    from vwb.workspace import Workspace
+    from vwb.workspace.request import SUBDIRS, Request
+
+    ws = Workspace(native.ws.root)
+    for sub in SUBDIRS:
+        (ws.root / sub).mkdir(parents=True, exist_ok=True)
+    ws.save(Request(id=ws.id, message='Author in native AE'))
+    ctx = ToolContext(ws, 'job_lead', 'job_lead', None,
+                      state={'integration_service': SimpleNamespace(after_effects=ae.AfterEffects(native.runs))})
+    return build_registry(), ctx
+
+
+def test_native_commands_use_recorded_shared_project_workspace(native, monkeypatch, tmp_path):
+    from vwb.workspace import Workspace
+
+    shared = tmp_path / 'shared-project'
+    work = shared / 'work'
+    work.mkdir(parents=True)
+    (work / 'build.jsx').write_text('vwb.result = {comp:"Main"};')
+    (work / 'existing.aep').write_bytes(b'existing project')
+    native.ws.work = work
+    monkeypatch.setattr(Workspace, 'project_root', property(lambda _: shared))
+    row, _ = stub_launch(native, monkeypatch, args={'script_path': 'build.jsx', 'project_path': 'existing.aep'})
+    directory = job_dir(native, row)
+    private = ae._read_json(directory / 'job.json')
+    wrapper = ae.build_wrapper(private, directory)
+    assert str(work / 'existing.aep') in wrapper
+    assert str(work / row['output_directory'] / 'project.aep') in wrapper
+    assert str(native.ws.root / 'work') not in wrapper
+    ae.command(private, directory)
+    assert (work / row['output_directory'] / 'runner.jsx').is_file()
+    rendered, _ = stub_launch(native, monkeypatch, kind='render', args={
+        'project_path': 'existing.aep', 'output_path': 'renders/shared.mov', 'comp': 'Main'})
+    render_dir = job_dir(native, rendered)
+    argv = ae.command(ae._read_json(render_dir / 'job.json'), render_dir)
+    assert argv[argv.index('-project') + 1] == str(work / 'existing.aep')
+    assert argv[argv.index('-output') + 1] == str(work / 'renders/shared.mov')
+    assert (work / 'existing.aep').read_bytes() == b'existing project'
+
+
+def test_native_target_keeps_registry_policy_role_and_human_enablement_gates(native, monkeypatch):
+    registry, ctx = native_context(native)
+    monkeypatch.setattr(ae.subprocess, 'Popen', lambda *a, **k: pytest.fail('Blocked calls cannot dispatch'))
+    args = {'script_path': 'build.jsx'}
+    host = registry.call(ctx, 'after_effects_status', {})
+    assert not host.is_error and not host.data['enabled']
+    disabled = registry.call(ctx, 'after_effects_run', args)
+    assert disabled.is_error and 'person must enable' in disabled.text
+    enable(native)
+    ctx.role = 'critic'
+    assert registry.call(ctx, 'after_effects_run', args).is_error
+    ctx.role = 'job_lead'
+    ctx.state['allowed_tools'] = ['after_effects_status']
+    assert 'inherited' in registry.call(ctx, 'after_effects_run', args).text
+    del ctx.state['allowed_tools']
+    monkeypatch.setattr(registry, 'mode', lambda cap: 'block' if cap == 'desktop.after_effects.execute' else 'allow')
+    assert 'policy dial' in registry.call(ctx, 'after_effects_run', args).text
+    monkeypatch.setattr(registry, 'mode', lambda cap: 'ask' if cap == 'desktop.after_effects.execute' else 'allow')
+    parked = registry.call(ctx, 'after_effects_run', args)
+    assert parked.data['parked']
+    assert not (ctx.ws.root / '.after-effects/jobs').exists()
+
+
+def test_registry_native_author_render_import_roundtrip_with_simulated_host(native, monkeypatch):
+    """Simulated Adobe host; real jobs, movie encoding/decoding and immutable import.
+
+    No Adobe app, license, preferences, OS consent, JSX engine or visual fidelity
+    is validated here. Existing ES VM tests separately exercise the JSX wrapper.
+    """
+    from vwb.ask.broker import Broker
+    from vwb.media.probe import probe
+
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg or not shutil.which('ffprobe'):
+        pytest.skip('FFmpeg and ffprobe are required for native movie handoff testing')
+    registry, ctx = native_context(native)
+    enable(native)
+    settings = native.runs / '.desktop/after-effects/settings.json'
+    settings_before = settings.read_bytes()
+    monkeypatch.setattr(Broker, 'ask', lambda *a, **k: pytest.fail('Existing configuration and allow policy need no new approval'))
+
+    def call(name, args):
+        result = registry.call(ctx, name, args)
+        assert not result.is_error, result.text
+        return result
+
+    target = call('after_effects_status', {}).data['target']
+    assert target['availability']['status'] == 'available'
+    assert target['kind'] == 'native_project'
+    call('file_write', {'path': 'native/build.jsx', 'content': 'vwb.result = {comp: "Main"};'})
+
+    # Submit through Registry and execute the trusted supervisor synchronously
+    # so the test can substitute just the native application process.
+    with monkeypatch.context() as scoped:
+        scoped.setattr(ae.subprocess, 'Popen', lambda *a, **k: SimpleNamespace(pid=123456))
+        authored = call('after_effects_run', {'script_path': 'native/build.jsx'}).data
+    directory = job_dir(native, authored)
+    real_command = ae.command
+
+    def simulated_author(row, folder):
+        real_command(row, folder)  # Retain the actual runner.jsx and AppleScript contract.
+        project_path = row['output_directory'] + '/project.aep'
+        receipt = {'nonce': row['nonce'], 'status': 'completed', 'project_path': project_path,
+                   'result': {'comp': 'Main'}}
+        code = ('from pathlib import Path; '
+                f'Path({str(ctx.ws.work / project_path)!r}).write_bytes(b"simulated AE project"); '
+                f'Path({str(folder / "completion.json")!r}).write_text({json.dumps(receipt)!r})')
+        return [sys.executable, '-c', code]
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(ae, 'command', simulated_author)
+        ae.execute_job(directory)
+    authored = call('after_effects_job', {'job_id': authored['id']}).data
+    assert authored['status'] == 'completed'
+    assert authored['review']['status'] == 'not_evaluated'
+    project = ctx.ws.work / authored['project']['path']
+    project_before = project.read_bytes()
+    assert (ctx.ws.work / authored['output_directory'] / 'runner.jsx').is_file()
+
+    # Installed aerender fixture accepts the real argv and creates an actual
+    # six-frame movie; it does not render the dummy AE project.
+    native.renderer.write_text(f'#!{sys.executable}\nimport subprocess,sys\n'
+                               'output=sys.argv[sys.argv.index("-output")+1]\n'
+                               f'subprocess.run([{ffmpeg!r}, "-nostdin", "-v", "error", "-f", "lavfi", '
+                               '"-i", "testsrc2=size=64x48:rate=24", "-frames:v", "6", '
+                               '"-c:v", "libx264", "-pix_fmt", "yuv420p", output], check=True)\n')
+    native.renderer.chmod(0o755)
+    with monkeypatch.context() as scoped:
+        scoped.setattr(ae.subprocess, 'Popen', lambda *a, **k: SimpleNamespace(pid=123456))
+        render = call('after_effects_render', {'project_path': authored['project']['path'],
+                                              'comp': authored['result']['comp'],
+                                              'output_path': 'native/render-v1.mp4'}).data
+    ae.execute_job(job_dir(native, render))
+    render = call('after_effects_job', {'job_id': render['id']}).data
+    assert render['status'] == 'completed', render
+    assert render['review']['status'] == 'not_evaluated'
+    assert project.read_bytes() == project_before
+    assert not ctx.ws.load().sources  # Polling a job never imports implicitly.
+    receipt = json.loads((ctx.ws.work / render['output_directory'] / 'receipt.json').read_text())
+    assert receipt['import_hint'] == render['import_hint']
+    hint = render['import_hint']
+    with monkeypatch.context() as scoped:
+        scoped.setattr(registry, 'mode', lambda cap: 'block' if cap == 'media.register' else 'allow')
+        assert registry.call(ctx, hint['tool'], hint['arguments']).is_error
+        assert not ctx.ws.load().sources
+    imported = call(hint['tool'], hint['arguments']).data
+    assert imported['sha256'] == render['output']['sha256']
+    assert call(hint['tool'], hint['arguments']).data['ref'] == imported['ref']
+    original = Path(ctx.ws.load().sources[0].path)
+    info = probe(original, with_keyframes=False)
+    assert (info.width, info.height, info.n_frames) == (64, 48, 6)
+    frame = call('media_frame', {'target': 'source:' + imported['ref'], 'frame': 5})
+    assert frame.images
+    (ctx.ws.work / render['output']['path']).write_bytes(b'changed working copy')
+    assert original.read_bytes() != b'changed working copy'
+    assert settings.read_bytes() == settings_before
+    assert not list(ctx.ws.canvas.glob('*/HEAD*'))
+    logged = {json.loads(line)['tool'] for line in (ctx.ws.ledger / 'tools.jsonl').read_text().splitlines()}
+    assert set(target['required_tools'] + target['import_tools']) <= logged

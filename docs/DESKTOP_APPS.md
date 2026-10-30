@@ -39,6 +39,83 @@ create compositions, layers, text, shapes, keyframes and expressions, import
 footage, and access the rest of the installed application's scripting API.
 Plugins, fonts and effects still need to exist in that installation.
 
+### Native authoring target
+
+The Canvas picker can select `after_effects` as a **native project** target.
+The editable source is an `.aep` in the workspace and the native AE application
+is the authoring surface. Workbench can display the rendered movie or still; it
+does not embed AE's interactive editor. There is no automatic conversion of an
+arbitrary `vwb.canvas/2` document, and `canvas_set_renderer` cannot select AE.
+Moving a rendered movie into a canvas preserves the rendered pixels, not AE's
+editable layers, effects, expressions or keyframes. Retain the `.aep` to edit them.
+
+`canvas_renderers` and the catalog endpoint retain their four `renderers` rows
+and add `targets`. Each target has `id`, `label`, `kind`, `description`, `scope`,
+`capability`, `required_tools` and `supports_renderer_swap`. The four adapter IDs
+have `kind: "canvas_renderer"`; `after_effects` has `kind: "native_project"` and
+also supplies an ordered `workflow` and `import_tools: ["media_register"]`.
+Its `availability` is `{status, reason}`, with status `unknown`, `unavailable`,
+`setup_required` or `available`. The base catalog does not probe the host. A host
+caller can supply `catalog(after_effects_status=...)`; the `after_effects_status`
+tool also returns this metadata under `target`.
+
+Availability describes installation and configuration, not an authority grant
+or a live execution test. Even `available` cannot verify the Adobe license,
+scripting preference or macOS consent without running a job. Choosing the target
+conveys authoring intent only. Calls still pass through Registry role permissions,
+the `desktop.after_effects.execute` policy and the human-enabled connection.
+Existing enabled configuration is reused; selecting AE does not request a second
+blanket approval or change desktop settings. A configured policy of `ask` or
+`block` still applies. No new tool or policy capability is required by this target.
+
+### Author, render and import
+
+An example tool sequence (paths are relative to `work/`):
+
+1. Call `after_effects_status`. Resolve any reported installation or enablement
+   requirement through the human settings flow above.
+2. Use `file_write` to save `native/build.jsx`. A minimal example below creates
+   an editable composition and reports installed template names rather than
+   assuming an output format is available:
+
+   ```javascript
+   var comp = app.project.items.addComp("Main", 640, 360, 1, 1, 24);
+   comp.layers.addText("Native composition");
+   var queued = app.project.renderQueue.items.add(comp);
+   vwb.result = {
+       comp: comp.name,
+       render_queue_index: queued.index,
+       render_templates: queued.templates,
+       output_templates: queued.outputModule(1).templates
+   };
+   ```
+
+3. Call `after_effects_run({"script_path":"native/build.jsx"})`, then
+   `after_effects_job({"job_id":"<returned id>","wait_s":30})` until terminal.
+   Continue only on `completed`. Retain `project.path`, its SHA-256 and the
+   returned composition/template metadata. Later edits can pass this path as
+   `project_path` to another isolated script job to create a new saved copy.
+4. Call `after_effects_render` with `project_path` from the successful script,
+   `comp: "Main"` (or `render_queue_index`), a new `output_path` such as
+   `native/render-v1.mov`, and a compatible installed `output_module` template
+   selected from the returned names. The template controls the format/codec;
+   changing the filename extension does not configure it. Poll the render job.
+5. A completed MOV/MP4 job returns `output.path`, a file hash and an `import_hint`
+   containing the optional `media_register` call. Invoke that call separately to
+   snapshot the movie as an immutable source. It remains subject to `media.register`
+   policy; the job lead can import a composer's render. Inspect it using
+   `media_frame(target="source:<returned ref>", frame=0)`. Run `index_build`
+   before workflows that need source indexing. Importing does not convert the
+   native composition into a canvas or commit an output.
+
+Still images remain workspace files and can be inspected with `image_inspect`.
+Native AVI/MXF and audio outputs are not directly importable by `media_register`;
+use a compatible MOV/MP4 render for video reuse. Every native job result/receipt
+identifies `authoring_target: "after_effects"` and `review.status: "not_evaluated"`.
+Completion checks files, not design fidelity or delivery acceptance. Native
+projects/renders require explicit review; JSON canvas checks run only if a
+separate canvas is authored and committed.
+
 `after_effects_status` returns the absolute host `workspace_path`. Within a
 script, `vwb.workPath`, `vwb.outputPath` and `vwb.projectPath` give the exact paths
 on the Mac, rather than the agent container's `/work`. `vwb.log(text)` records
@@ -71,6 +148,32 @@ If automatic discovery misses a nonstandard installation, the host configuration
 endpoint accepts an `app_path` and `aerender_path`; the application must identify
 itself as Adobe After Effects. These are human settings, not agent tool arguments.
 An installed app still needs its license, scripting preference and macOS consent.
+
+### Adobe evidence and validation limits
+
+Primary documentation checked 2026-10-30:
+
+- [Adobe Scripts](https://helpx.adobe.com/after-effects/desktop/automate-in-after-effects/automate-animation/scripts.html)
+  documents JSX authoring, disabled file/network writes by default, Escape to
+  stop scripts, and Windows `afterfx -r` dispatch into the existing application.
+  This bridge implements macOS AppleScript dispatch; it does not claim Windows
+  execution or use `aerender` as a general JSX runner.
+- [Adobe automated rendering](https://helpx.adobe.com/after-effects/desktop/render-and-export/automate-rendering/automated-rendering-network-rendering.html)
+  documents saved-project/comp or queue selection, installed template names,
+  inclusive end frames and a separate application instance unless `-reuse` is
+  requested. The bridge omits `-reuse` and does not relax missing-footage checks.
+  Adobe supports image sequences; this bridge deliberately accepts only movies,
+  audio and a single still with equal start/end frames. Fonts, plugins and encoders
+  must be present on the rendering host.
+
+The development host inspection found no AE app in `/Applications` or
+`~/Applications`, and no saved AE enablement in this checkout. Tests use a
+synthetic installation and process/JSX host to exercise the native project,
+render and import route. They also decode a real generated movie after import.
+This is integration evidence for Workbench, not proof of native Adobe execution,
+visual equivalence, installed templates or macOS Automation consent. A licensed
+macOS AE host is still required for those checks; no preferences are changed by
+the tests or catalog discovery.
 
 ## Blender MCP
 

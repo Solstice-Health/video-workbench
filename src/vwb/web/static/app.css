@@ -154,23 +154,65 @@ summary::-webkit-details-marker {display: none;}
 .composer-mode {display: flex; align-items: center; gap: 6px;}
 .composer-mode select {max-width: 110px; min-height: 28px; border: 1px solid var(--ds-border-divider); border-radius: 6px; padding: 2px 4px; background: var(--ds-surface-default); color: var(--ds-text-primary); font: inherit;}
 .composer-preview-label {font-size: 10px;}
-.composer-renderers {min-width: 0; max-width: 100%;}
-.composer-renderers > summary {padding: 6px 0; cursor: pointer; overflow-wrap: anywhere; color: var(--ds-text-primary);}
-.composer-renderer-options {position: absolute; bottom: calc(100% + 6px); left: 12px; width: min(280px, calc(100% - 24px)); max-height: min(420px, 55dvh); overflow-y: auto; z-index: var(--ds-z-dropdown); padding: 12px; border: 1px solid var(--ds-border-divider); border-radius: 12px; background: var(--ds-surface-default); box-shadow: 0 8px 28px #0002;}
-.composer-renderer-options fieldset {border: 0; margin: 0; padding: 0; min-width: 0;}
-.composer-renderer-options legend {font-weight: 600; color: var(--ds-text-primary);}
-.composer-renderer-options p {margin: 6px 0;}
-.composer-renderer-options label {display: flex; align-items: center; gap: 8px; padding: 6px 0; cursor: pointer; color: var(--ds-text-primary);}
-.composer-renderer-options input {width: 16px; height: 16px; flex-shrink: 0; margin: 0; accent-color: var(--ds-text-primary);}
-.composer-renderer-options small {display: block; font-size: 10px; color: var(--ds-text-secondary);}
-.composer-catalog-note {border-top: 1px solid var(--ds-border-divider); padding-top: 6px;}
+.composer-target-trigger {min-width: 0; max-width: 100%; min-height: 32px; padding: 4px 10px; border: 1px solid var(--ds-border-divider); border-radius: 8px; background: var(--ds-surface-default); color: var(--ds-text-primary); overflow-wrap: anywhere; font: inherit;}
+.composer-target-dialog {position: fixed; inset: 0; margin: auto; padding: 0; width: min(760px, calc(100% - 32px)); max-width: none; max-height: calc(100dvh - 32px); overflow: hidden; border: 1px solid var(--ds-border-divider); border-radius: 16px; background: var(--ds-surface-default); color: var(--ds-text-primary); box-shadow: var(--ds-elevation-modal, 0 20px 80px #0003); font-size: 13px; line-height: 20px;}
+.composer-target-dialog[open] {display: flex; flex-direction: column;}
+.composer-target-dialog::backdrop {background: var(--ds-overlay-scrim, #0006);}
+.composer-target-dialog button {min-height: 40px; padding: 8px 16px; border: 1px solid var(--ds-border-divider); border-radius: 8px; background: var(--ds-surface-default); color: var(--ds-text-primary); font: inherit;}
+.composer-target-dialog button:hover {background: var(--ds-surface-sunken);}
+.composer-target-heading {display: flex; align-items: flex-start; gap: 16px; padding: 24px 24px 12px; flex-shrink: 0;}
+.composer-target-heading h2 {margin: 0 0 8px; font-size: 20px; line-height: 28px; font-weight: 600;}
+.composer-target-heading p {margin: 0; color: var(--ds-text-secondary);}
+.composer-target-dialog .composer-target-close {flex-shrink: 0; width: 40px; padding: 0; margin-left: auto; font-size: 24px;}
+.composer-target-search {padding: 0 24px 12px; flex-shrink: 0;}
+.composer-target-search label {display: block; margin-bottom: 4px; font-weight: 600;}
+.composer-target-search input {width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px; border: 1px solid var(--ds-border-divider); border-radius: 8px; background: var(--ds-surface-sunken); color: var(--ds-text-primary); font: inherit;}
+.composer-target-search p {margin: 6px 0 0; font-size: 12px; color: var(--ds-text-secondary);}
+.composer-target-scroll {padding: 4px 24px 16px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable;}
+.composer-target-choices {min-width: 0; padding: 0; margin: 0; border: 0;}
+.composer-target-grid {display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;}
+.composer-target-card {display: flex; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid var(--ds-border-divider); border-radius: 10px; cursor: pointer; overflow-wrap: anywhere;}
+.composer-target-card:hover {background: var(--ds-surface-sunken);}
+.composer-target-card.is-selected {border-color: var(--ds-text-primary); background: var(--ds-surface-sunken); box-shadow: inset 0 0 0 1px var(--ds-text-primary);}
+.composer-target-card input {width: 18px; height: 18px; flex-shrink: 0; margin: 2px 0 0; accent-color: var(--ds-text-primary);}
+.composer-target-card strong {display: block; font-size: 14px; line-height: 20px; font-weight: 600;}
+.composer-target-card span {display: block; min-width: 0;}
+.composer-target-card span span {color: var(--ds-text-secondary); font-size: 12px; line-height: 18px;}
+.composer-target-card strong + span {margin-top: 3px;}
+.composer-target-card .composer-target-scope {margin-top: 4px;}
+.composer-target-card .composer-target-availability {margin-top: 6px;}
+.composer-target-card .composer-target-availability b {font-weight: 600; color: var(--ds-text-primary);}
+.composer-target-auto {margin-bottom: 12px;}
+.composer-target-empty {padding: 24px 16px; text-align: center; overflow-wrap: anywhere;}
+.composer-target-empty p {color: var(--ds-text-secondary); margin: 8px 0 16px;}
+.composer-catalog-note {margin: 16px 0 0; border-top: 1px solid var(--ds-border-divider); padding-top: 12px; color: var(--ds-text-secondary); font-size: 12px; line-height: 18px;}
+.composer-target-actions {display: flex; align-items: center; gap: 8px; padding: 16px 24px; border-top: 1px solid var(--ds-border-divider); flex-shrink: 0;}
+.composer-target-actions > span {margin-right: auto; color: var(--ds-text-secondary);}
+.composer-target-dialog .composer-target-apply {background: var(--ds-text-primary); color: var(--ds-surface-default);}
+.composer-target-dialog .composer-target-apply:hover {opacity: .85;}
+@media (max-width: 639px) {
+  .composer-target-dialog {width: calc(100% - 16px); max-height: calc(100dvh - 16px); border-radius: 12px;}
+  .composer-target-heading {padding: 16px 16px 12px; gap: 8px;}
+  .composer-target-heading h2 {font-size: 18px; line-height: 24px;}
+  .composer-target-search {padding: 0 16px 8px;}
+  .composer-target-search input {font-size: 16px;}
+  .composer-target-scroll {padding: 4px 16px 12px;}
+  .composer-target-grid {grid-template-columns: minmax(0, 1fr); gap: 8px;}
+  .composer-target-actions {padding: 12px 16px max(12px, env(safe-area-inset-bottom));}
+}
+@media (max-height: 480px) {
+  .composer-target-heading {padding-top: 12px; padding-bottom: 8px;}
+  .composer-target-heading h2 {margin-bottom: 4px;}
+  .composer-target-search {padding-bottom: 6px;}
+  .composer-target-actions {padding-top: 8px; padding-bottom: 8px;}
+}
 .composer-instruction {margin-top: 4px;}
 .composer-instruction summary {cursor: pointer;}
 .composer-instruction p {margin: 4px 0 0; overflow-wrap: anywhere;}
 .composer-preferences summary {display: flex; align-items: center; gap: 6px; list-style: none;}
 .composer-preferences summary::after {content: ''; width: 5px; height: 5px; flex-shrink: 0; border-right: 1px solid currentColor; border-bottom: 1px solid currentColor; transform: rotate(45deg);}
 .composer-preferences details[open] > summary::after {transform: rotate(225deg);}
-.composer-preferences :is(select, summary, input):focus-visible {outline: 2px solid var(--ds-text-primary); outline-offset: 3px;}
+.composer-preferences :is(select, summary, input, button):focus-visible {outline: 2px solid var(--ds-text-primary); outline-offset: 3px;}
 .composer-preferences :disabled {opacity: .55; cursor: default;}
 .queue-label {padding-left: 8px; border-left: 1px solid var(--ds-border-divider); font-size: 11px; white-space: nowrap;}
 .send-now {display: flex; align-items: center; gap: 4px; border: 0; padding: 4px; background: none; color: var(--ds-text-secondary); white-space: nowrap; font-size: 12px; border-radius: 4px;}
