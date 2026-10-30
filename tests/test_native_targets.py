@@ -131,11 +131,14 @@ def catalog_host(tmp_path, monkeypatch):
 
 def route_catalog(runs, *, headers=None):
     """Exercise the real GET handler and origin check without opening a socket."""
+    from email.message import Message
     handler = object.__new__(Handler)
-    handler.server = SimpleNamespace(workbench=SimpleNamespace(runs_dir=runs), server_address=('127.0.0.1', 12345))
+    handler.server = SimpleNamespace(workbench=SimpleNamespace(runs_dir=runs, public_access=None), server_address=('127.0.0.1', 12345))
     handler.command = 'GET'
     handler.path = '/api/canvas-renderers'
-    handler.headers = {'Host': '127.0.0.1:12345', **(headers or {})}
+    handler.headers = Message()
+    for key, value in {'Host': '127.0.0.1:12345', **(headers or {})}.items():
+        handler.headers[key] = value
     result = []
     handler._json = lambda value: result.append(value)
     handler._route()

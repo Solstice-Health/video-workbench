@@ -1,4 +1,4 @@
-"""A loopback-only HTTP server for the local workbench.
+"""A loopback-bound HTTP server with optional protected public HTTPS access.
 
 Mutations require a per-server CSRF token and same-origin browser requests. Files are
 served only from explicit media/review directories, never arbitrary local paths.
@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import threading
 import uuid
 import webbrowser
@@ -84,7 +85,10 @@ def _rows(path: Path) -> list[dict[str, Any]]:
 
 
 class Workbench:
-    def __init__(self, runs_dir: Path = RUNS_DIR, *, queue: TurnQueue | None = None):
+    def __init__(self, runs_dir: Path = RUNS_DIR, *, queue: TurnQueue | None = None, public_url: str = ''):
+        from vwb.web.public_access import PublicAccess
+
+        self.public_access = PublicAccess(public_url) if public_url else None
         self.runs_dir = runs_dir.resolve()
         self.queue = queue or TurnQueue(self.runs_dir)
         self.csrf_token = secrets.token_urlsafe(32)
@@ -567,17 +571,28 @@ class Handler(BaseHTTPRequestHandler):
     def _check_host(self) -> str:
         port = self.server.server_address[1]
         hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        if self.app.public_access:
+            hosts.add(self.app.public_access.host)
         host = self.headers.get("Host", "")
-        if host not in hosts:
-            raise PermissionError("Open the workbench at its localhost address.")
+        if len(self.headers.get_all('Host', [])) != 1 or host not in hosts:
+            raise PermissionError("Open the workbench at its configured address.")
         return host
 
-    def _check_origin(self, mutate: bool = False) -> None:
+    def _request_origin(self) -> str:
         host = self._check_host()
+        access = self.app.public_access
+        return access.origin if access and host == access.host else f'http://{host}'
+
+    def _check_origin(self, mutate: bool = False) -> None:
+        expected = self._request_origin()
         origin = self.headers.get("Origin")
-        if origin and origin != f"http://{host}":
+        if len(self.headers.get_all('Origin', [])) > 1 or origin and origin != expected:
             raise PermissionError("Cross-origin requests are not allowed.")
-        if self.headers.get("Sec-Fetch-Site") == "cross-site":
+        public_navigation = (self.app.public_access and self.command in {'GET', 'HEAD'}
+                             and urlsplit(self.path).path == '/'
+                             and self.headers.get('Sec-Fetch-Mode') == 'navigate'
+                             and self.headers.get('Sec-Fetch-Dest') == 'document' and not origin)
+        if self.headers.get("Sec-Fetch-Site") == "cross-site" and not public_navigation:
             raise PermissionError("Cross-site requests are not allowed.")
         if mutate and not hmac.compare_digest(self.headers.get("X-CSRF-Token", ""), self.app.csrf_token):
             raise PermissionError("Reload the workbench before making changes.")
@@ -609,12 +624,15 @@ class Handler(BaseHTTPRequestHandler):
         url = urlsplit(self.path)
         parts = unquote(url.path).strip("/").split("/")
         query = parse_qs(url.query)
+        if self.app.public_access and self.app.public_access.gate(self, url, parts):
+            return
         if self.command == "GET" and parts == [""] and "qc_access" in query:
             self._check_origin()
             if not hmac.compare_digest(query["qc_access"][0], self.app.qc_token):
                 raise PermissionError("This Workbench launch link expired. Use the current vwb ui link.")
             self.send_response(303)
-            self.send_header("Set-Cookie", f"vwb_qc_{self.server.server_port}={self.app.qc_token}; HttpOnly; SameSite=Strict; Path=/api/requests/")
+            secure = '; Secure' if self._request_origin().startswith('https://') else ''
+            self.send_header("Set-Cookie", f"vwb_qc_{self.server.server_port}={self.app.qc_token}; HttpOnly; SameSite=Strict; Path=/api/requests/{secure}")
             self.send_header("Location", "/")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Referrer-Policy", "no-referrer")
@@ -969,7 +987,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _callback_uri(self, direct: bool = False, remote: bool = False) -> str:
         provider = "mcp" if remote else "figma-direct" if direct else "solstice"
-        return f"http://{self._check_host()}/api/integrations/{provider}/callback"
+        return f"{self._request_origin()}/api/integrations/{provider}/callback"
 
     def _integration_callback(self, query: dict, direct: bool = False, remote: bool = False) -> None:
         ok, pending = False, False
@@ -1165,26 +1183,58 @@ class Handler(BaseHTTPRequestHandler):
     do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = _handle
 
 
-def serve(*, port: int = 8765, open_browser: bool = True, runs_dir: Path = RUNS_DIR) -> None:
-    app = Workbench(runs_dir)
+def serve(*, port: int = 8765, open_browser: bool = True, runs_dir: Path = RUNS_DIR,
+          public_url: str | None = None, ngrok: bool = False) -> None:
+    from vwb.integrations.callbacks import public_origin
+    from vwb.web.public_access import PublicAccess
+    from vwb.web.tunnel import Ngrok
+
+    origin = public_origin(public_url)
+    previous_origin = os.environ.get('VWB_UI_PUBLIC_URL')
+    app = Workbench(runs_dir, public_url=origin)
+    server, tunnel = None, None
+    previous_signals = {}
+    def stop(signum, frame):
+        raise KeyboardInterrupt
     try:
+        if threading.current_thread() is threading.main_thread():
+            for sig in (signal.SIGTERM, signal.SIGHUP):
+                previous_signals[sig] = signal.signal(sig, stop)
+        # Bind our own server before starting ngrok. Never tunnel an occupied
+        # port belonging to an existing, possibly unprotected Workbench.
         server = WorkbenchServer(("127.0.0.1", port), app)
-    except BaseException:
-        app.local_imports.close()
-        app.studio.close()
-        app.queue.close()
-        raise
-    url = f"http://127.0.0.1:{server.server_address[1]}/?qc_access={app.qc_token}"
-    print(f"Video Workbench: {url}\nPress Ctrl-C to stop the UI. Queued messages are kept.", flush=True)
-    if open_browser:
-        webbrowser.open(url)
-    try:
+        if ngrok:
+            tunnel = Ngrok(server.server_port, origin)
+            origin = tunnel.origin
+            app.public_access = PublicAccess(origin)
+        if origin:
+            os.environ['VWB_UI_PUBLIC_URL'] = origin
+            url = app.public_access.launch_url
+            print(f"Public Workbench: {origin}\nPrivate launch link: {url}\n"
+                  f"Local launch link: http://127.0.0.1:{server.server_port}/#access={app.public_access.launch_token}\n"
+                  "Share the launch link only with trusted collaborators. It grants access to this host's Workbench.\n"
+                  f"Solstice callback: {origin}/api/integrations/solstice/callback", flush=True)
+        else:
+            url = f"http://127.0.0.1:{server.server_address[1]}/?qc_access={app.qc_token}"
+            print(f"Video Workbench: {url}", flush=True)
+        print("Press Ctrl-C to stop the UI and its managed tunnel. Queued messages are kept.", flush=True)
+        if open_browser:
+            webbrowser.open(url)
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
+        for sig, handler in previous_signals.items():
+            signal.signal(sig, handler)
+        if tunnel:
+            tunnel.close()
+        if server:
+            server.server_close()
         app.local_imports.close()
         app.studio.close()
         app.queue.close()
         app.close_browsers()
+        if previous_origin is None:
+            os.environ.pop('VWB_UI_PUBLIC_URL', None)
+        else:
+            os.environ['VWB_UI_PUBLIC_URL'] = previous_origin

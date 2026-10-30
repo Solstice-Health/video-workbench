@@ -59,6 +59,7 @@ packages = ["src/vwb"]
 "docs/DESIGN_CONTEXT.md" = "vwb/_resources/docs/DESIGN_CONTEXT.md"
 "docs/DESKTOP_APPS.md" = "vwb/_resources/docs/DESKTOP_APPS.md"
 "docs/MODEL_ACCESS.md" = "vwb/_resources/docs/MODEL_ACCESS.md"
+"docs/PUBLIC_ACCESS.md" = "vwb/_resources/docs/PUBLIC_ACCESS.md"
 "docs/CODE_INTELLIGENCE.md" = "vwb/_resources/docs/CODE_INTELLIGENCE.md"
 "docker/codex-agent/Dockerfile" = "vwb/_resources/docker/codex-agent/Dockerfile"
 "docker/code-tools" = "vwb/_resources/docker/code-tools"

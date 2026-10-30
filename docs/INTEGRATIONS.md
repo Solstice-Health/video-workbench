@@ -19,7 +19,8 @@ authorization-server discovery, dynamic client registration when offered, PKCE,
 callback state/issuer validation, and refresh tokens. Advanced settings support a
 bearer token or the server's pre-registered OAuth client credentials and scopes.
 The callback is `/api/integrations/mcp/callback` on the current Workbench origin.
-Registration settings must match that exact URL. Servers that do not allow dynamic
+Registration settings must match that exact URL; public HTTPS origins require
+[protected public access](PUBLIC_ACCESS.md). Servers that do not allow dynamic
 registration still require a client registered for Workbench; connecting directly
 cannot remove a provider's access restrictions.
 
@@ -162,7 +163,8 @@ regressions.
 1. At <https://www.figma.com/developers/apps>, create an OAuth app for your team.
    Save its Client ID and Client Secret. In OAuth credentials, add the exact callback
    `http://127.0.0.1:8765/api/integrations/figma-direct/callback`. Register the callback
-   actually shown by your Workbench if you use another local host/port.
+   actually shown by your Workbench if you use another local host/port or a
+   configured public HTTPS origin; the path stays `/api/integrations/figma-direct/callback`.
 2. Enable `file_content:read` and `current_user:read`. The app owner and plan admins
    can test a draft; publish privately for other eligible team/organization members.
 3. Open Workbench → Plugins → Manage connections → Figma direct settings. Enter the
@@ -263,9 +265,12 @@ The reviewable patch, validation results and deployment prerequisites are in
 [`integrations/solstice-figma/`](../integrations/solstice-figma/README.md).
 
 1. Register a **Workbench public/native Auth0 application** with authorization-code
-   and refresh-token grants. Do not reuse Cursor's or Codex's registered application.
+   and refresh-token grants. Do not reuse Cursor's, Codex's or another unrelated
+   client's registered application or repurpose its callback.
    Enable API offline access and rotating refresh tokens. Register the exact callback,
-   for example `http://127.0.0.1:8765/api/integrations/solstice/callback`.
+   for example `http://127.0.0.1:8765/api/integrations/solstice/callback` locally,
+   or `https://workbench.example/api/integrations/solstice/callback` for public
+   access (replace the placeholder with the exact origin printed at startup).
 2. Configure the registered public `client_id`, `redirect_uri` and documented
    `gateway_url` in the Integrations panel. The default gateway is
    `https://api.solsticehealth.co/mcp`. The Auth0 issuer is
@@ -282,6 +287,20 @@ The reviewable patch, validation results and deployment prerequisites are in
    subsequent Figma callback to that browser. Refresh after the callback completes.
    Gateway tool advertisement alone does not mark Figma connected: the gateway must
    report both `configured: true` and `connected: true`.
+
+For ngrok or an existing HTTPS reverse proxy, follow [protected public
+access](PUBLIC_ACCESS.md). Register the exact public HTTPS callback on the
+Workbench Auth0 client and use the same `redirect_uri` in Manage connections.
+Open the private launch link before connecting, and finish sign-in in that
+browser on the same origin. Public access still requires the registered Solstice
+Client ID and user sign-in. A launch link grants access to the shared host;
+it does not create a separate integration account for each visitor.
+
+One shared URL belongs to one host at a time. Separate per-person installations
+need separate URLs, runs/integration state and exact registered callbacks; do not
+pool their endpoints. A changed URL requires updating the registered and configured
+callback before reconnecting. Restarting the UI expires its launch links and
+access cookies, while stored integration grants persist.
 
 The same host configuration can be seeded with `VWB_SOLSTICE_MCP_URL`,
 `VWB_SOLSTICE_CLIENT_ID`, and `VWB_SOLSTICE_REDIRECT_URI`. These are public settings;
@@ -307,7 +326,8 @@ claim to revoke upstream consent. Protect/back up this host directory accordingl
 without provider response bodies or credentials. Public status contains `items`,
 `config` and `setup`; `begin_auth` and `begin_figma_auth` return
 `authorization_url` and `expires_at`. Only the validated OAuth callback may accept
-the cross-site GET; settings and connect/disconnect routes remain local UI actions.
+the cross-site GET; settings and connect/disconnect routes remain human UI actions
+on the validated Workbench origin, behind the access gate when public mode is enabled.
 
 The gateway extension contract is `solstice_figma_status`,
 `solstice_figma_connect`, `solstice_figma_get_file`, and

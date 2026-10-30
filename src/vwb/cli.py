@@ -27,10 +27,13 @@ def _ws(request: Optional[str]):
 
 @app.command()
 def ui(port: int = typer.Option(8765, min=1, max=65535, help="Local browser port."),
-       open_browser: bool = typer.Option(True, "--open/--no-open", help="Open the workbench in your browser.")):
+       open_browser: bool = typer.Option(True, "--open/--no-open", help="Open the workbench in your browser."),
+       ngrok: bool = typer.Option(False, "--ngrok", help="Start and own a protected ngrok HTTPS tunnel."),
+       public_url: str | None = typer.Option(None, "--public-url", envvar="VWB_UI_PUBLIC_URL",
+                                               help="Exact public HTTPS origin; with --ngrok, reuse this reserved domain.")):
     """Open the local chat workbench with live activity, queued messages and video previews."""
     from vwb.web.server import serve
-    serve(port=port, open_browser=open_browser)
+    serve(port=port, open_browser=open_browser, public_url=public_url, ngrok=ngrok)
 
 
 @app.command()

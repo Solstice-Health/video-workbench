@@ -83,6 +83,15 @@ uv run vwb ui                       # http://127.0.0.1:8765, opens your browser
 uv run vwb ui --no-open --port 8765  # start without opening a tab
 ```
 
+For a trusted group's shared Workbench, use `uv run vwb ui --ngrok --no-open`;
+add `--public-url https://workbench.example` to reuse your configured ngrok domain
+(replace the placeholder). This requires host-installed/configured ngrok. Share
+the printed private launch link only with trusted collaborators: it grants full
+access to that host's Workbench, without per-user isolation. Default localhost
+behavior is unchanged. See [protected public access](docs/PUBLIC_ACCESS.md) for
+URL ownership, OAuth registration and shutdown. If 8765 is busy, coordinate a
+restart; do not start another UI against the same runs directory.
+
 The Eeva frontend opens your existing conversations, rendered videos and review
 flags. It supports source uploads, live provider activity, expandable thinking
 summaries and tool calls, queued messages, nonblocking questions, and a context
