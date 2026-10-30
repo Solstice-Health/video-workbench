@@ -28,14 +28,18 @@ from vwb.index.ocr import agree_key, similar
 from vwb.index.paths import SourceIndexes, source
 from vwb.media.decode import read_frames
 from vwb.media.frames import contact_sheet, jpeg_bytes
+from vwb.media.inputs import resolve_video
+from vwb.media.probe import video_stream_info
 from vwb.tools.base import Tool, ToolContext, ToolResult, parse_json_arg, schema
 from vwb.util.hashing import new_id
+from vwb.util.procs import ToolError
 from vwb.workspace.registry import Registry
 
 REF = {"type": "string", "description": "attachment:<id> (immutable uploaded image), a work-relative image path "
        "(optional work: prefix), slot:<name>@<rev>, or source:<media ref>#t=<seconds>/#f=<frame>. "
        "Images need no video conversion/registration; frame pixels need no index. "
        "t:<seconds>/f:<frame> only with one source; slot:<name>@<rev>#t=<s>/#f=<n> for a clip frame. "
+       "Video attachments and work paths also accept #t=<seconds> or #f=<frame>. "
        "Image coordinates use EXIF-oriented pixels, matching image_inspect."}
 BOX = {"type": "array", "items": {"type": "number"}, "description": "[x, y, w, h] in the pixels of what it applies to"}
 QUALITY = {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]}
@@ -314,7 +318,9 @@ def omni_video(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
         raw_path = Path(tmp) / "omni.mp4"
         vid = None
         if a.get("video"):
-            vid = Path(Registry(ctx.ws.assets).get(a["video"])["path"])
+            video = resolve_video(ctx.ws, a["video"])
+            vid = video.path
+            lineage.append(video.lineage)
         gen = omni.generate(ctx.gateway, task=task, prompt=prompt, out=raw_path,
                             first=frame_of(first) if first else None, last=frame_of(last) if last else None,
                             refs=[frame_of(r) for r in refs] or None, video=vid, seconds=int(a.get("seconds", 6)),
@@ -340,11 +346,20 @@ def omni_video(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
             sheet = qa.preview(kres["preview"], height=420)
         else:
             out["ref"] = raw_ref
-            idx = [int(i) for i in np.linspace(0, 23 * int(a.get("seconds", 6)), 6)]
-            got = read_frames(raw_path, idx)
-            sheet = contact_sheet([(f"{i / 24:.1f}s", got[i]) for i in idx if i in got], cols=6, cell_width=220)
+            # Providers can return a different length/rate than requested.
+            # Sample the actual artifact rather than indexing beyond its end.
+            try:
+                info = video_stream_info(raw_path)
+                idx = sorted({int(i) for i in np.linspace(0, info.n_frames - 1, 6)})
+                got = read_frames(raw_path, idx)
+                sheet = contact_sheet([(f"{float(i / info.fps):.1f}s", got[i]) for i in idx], cols=6, cell_width=220)
+            except (ToolError, OSError, ValueError, IndexError) as exc:
+                sheet = None
+                out["preview_status"] = "failed"
+                out.setdefault("notes", []).append(f"Generation saved as {raw_ref}, but preview failed ({type(exc).__name__}). "
+                                                   "Inspect the saved clip; do not regenerate just to retry its preview.")
     out["use"] = "Place it with a clip layer (asset=ref, start, clip_in, rate, loop). Provenance: generative motion."
-    return ToolResult.json(out, images=[jpeg_bytes(sheet)], artifacts=[out["ref"]])
+    return ToolResult.json(out, images=[jpeg_bytes(sheet)] if sheet is not None else [], artifacts=[out["ref"]])
 
 
 def clip_rekey(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
@@ -430,28 +445,48 @@ def asset_trace(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
 # ---------------------------------------------------------------- person matte
 
 def video_matte(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
+    import sqlite3
+
     from vwb.gen import matting
-    src = source(ctx.ws, a.get("media_id"), require_explicit=True)
-    store = SourceIndexes(ctx.ws).for_media(src.ref)
-    fps = float(store.media()["fps"])
+    selected = a.get("media_id")
+    if selected is None:
+        selected = "source:" + source(ctx.ws, require_explicit=True).ref
+    elif selected.startswith("src") and "/" not in selected and "." not in selected:
+        selected = "source:" + selected
+    video = resolve_video(ctx.ws, selected)
+    info = video_stream_info(video.path)
+    fps = float(info.fps)
+    times = [a["t0"], a["t1"]]
+    if any(isinstance(t, bool) or not isinstance(t, (float, int)) or not math.isfinite(t) for t in times):
+        return ToolResult.error("t0 and t1 must be finite seconds.")
     f0, f1 = int(round(float(a["t0"]) * fps)), int(round(float(a["t1"]) * fps))
-    if f1 - f0 < 2:
-        return ToolResult.error("give a span of at least two frames (t0 < t1, source seconds)")
-    arr = matting.matte_span(Path(src.path), src.sha256, f0, f1, ctx.ws.plates / "mattes",
-                             faces=matting.faces_by_frame(store, f0, f1))
+    if not 0 <= f0 < f1 <= info.n_frames or f1 - f0 < 2:
+        return ToolResult.error(f"Give a span of at least two frames within [0, {info.n_frames}) (source seconds).")
+    faces = None
+    if video.lineage.get("media"):
+        try:
+            store = SourceIndexes(ctx.ws).for_media(video.lineage["media"])
+        except (ValueError, KeyError, RuntimeError, sqlite3.Error):
+            pass  # Face guidance is optional; pixels need no OCR/layout index.
+        else:
+            faces = matting.faces_by_frame(store, f0, f1)
+    arr = matting.matte_span(video.path, video.lineage["sha256"], f0, f1, ctx.ws.plates / "mattes", faces=faces)
     st = matting.stats([arr])
     picks = [f0 + int(i * (f1 - f0 - 1) / 5) for i in range(6)]
-    rgb = read_frames(src.path, picks)
+    rgb = read_frames(video.path, picks)
     shown = []
     for f in picks:
         alpha = matting.full_alpha(arr[f - f0], (rgb[f].shape[1], rgb[f].shape[0]))
         shown.append(np.dstack([rgb[f], alpha]))
     notes = []
+    if faces is None:
+        notes.append("No indexed face guidance was used; inspect the matte for foreground objects that are not people.")
     if st["coverage"] < 0.01:
         notes.append("almost no person found in this span")
     if st["flicker"] > 0.02:
         notes.append(f"matte flicker {st['flicker']}: edges may boil; keep the speaker small or add a soft shadow")
-    return ToolResult.json({"media": src.ref, "span_frames": [f0, f1], "coverage": st["coverage"], "flicker": st["flicker"], "notes": notes,
+    return ToolResult.json({"media": video.lineage.get("media", video.ref), "input": video.lineage,
+                            "span_frames": [f0, f1], "coverage": st["coverage"], "flicker": st["flicker"], "notes": notes,
                             "use": "A video layer with matte='person' shows only the people of the source, in sync with "
                                    "the time map (this span is now cached; uncached spans are matted at render)."},
                            images=[jpeg_bytes(qa.preview(shown, height=360))])
@@ -535,7 +570,9 @@ TOOLS = [
          "(matte holes and noise are measured).",
          schema({"task": {"type": "string", "enum": ["text", "frames", "reference", "edit", "extend"]},
                  "prompt": {"type": "string"}, "first": {"type": "object"}, "last": {"type": "object"},
-                 "refs": {"type": "array", "items": {"type": "object"}}, "video": {"type": "string"},
+                 "refs": {"type": "array", "items": {"type": "object"}},
+                 "video": {"type": "string", "description": "Input clip for edit/extend: attachment:<id>, a work-relative "
+                           "video path, source:<ref>, or slot:<name>@<rev>. File inputs are snapshotted automatically; no index is needed."},
                  "seconds": {"type": "integer"}, "resolution": {"type": "string", "enum": ["720p", "1080p"]},
                  "aspect": {"type": "string", "enum": ["9:16", "16:9"]}, "key": {"type": "string",
                  "enum": ["none", "auto", "green", "blue", "magenta"]}, "background": {"type": "string"},
@@ -558,9 +595,12 @@ TOOLS = [
                  "slot": {"type": "string"}, "note": {"type": "string"}}, ["source"]), asset_trace, "gen.image", "gen"),
     Tool("video_matte", "Cut the people out of the source footage between t0 and t1 (source seconds) with a video "
          "matting model, cache it and preview it (coverage and flicker measured). Then a video layer with "
-         "matte='person' shows the speaker without their background, in sync with the narration, on a designed page.",
+         "matte='person' shows the speaker without their background, in sync with the narration, on a designed page. "
+         "An index is optional; indexed face guidance is used when available.",
          schema({"t0": {"type": "number"}, "t1": {"type": "number"},
-                 "media_id": {"type": "string", "description": "Source ID/ref, required when multiple videos are registered."}}, ["t0", "t1"]), video_matte, "gen.image", "gen"),
+                 "media_id": {"type": "string", "description": "Source ID/ref, attachment:<id>, work-relative video path, "
+                     "or slot:<name>@<rev>. Required when multiple sources exist; file inputs are snapshotted automatically."}},
+                ["t0", "t1"]), video_matte, "gen.image", "gen"),
     Tool("asset_view", "Look at a registry asset: a still on a checkerboard (alpha visible) or six frames of a clip, with "
          "its provenance, lineage and measurements.", schema({"ref": {"type": "string"}}, ["ref"]), asset_view, "tool", "gen"),
 ]

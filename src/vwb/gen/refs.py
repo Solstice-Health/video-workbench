@@ -23,6 +23,7 @@ from PIL import Image
 from vwb.index.paths import source
 from vwb.media.decode import FrameReader, read_frames
 from vwb.media.images import load_image
+from vwb.media.inputs import resolve_video
 from vwb.workspace import Workspace
 from vwb.workspace.registry import Registry
 
@@ -68,27 +69,35 @@ def resolve(ws: Workspace, ref: str, crop: list[float] | None = None) -> Resolve
         else:
             src = source(ws, require_explicit=True)
             coordinate = ref
-        frame = _frame(src.path, coordinate)
-        rgba = _rgba(read_frames(src.path, [frame])[frame])
-        lineage = {"kind": "source_frame", "media": src.ref, "frame": frame}
+        video = resolve_video(ws, "source:" + src.ref)
+        frame = _frame(video.path, coordinate)
+        rgba = _rgba(read_frames(video.path, [frame])[frame])
+        lineage = {"kind": "source_frame", "media": src.ref, "sha256": src.sha256, "frame": frame}
     elif ref.startswith("slot:"):
         body, sep, at = ref.partition("#")
         row = Registry(ws.assets).get(body)
         if row["kind"] == "video":
+            video = resolve_video(ws, body)
             if sep and not at.startswith(("t=", "f=")):
                 raise ValueError("Use #t=<seconds> or #f=<frame> for a clip asset.")
-            frame = _frame(row["path"], at.replace("=", ":", 1) if sep else "f:0")
-            rgba = _rgba(read_frames(row["path"], [frame])[frame])
-            lineage = {"kind": "asset", "ref": f"slot:{row['slot']}@{row['rev']}", "sha256": row["sha256"],
-                       "prov": row["prov"], "frame": frame, **({"t": float(at[2:])} if at.startswith("t=") else {})}
+            frame = _frame(video.path, at.replace("=", ":", 1) if sep else "f:0")
+            rgba = _rgba(read_frames(video.path, [frame])[frame])
+            lineage = {**video.lineage, "frame": frame, **({"t": float(at[2:])} if at.startswith("t=") else {})}
         else:
             if sep:
                 raise ValueError("Still-image assets do not have time/frame coordinates.")
             pixels, ref, lineage = load_image(ws, body)
             rgba = np.asarray(pixels)
     else:
-        pixels, ref, lineage = load_image(ws, ref)
-        rgba = np.asarray(pixels)
+        body, sep, at = ref.rpartition("#")
+        if sep and at.startswith(("f=", "t=")):
+            video = resolve_video(ws, body)
+            frame = _frame(video.path, at.replace("=", ":", 1))
+            rgba = _rgba(read_frames(video.path, [frame])[frame])
+            lineage = {**video.lineage, "frame": frame}
+        else:
+            pixels, ref, lineage = load_image(ws, ref)
+            rgba = np.asarray(pixels)
     if crop is not None:
         if (not isinstance(crop, list) or len(crop) != 4
                 or any(isinstance(v, bool) or not isinstance(v, (float, int)) or not math.isfinite(v) for v in crop)

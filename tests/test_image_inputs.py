@@ -128,6 +128,14 @@ def test_shared_project_work_is_used(ctx, tmp_path, monkeypatch):
     assert resolve(ctx.ws, "input.png").rgba.shape == (14, 12, 4)
 
 
+def test_explicit_work_prefix_preserves_a_directory_named_work(ctx):
+    (ctx.ws.work / "work").mkdir()
+    Image.new("RGB", (12, 14), "blue").save(ctx.ws.work / "work/input.png")
+    assert resolve(ctx.ws, "work:work/input.png").rgba.shape == (14, 12, 4)
+    assert resolve(ctx.ws, "work/work/input.png").rgba.shape == (14, 12, 4)
+    assert resolve(ctx.ws, "work:input.png").rgba.shape == (32, 40, 4)
+
+
 def test_bound_before_decoding_and_reject_animated_images(ctx, monkeypatch):
     with monkeypatch.context() as m:
         m.setattr(images, "MAX_SOURCE_BYTES", 1)
@@ -173,6 +181,16 @@ def test_mask_image_requires_real_alpha(ctx):
     assert mask.sum() == 1 and mask[8, 5]
 
 
+@pytest.mark.parametrize("field", ["text_tracks", "blocks"])
+def test_missing_index_regions_do_not_silently_shrink_a_combined_mask(ctx, monkeypatch, field):
+    from types import SimpleNamespace
+    monkeypatch.setattr(gen_tools, "source", lambda *a, **kw: SimpleNamespace(ref="src1@revision"))
+    monkeypatch.setattr(gen_tools, "SourceIndexes", lambda _: SimpleNamespace(
+        for_media=lambda _: SimpleNamespace(one=lambda *a: None)))
+    with pytest.raises(ValueError, match="does not exist"):
+        gen_tools._mask_from(ctx, {"mask": {field: [9], "boxes": [[1, 2, 10, 10]]}}, "f:0", (32, 40))
+
+
 def test_real_mkv_frame_reference_requires_no_index(ctx):
     path = ctx.ws.work / "still.mkv"
     subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=64x48:r=30",
@@ -187,6 +205,10 @@ def test_real_mkv_frame_reference_requires_no_index(ctx):
     for coordinate in ("f=-1", "t=nan", "f=1.5", "f=60"):
         with pytest.raises((ValueError, IndexError)):
             resolve(ctx.ws, f"source:{src.ref}#{coordinate}")
+    assert np.array_equal(resolve(ctx.ws, "work:still.mkv#f=30").rgba, by_frame.rgba)
+    attachment, = attachments.ingest(ctx.ws, [path])
+    assert np.array_equal(resolve(ctx.ws, f"attachment:{attachment['id']}#t=1").rgba, by_frame.rgba)
+    assert not list(ctx.ws.index.rglob("*.sqlite"))
 
 
 def test_png_registration_error_explains_direct_input(ctx):
@@ -219,3 +241,130 @@ def test_zero_decoded_samples_cannot_be_saved_as_successful_vision_index(monkeyp
     monkeypatch.setattr(build, "sample_frames", lambda *a: iter([]))
     with pytest.raises(ValueError, match="no samples"):
         builder.stage_vision()
+
+
+@pytest.fixture
+def clip(ctx):
+    path = ctx.ws.work / "clip.mkv"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=c=red:s=64x48:r=30",
+                    "-t", "0.2", "-c:v", "ffv1", str(path)], check=True, capture_output=True)
+    return path
+
+
+@pytest.mark.parametrize("kind", ["work", "attachment", "source", "slot"])
+def test_video_edit_accepts_files_and_records_input_provenance(ctx, clip, monkeypatch, kind):
+    data = clip.read_bytes()
+    sha = hashlib.sha256(data).hexdigest()
+    ref = "work:clip.mkv"
+    if kind == "attachment":
+        row, = attachments.ingest(ctx.ws, [clip])
+        ref = f"attachment:{row['id']}"
+    elif kind == "source":
+        ref = "source:" + register_work_file(ctx.ws, "clip.mkv").ref
+    elif kind == "slot":
+        ref = Assets(ctx.ws.assets).register(clip, slot="clip", kind="video", receipt="human.upload", derived_from=[])
+
+    def generate(gateway, **kwargs):
+        assert kwargs["video"].read_bytes() == data
+        clip.write_bytes(b"working copy changed during generation")
+        assert kwargs["video"].read_bytes() == data
+        kwargs["out"].write_bytes(data)
+        return {"model": "offline-fixture", "task": "edit", "format": {}, "seconds": 0}
+
+    monkeypatch.setattr(gen_tools.omni, "generate", generate)
+    result = invoke(ctx, "omni_video", {"task": "edit", "video": ref, "seconds": 6,
+                                        "prompt": "Use the clip", "slot": "edited"})
+    assert not result.is_error, result.text
+    assert result.images  # The 0.2s fixture must not be sampled at the requested 6s duration.
+    row = Assets(ctx.ws.assets).get(result.data["ref"])
+    lineage, = json.loads(row["derived_from"])
+    assert lineage["sha256"] == sha and row["receipt"] == "omni.generate"
+    assert not list(ctx.ws.index.rglob("*.sqlite"))
+
+
+@pytest.mark.parametrize("empty_index", [False, True])
+def test_video_matte_direct_file_needs_no_index_or_download(ctx, clip, monkeypatch, empty_index):
+    from vwb.gen import matting
+    from vwb.index.store import IndexStore
+    if empty_index:
+        IndexStore(ctx.ws.index / "index.sqlite")
+
+    def matte(path, sha, start, end, cache, *, faces):
+        assert faces is None and sha == hashlib.sha256(clip.read_bytes()).hexdigest()
+        return np.ones((end - start, 24, 32), dtype=np.uint8) * 255
+
+    monkeypatch.setattr(matting, "matte_span", matte)
+    result = invoke(ctx, "video_matte", {"media_id": "clip.mkv", "t0": 0, "t1": 0.2})
+    assert not result.is_error, result.text
+    assert result.data["span_frames"] == [0, 6] and "No indexed face guidance" in result.data["notes"][0]
+
+
+def test_generation_keeps_saved_asset_when_preview_fails(ctx, clip, monkeypatch):
+    from vwb.util.procs import ToolError
+    calls = []
+
+    def generate(*a, **kw):
+        calls.append(kw)
+        kw["out"].write_bytes(clip.read_bytes())
+        return {"model": "offline", "task": "text", "format": {}, "seconds": 0}
+
+    def broken_preview(*a, **kw):
+        raise ToolError("Synthetic preview failure")
+
+    monkeypatch.setattr(gen_tools.omni, "generate", generate)
+    monkeypatch.setattr(gen_tools, "read_frames", broken_preview)
+    result = invoke(ctx, "omni_video", {"task": "text", "prompt": "Move", "slot": "saved"})
+    assert not result.is_error, result.text
+    assert result.data["ref"] == "slot:saved@1" and result.data["preview_status"] == "failed"
+    assert not result.images and "do not regenerate" in result.data["notes"][0]
+    assert len(calls) == 1 and Assets(ctx.ws.assets).get(result.data["ref"])
+
+
+@pytest.mark.parametrize("replace_with", ["symlink", "bytes"])
+def test_clip_frame_rejects_replaced_asset_even_after_cached_validation(ctx, clip, replace_with):
+    from pathlib import Path
+    assets = Assets(ctx.ws.assets)
+    reference = assets.register(clip, slot="video", kind="video", receipt="human.upload", derived_from=[])
+    assert resolve(ctx.ws, reference + "#f=0").rgba.shape == (48, 64, 4)
+    path = Path(assets.get(reference)["path"])
+    if replace_with == "symlink":
+        path.unlink()
+        path.symlink_to(clip)
+    else:
+        path.write_bytes(b"altered bytes")
+    with pytest.raises((ValueError, OSError)):
+        resolve(ctx.ws, reference + "#f=0")
+
+
+def test_explicit_work_video_prefix_preserves_work_directory(ctx, clip):
+    from vwb.media.inputs import resolve_video
+    (ctx.ws.work / "work").mkdir()
+    (ctx.ws.work / "work/clip.mkv").write_bytes(clip.read_bytes())
+    clip.write_bytes(b"not a video")
+    resolved = resolve_video(ctx.ws, "work:work/clip.mkv")
+    assert resolved.lineage["path"] == "work/clip.mkv" and resolved.path.is_file()
+
+
+def test_unreadable_direct_video_does_not_poison_source_list(ctx):
+    from vwb.media.inputs import resolve_video
+    from vwb.util.procs import ToolError
+    (ctx.ws.work / "broken.mp4").write_bytes(b"\x00\x00\x00\x18ftypisom" + b"broken data")
+    with pytest.raises(ToolError):
+        resolve_video(ctx.ws, "broken.mp4")
+    assert not ctx.ws.load().sources and not list(ctx.ws.media.iterdir())
+
+
+def test_video_integrity_hash_is_cached_per_file_identity(ctx, clip, monkeypatch):
+    from vwb.media import inputs
+    original = inputs.hashlib.file_digest
+    calls = []
+
+    def counted(*a, **kw):
+        calls.append(1)
+        return original(*a, **kw)
+
+    monkeypatch.setattr(inputs.hashlib, "file_digest", counted)
+    ref = Assets(ctx.ws.assets).register(clip, slot="cached", kind="video", receipt="human.upload", derived_from=[])
+    resolve(ctx.ws, ref + "#f=0")
+    resolve(ctx.ws, ref + "#f=1")
+    assert len(calls) == 1

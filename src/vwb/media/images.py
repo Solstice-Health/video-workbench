@@ -64,7 +64,7 @@ def load_image(ws, reference: str) -> tuple[Image.Image, str, dict]:
         lineage = {"kind": "asset", "ref": reference, "prov": row["prov"]}
         opened = open_file(ws, "assets/" + relative)
     else:
-        reference = reference.removeprefix("work:").removeprefix("work/")
+        reference = reference[5:] if reference.startswith(("work:", "work/")) else reference
         if Path(reference).is_absolute():
             raise ValueError("Use an image path relative to the work folder.")
         lineage = {"kind": "work_file", "path": reference}

@@ -79,16 +79,35 @@ def canvas_set_renderer(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
 
 def layout_facts(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     """Facts for composing, not a layout: canvas size, safe zone, UI bands, floors, fonts, the source's look, assets."""
+    import sqlite3
+
+    from vwb.media.probe import video_stream_info
+
     prof = _profile(ctx)
     W, H = prof["width"], prof["height"]
     sz = prof["safe_zone"]
     src = source(ctx.ws, a.get("media_id"), require_explicit=True) if ctx.ws.load().sources else None
-    st = SourceIndexes(ctx.ws).for_media(src.ref) if src else None
-    styles = [json.loads(r["json"]).get("style") for r in st.all("SELECT json FROM readings WHERE scope='video'")] if st else []
+    m, styles = None, []
+    if src:
+        info = video_stream_info(src.path)
+        m = {"width": info.width, "height": info.height, "fps": float(info.fps)}
+        # Style readings enrich the facts; an absent, incomplete or stale index
+        # must not prevent composing from the video's lightweight metadata.
+        try:
+            st = SourceIndexes(ctx.ws).for_media(src.ref)
+            readings = st.all("SELECT json FROM readings WHERE scope='video'")
+        except (ValueError, RuntimeError, sqlite3.Error):
+            readings = []
+        for row in readings:
+            try:
+                reading = json.loads(row["json"])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(reading, dict) and reading.get("style"):
+                styles.append(reading["style"])
     from vwb.workspace.registry import Registry
     assets = [{"ref": f"slot:{r['slot']}@{r['rev']}", "kind": r["kind"], "prov": r["prov"],
                "size": json.loads(r["fit"]).get("native_size")} for r in Registry(ctx.ws.assets).list()]
-    m = st.media() if st else None
     return ToolResult.json({
         "canvas": [W, H], "fps": prof["fps"], "max_duration_s": prof["max_duration_s"],
         "renderers": renderer_catalog(),

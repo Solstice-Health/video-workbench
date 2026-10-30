@@ -184,6 +184,25 @@ incomplete decodes raise diagnostics instead of returning partial frame maps.
 An empty decode cannot become a successful vision-index stage. Index-derived
 mask regions still require that source's index, while explicit pixel boxes do
 not. Indexed masks cannot be mixed with a crop whose coordinate origin differs.
+Video inspection, video generation inputs, and matting accept direct work paths
+and attachment IDs. Mutable video inputs are snapshotted automatically into a
+digest-deduplicated source; existing source and asset references reuse their
+stable identity. Image-tool frame references also accept a video attachment or
+work path with `#f=<frame>` / `#t=<seconds>`. `media_register` remains an optional
+explicit pinning tool. PDFs, text and other document tools keep their direct-file
+interfaces; there is no universal requirement to enroll a file before reading it.
+
+Index reads open existing databases read-only and require the selected source's
+media identity. They never create an empty index as a side effect. `watch_ask`
+stores target-specific observation receipts independently of the edit index,
+including exact output versions and hashes for source-free rendered videos.
+Completed observation receipts are published under `work/inspection/watch/` for
+`file_list`/`file_read`; a failed public publication returns the answer with a
+warning while retaining its private receipt. Existing video input hashes are
+verified once per file identity and invalidated on replacement or mutation.
+Canvas layout facts and video matting use optional indexed enrichment; matting
+cache identities include face guidance and warmup, and only complete runs are
+published.
 
 `pdf_info`, `pdf_read`, `pdf_search` and `pdf_render` share the preview's two-worker
 limit and inspect PDFs in bounded disposable PDFium processes. Inputs are pinned

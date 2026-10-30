@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import BinaryIO
 
@@ -13,7 +14,8 @@ from vwb.workspace import attachments, references
 from vwb.workspace.request import SourceRef, Workspace
 
 
-def _snapshot(ws: Workspace, incoming: BinaryIO, name: str, original_path: str) -> SourceRef:
+def _snapshot(ws: Workspace, incoming: BinaryIO, name: str, original_path: str, *,
+              validate: Callable[[Path], object] | None = None, expected_sha: str | None = None) -> SourceRef:
     """Copy an already pinned file; never hard-link mutable work/ into media/."""
     before = os.fstat(incoming.fileno())
     if before.st_size > attachments.MAX_BYTES:
@@ -37,6 +39,10 @@ def _snapshot(ws: Workspace, incoming: BinaryIO, name: str, original_path: str) 
             if attachments.describe(staged, name)["kind"] != "video":
                 raise ValueError("The selected file is not a supported video; media_register accepts videos only. For an image, pass its work-relative path or attachment:<id> directly to image_inspect, sunburst_inpaint/extract/outpaint, or image reference inputs. No video conversion, registration or index is needed.")
             sha = digest.hexdigest()
+            if expected_sha is not None and sha != expected_sha:
+                raise ValueError("The attachment changed during video snapshotting.")
+            if validate is not None:
+                validate(staged)  # Reject unreadable inputs before adding a source to the request.
             # Workers may register different downloads concurrently. Reload inside
             # the lock so IDs and digest deduplication use the latest source list.
             with FileLock(str(ws.root / "media.lock")):
@@ -59,10 +65,10 @@ def _snapshot(ws: Workspace, incoming: BinaryIO, name: str, original_path: str) 
             staged.unlink(missing_ok=True)
 
 
-def register_work_file(ws: Workspace, path: str) -> SourceRef:
+def register_work_file(ws: Workspace, path: str, *, validate: Callable[[Path], object] | None = None) -> SourceRef:
     """Agent/user-selected paths are relative to ws.work, never arbitrary host paths."""
     with references.open_file(ws, path) as incoming:
-        return _snapshot(ws, incoming, Path(path).name, str(ws.work / path))
+        return _snapshot(ws, incoming, Path(path).name, str(ws.work / path), validate=validate)
 
 
 def register_inputs(ws: Workspace, refs: list[dict], context: dict[str, list[str]]) -> list[SourceRef]:
