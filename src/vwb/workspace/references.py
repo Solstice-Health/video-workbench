@@ -181,7 +181,8 @@ def catalog(ws=None, query: str = "") -> dict[str, Any]:
                              "description": ("All files in this folder, read as needed" if kind == "folder"
                                              else "File in this conversation's workspace"), "kind": kind})
     truncated |= bool(pending)
-    return {"skills": skills(), "folders": [r for r in rows if r["kind"] == "folder"],
+    from vwb.workflows import CATALOG
+    return {"skills": skills(), "workflows": CATALOG, "folders": [r for r in rows if r["kind"] == "folder"],
             "files": [r for r in rows if r["kind"] == "file"], "folder_scope": "conversation_work",
             "folders_truncated": truncated, "paths_truncated": truncated, "scanned": scanned,
             "path_limit": MAX_RESULTS, "folder_limit": MAX_FOLDERS, "max_references": MAX_REFERENCES,
@@ -191,10 +192,10 @@ def catalog(ws=None, query: str = "") -> dict[str, Any]:
 def validate(value: Any, ws=None) -> dict[str, list[str]]:
     if value is None:
         return {"skills": [], "folders": []}
-    if not isinstance(value, dict) or set(value) - {"skills", "folders", "files", "plugins"}:
+    if not isinstance(value, dict) or set(value) - {"skills", "folders", "files", "plugins", "workflows"}:
         raise ValueError("Context must contain selected skills, folders, files and plugins.")
     result = {}
-    for kind in ("skills", "folders", "files", "plugins"):
+    for kind in ("skills", "folders", "files", "plugins", "workflows"):
         items = value.get(kind, [])
         if not isinstance(items, list) or any(not isinstance(v, str) or not v or len(v) > 512 for v in items):
             raise ValueError(f"Selected {kind} must be a list of identifiers.")
@@ -207,6 +208,10 @@ def validate(value: Any, ws=None) -> dict[str, list[str]]:
         result.pop("plugins")
     if not result["files"]:
         result.pop("files")
+    if not result["workflows"]:
+        result.pop("workflows")
+    from vwb.workflows import validate_selection
+    validate_selection(ws, result)
     if sum(map(len, result.values())) > MAX_REFERENCES:
         raise ValueError(f"Choose at most {MAX_REFERENCES} references per message.")
     available = {s["id"] for s in skills()}

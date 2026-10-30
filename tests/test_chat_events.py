@@ -12,6 +12,7 @@ from filelock import FileLock
 from vwb.agents import events, host_codex, job_lead
 from vwb.util.jsonio import append_jsonl, read_json, write_json
 from vwb.workspace import Workspace
+from vwb.workspace.request import Request
 
 
 @pytest.fixture
@@ -179,6 +180,7 @@ def test_compact_preserves_thread_and_does_not_add_chat(ws, monkeypatch):
 
 
 def test_interrupt_keeps_thread_and_does_not_retry(ws, monkeypatch):
+    ws.save(Request(id='r-events', message='Synthetic event test'))
     original = {"threads": {"codex:test": {"thread_id": "thread-1"}}}
     write_json(ws.memory / "lead_session.json", original)
     shutdown = []
@@ -197,6 +199,7 @@ def test_interrupt_keeps_thread_and_does_not_retry(ws, monkeypatch):
 
 
 def test_second_interrupt_during_worker_cleanup_keeps_new_thread(ws, monkeypatch):
+    ws.save(Request(id='r-events', message='Synthetic event test'))
     def shutdown():
         raise KeyboardInterrupt
 

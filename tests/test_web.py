@@ -544,7 +544,8 @@ def test_http_feature_catalog_and_context_submission(http):
     request, app, ws, port = http
     (ws.work / 'planning').mkdir()
     status, _, raw = request('GET', '/api/features')
-    assert status == 200 and {s['id'] for s in json.loads(raw)['skills']} == {'clip', 'remake', 'shorts'}
+    assert status == 200 and {s['id'] for s in json.loads(raw)['skills']} == {'clip', 'remake', 'shorts', 'brand-context'}
+    assert json.loads(raw)['workflows'][0]['command'] == '/brand-context'
     status, _, raw = request('GET', f'/api/requests/{ws.id}/features')
     assert status == 200 and 'planning' in {f['id'] for f in json.loads(raw)['folders']}
     csrf = json.loads(request('GET', '/api/bootstrap')[2])['csrf_token']

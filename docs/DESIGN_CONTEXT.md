@@ -177,6 +177,11 @@ rediscovery; it does not prove model obedience.
 
 ## Solstice and next increments
 
+To turn tagged workspace folders into cited, shared project context, use the
+[/brand-context workflow](PROJECT_MEMORY.md). It delegates inspection to a restricted
+specialist and publishes structured memory backed by these immutable packs. Required
+rules and exact safety copy still use the resolver and output bindings described here.
+
 Solstice remains a retrieval integration point. Its existing Workbench connection
 manager/Registry tools can supply files after access is configured. The importer
 accepts retrieved workspace files with an explicit `origin` citation; it does not

@@ -59,9 +59,11 @@ def test_google_alias_respects_managed_override_disable_and_reset(key_settings, 
     assert "GEMINI_API_KEY" not in config.os.environ
 
 
-def test_main_profiles_and_all_worker_roles_receive_model_access_guidance():
+def test_main_profiles_and_roles_with_model_access_receive_guidance():
     texts = [prompts.profile(row["id"])["content"] for row in prompts.PROFILES]
-    texts += [swarm.prompt(role) for role in swarm.ROLE_SLOT]
+    texts += [swarm.prompt(role) for role in swarm.ROLE_SLOT if role != 'brand_context']
+    # Ingestion deliberately has no model_request, shell or network tool.
+    assert 'model_request' not in swarm.prompt('brand_context')
     for text in texts:
         for name in ("model_providers", "model_catalog", "model_request", "sandbox_run(models=true)", "OpenRouter"):
             assert name in text

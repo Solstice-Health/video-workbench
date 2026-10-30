@@ -82,9 +82,11 @@ def chat(message: str, attach: list[Path] | None = None, request_id: str | None 
          skip_index: bool = False, context: dict[str, list[str]] | None = None,
          main_config: dict[str, Any] | None = None,
          attachment_refs: list[dict[str, Any]] | None = None,
-         resume_message: str | None = None) -> dict[str, Any]:
+         resume_message: str | None = None, workflow_origin: str | None = None) -> dict[str, Any]:
     """One message of a request's conversation: without request_id it starts a new request, with it it continues."""
     attach = [Path(p).expanduser().resolve() for p in (attach or [])]
+    from vwb.workflows import select
+    context = select(message, context)
     if request_id:
         ws = Workspace.open(request_id)
         context = references.validate(context, ws)
@@ -122,6 +124,9 @@ def chat(message: str, attach: list[Path] | None = None, request_id: str | None 
             console.print("[bold]index[/] building the edit index (cached stages are skipped)")
             build_index(ws, progress=lambda m: console.print(f"  [dim]{m}[/]"))
         kwargs = {"cfg": main_config} if main_config else {}
+        if context.get('workflows'):
+            kwargs.update(workflow_origin=workflow_origin,
+                          workflow_brief=resume_message if resume_message is not None else message)
         continuation = ("\n\n[harness] The user chose Resume turn after an interruption. Continue the saved thread and "
                         "inspect the workspace and tool records before acting. Completed tool operations already took effect; "
                         "do not repeat completed work or assume an interrupted operation completed. Earlier helpers may have "

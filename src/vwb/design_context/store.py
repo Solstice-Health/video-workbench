@@ -139,6 +139,18 @@ def extract(data, source, suffix):
 
 def import_pack(ws, manifest_path):
     pack = Pack.model_validate_json(_read(ws.work, manifest_path))
+    return import_pack_model(ws, pack)
+
+
+def import_pack_model(ws, pack, *, snapshots=None):
+    """Host-validated manifest; optional pinned sources avoid mutable work copies.
+
+    Snapshots map the new source ID to an existing pack and its source record.
+    Check copied bytes before exposing the new immutable pack.
+    """
+    pack = Pack.model_validate(pack)
+    if snapshots is not None and set(snapshots) != {s.id for s in pack.sources}:
+        raise ValueError('Every source needs a pinned snapshot')
     directory = root(ws)
     total, sources = 0, []
     with tempfile.TemporaryDirectory(prefix=".import-", dir=directory) as temporary:
@@ -149,7 +161,15 @@ def import_pack(ws, manifest_path):
                 suffix = ".bin"
             filename = "source-" + source.id + suffix
             digest, count = hashlib.sha256(), 0
-            with _open(ws.work, source.path) as stream, (stage / filename).open("xb") as out:
+            source_root, source_path, expected = ws.work, source.path, None
+            if snapshots is not None:
+                snapshot = snapshots[source.id]
+                original = snapshot['source']
+                if source.path != original['path']:
+                    raise ValueError('Pinned source path does not match its inventory')
+                source_root = _locate(ws, snapshot['pack'])
+                source_path, expected = original['file'], original['sha256']
+            with _open(source_root, source_path) as stream, (stage / filename).open("xb") as out:
                 before = os.fstat(stream.fileno())
                 while chunk := stream.read(1024**2):
                     count += len(chunk)
@@ -161,6 +181,8 @@ def import_pack(ws, manifest_path):
                 after = os.fstat(stream.fileno())
                 if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or count != after.st_size:
                     raise ValueError("Source changed during import; retry a stable file")
+            if expected is not None and digest.hexdigest() != expected:
+                raise ValueError('Pinned context source failed its integrity check')
             row = source.model_dump(mode="json", exclude_none=True) | {
                 "file": filename, "sha256": digest.hexdigest(), "bytes": count}
             if suffix in TEXT_SUFFIXES:

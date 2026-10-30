@@ -246,8 +246,9 @@ Spec references: D = decision, X = experiment, R/S = sources (see the spec and t
 - [ ] Source ladder A-E; curated per-brand library; SCIENCE-DEPICTION confirmations
 
 ## O. Memory and learning
-- [x] `project_memory_search`, `project_memory_read` (`project_memory.read`): immutable cited revisions, current-project isolation, BM25 retrieval and compare-and-swap publication.
 - [x] Job memory (`memory_note`, `memory_read`) and plan checkpoint (`plan_update`)
+- [x] Project memory: `project_memory_search`, `project_memory_read` (`project_memory.read`); immutable cited revisions, BM25 retrieval, current-project isolation and compare-and-swap publication. See `docs/PROJECT_MEMORY.md`.
+- [x] Explicit `/brand-context` / Workflows composer selection: `workflow_start` (`workflow.execute`), `workflow_read`, `workflow_source` (`workflow.read`), `workflow_draft` (`workflow.draft`), `workflow_publish` (`project_memory.write`). Tagged-folder snapshots, restricted specialist, lead review/publication, coverage and provenance validation, resumable candidates.
 - [x] Brand memory of answers (asks/memory.jsonl)
 - [ ] Brand preferences store, batch rules ladder, librarian skill proposals with replay and signature (D26, D39)
 - [ ] Gold growth from code-checkable tags; offline harness evolution (investigate, then edit; keep held-out wins)

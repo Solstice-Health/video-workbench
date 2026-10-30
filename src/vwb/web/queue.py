@@ -152,7 +152,9 @@ class TurnQueue:
                 skip_index: bool = True,
                 context: dict[str, list[str]] | None = None, main_config: dict[str, Any] | None = None,
                 idempotency_key: str | None = None, turn_lock_held: bool = False) -> dict[str, Any]:
+        from vwb.workflows import select
         from vwb.workspace.references import validate
+        context = select(message, context)
         context = validate(context, ws)
         from vwb.workspace.attachments import validate_refs
         attachment_refs = validate_refs(ws, attachment_refs)
@@ -293,6 +295,7 @@ class TurnQueue:
                        "context": deepcopy(source.get("context", {}))}
                 if source["kind"] == "message":
                     job["resume_message"] = source.get("resume_message", source.get("message", ""))
+                    job["workflow_origin"] = source.get("workflow_origin", source["id"])
                 if main_config is not None:
                     job["main_config"] = deepcopy(main_config)
                 elif "main_config" in source:

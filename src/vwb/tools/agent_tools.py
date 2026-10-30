@@ -15,7 +15,9 @@ def _tree(ctx: ToolContext):
 
 def agent_spawn(ctx: ToolContext, a: dict[str, Any]) -> ToolResult:
     tree = _tree(ctx)
-    ticket = tree.dispatch(ctx.agent, a.get("role", "worker"), a["task"], parse_json_arg(a.get("context")))
+    callback = ctx.state.get('agent_created_callback')
+    options = {'on_created': callback} if callback else {}
+    ticket = tree.dispatch(ctx.agent, a.get("role", "worker"), a["task"], parse_json_arg(a.get("context")), **options)
     return ToolResult.json({"agent_id": ticket, "parent": tree.tickets[ticket]["parent"],
         "note": "Running in the background. Share file ownership explicitly; use agent_send, agent_list and agent_wait."})
 
@@ -62,7 +64,7 @@ TOOLS = [
          "concurrency and total count. Default worker is general-purpose. Roles only narrow inherited permissions. "
          "Shared work folder, separate conversation; provide explicit task/context and file ownership. Turn-local.",
          schema({"task": {"type": "string"}, "context": {"type": "object"}, "role": {"type": "string",
-            "enum": ["worker", "scene_miner", "planner_b", "composer", "critic", "code_explorer"]}}, ["task"]),
+            "enum": ["worker", "scene_miner", "planner_b", "composer", "critic", "code_explorer", "brand_context"]}}, ["task"]),
          agent_spawn, "agent.manage", "agents"),
     Tool("agent_list", "Inspect your subtree: parent, role, depth, status, latest tool activity, result and limits.",
          schema({}), agent_list, "agent.manage", "agents"),

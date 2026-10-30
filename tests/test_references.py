@@ -27,7 +27,8 @@ def test_catalog_matches_agent_skills_and_safe_folders(ws, tmp_path):
     (ws.work / "planning" / "nested").mkdir()
     (ws.work / "external").symlink_to(tmp_path)
     result = references.catalog(ws)
-    assert {s["id"] for s in result["skills"]} == {"clip", "remake", "shorts"}
+    assert {s["id"] for s in result["skills"]} == {"clip", "remake", "shorts", "brand-context"}
+    assert result['workflows'][0]['id'] == 'brand-context'
     assert {f["id"] for f in result["folders"]} == {".", "outputs", "outputs/short 01", "planning", "planning/nested"}
     assert references.catalog()["folders"] == []
 

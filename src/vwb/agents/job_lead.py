@@ -186,7 +186,8 @@ RESUME_NOTE = ("[harness] Your turn stopped on a host error ({error}). Your tool
                "The message you were answering:\n{message}")
 
 
-def run(ws: Workspace, message: str, first_turn: bool, *, cfg: dict[str, Any] | None = None) -> str:
+def run(ws: Workspace, message: str, first_turn: bool, *, cfg: dict[str, Any] | None = None,
+        workflow_origin: str | None = None, workflow_brief: str | None = None) -> str:
     """One chat turn. A request is one conversation with the main agent: the first message starts its thread,
     and every later message continues that thread with its full history, like a Cursor or Codex chat.
 
@@ -211,7 +212,12 @@ def run(ws: Workspace, message: str, first_turn: bool, *, cfg: dict[str, Any] | 
     events = human_events(ledger.events(["human."]), baseline)
     turn = ledger.append("chat.turn", "human", {"text": message})
     emit(ws, "turn.started", {"id": f"turn:{turn['seq']}", "text": message})
+    workflow_id = None
     try:
+        from vwb import workflows
+        workflow_id, workflow_note = workflows.start_turn(ws, registry, swarm, turn_id=turn['seq'],
+                                                        origin=workflow_origin, brief=workflow_brief)
+        message += workflow_note
         reply = _lead(ws, registry, swarm, message, first_turn, cfg, ledger, session, events)
     except KeyboardInterrupt:
         emit(ws, "turn.stopped", {"id": f"turn:{turn['seq']}", "text": "Stopped. The conversation is saved."})
@@ -226,6 +232,8 @@ def run(ws: Workspace, message: str, first_turn: bool, *, cfg: dict[str, Any] | 
             write_json(path, session)
         finally:
             swarm.shutdown()
+            if workflow_id:
+                workflows.finish_turn(ws, workflow_id, swarm)
     ws.add_chat("job_lead", reply)
     rec = session.get("threads", {}).get(session.get("key") or "", {})
     ledger.append("chat.reply", "job_lead", {"text": reply[:4000], "host": session.get("key"),
@@ -402,6 +410,8 @@ def _run_host(ws: Workspace, registry: Registry, swarm: Swarm, message: str, fir
     message += attachment_prompt(current_refs) + attachment_inputs.catalog_note(ws)
     from vwb.design_context.store import prompt as design_context_prompt
     message += design_context_prompt(ws)
+    from vwb.project_memory.store import prompt as project_memory_prompt
+    message += project_memory_prompt(ws)
     from vwb.code.editor import read_context
     editor = read_context(ws)
     if editor.get("path"):

@@ -213,6 +213,8 @@ def test_model_selection_prompt_reaches_workers_and_main_profiles_require_discov
         assert "model_providers" in text and "model_catalog" in text
         assert "current model IDs" in text
     for role in swarm.ROLE_SLOT:
+        if role == 'brand_context':  # Restricted ingestion cannot choose/call other models.
+            continue
         text = swarm.prompt(role)
         assert "2026-10-30" in text
         assert "four calendar months" in text

@@ -29,7 +29,7 @@ from vwb.workspace import Workspace, flags
 from vwb.workspace.ledger import Ledger
 
 ROLE_SLOT = {"worker": "worker.reason", "scene_miner": "worker.video", "planner_b": "worker.reason",
-             "composer": "worker.reason", "critic": "critic", "code_explorer": "worker.reason"}
+             "composer": "worker.reason", "critic": "critic", "code_explorer": "worker.reason", "brand_context": "worker.reason"}
 CODEX_ROLES = {"worker", "planner_b", "composer", "critic"}
 TERMINAL = {"done", "failed", "interrupted"}
 MAX_MESSAGE_CHARS = 16000
@@ -44,6 +44,8 @@ limitations concisely to your parent. Do not claim work is verified without chec
 
 def prompt(role: str) -> str:
     base = GENERAL_PROMPT if role == "worker" else (PROMPTS_DIR / f"{role}.md").read_text()
+    if role == 'brand_context':
+        return base
     return (base + "\n\n" + (PROMPTS_DIR / "model_access.md").read_text().strip()
             + "\n\n" + (PROMPTS_DIR / "code_navigation.md").read_text().strip())
 
@@ -125,7 +127,7 @@ class Swarm:
         if sum(t["status"] not in TERMINAL for t in self.tickets.values()) >= self.max_workers:
             raise ValueError(f"active agent limit ({self.max_workers}) reached; finish or interrupt a worker first")
 
-    def dispatch(self, sender: str, role: str, task: str, context: Any = None) -> str:
+    def dispatch(self, sender: str, role: str, task: str, context: Any = None, *, on_created=None) -> str:
         if role not in ROLE_SLOT:
             raise ValueError(f"unknown worker role {role!r}; one of {sorted(ROLE_SLOT)}")
         if not isinstance(task, str) or not task.strip() or len(task) > 64000:
@@ -155,6 +157,13 @@ class Swarm:
             self._allowed[ticket], self._sessions[ticket], self._inboxes[ticket] = allowed, {}, []
             self._record("assign", sender, {"ticket": ticket, "to": ticket, "parent": sender, "role": role,
                 "depth": depth, "gist": task[:240], "payload_sha256": sha256_text(task + repr(context))})
+            if on_created is not None:
+                try:
+                    on_created(ticket)
+                except BaseException:
+                    self.tickets[ticket]['status'] = 'failed'
+                    self._save()
+                    raise
             self._start(ticket, task, context)
             return ticket
 

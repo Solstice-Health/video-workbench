@@ -1,5 +1,5 @@
 import htm from './vendor/htm.mjs';
-import {triggerAt, matchingOptions, toContext, workspaceReference, displayPath} from './composer-picker.js';
+import {triggerAt, matchingOptions, toContext, workspaceReference, displayPath, workflowReferences, workflowProblem} from './composer-picker.js';
 import {ModelControl} from './model-control.js';
 import {ComposerControls, composerPreference, composerMessage, readComposerPreferences, saveComposerPreferences} from './composer-controls.js';
 import {WorkspaceExplorer, WorkspaceCanvas, initialCanvas, canvasReducer, importedTabs, studioTab, fileTab, formatBytes} from './workspace-canvas.js';
@@ -49,6 +49,7 @@ function IconButton({name, label, onClick, disabled, ...rest}) {
 function ReferenceTags({context}) {
   const pathLabel = path => ({label: `@${displayPath(path)}`, full: `@${path}`});
   const labels = [...(context?.skills || []).map(id => ({label: `/features ${id}`, full: `/features ${id}`})),
+    ...(context?.workflows || []).map(id => ({label: `/${id}`, full: `Workflow: /${id}`})),
     ...(context?.folders || []).map(id => pathLabel(`work/${id === '.' ? '' : `${id}/`}`)),
     ...(context?.files || []).map(id => pathLabel(`work/${id}`)),
     ...(context?.plugins || []).map(id => ({label: `Plugin: ${id}`, full: `Plugin: ${id}`}))];
@@ -342,12 +343,13 @@ function App() {
     return next;
   });
   useEffect(() => saveComposerPreferences(composerPreferences), [composerPreferences]);
-  const [references, setReferences] = useState([]), [features, setFeatures] = useState({skills: [], folders: [], files: []});
+  const [references, setReferences] = useState([]), [features, setFeatures] = useState({skills: [], folders: [], files: [], workflows: []});
   const [picker, setPicker] = useState(null), [pickIndex, setPickIndex] = useState(0), [featuresLoading, setFeaturesLoading] = useState(false);
   const [featuresError, setFeaturesError] = useState('');
   const [localImport, setLocalImport] = useState(null), [importPending, setImportPending] = useState(false), [featuresVersion, setFeaturesVersion] = useState(0);
   const localImportRef = useRef(localImport); localImportRef.current = localImport;
   const pickerShell = useRef(null);
+  const workflowButton = useRef(null), workflowSearch = useRef(null);
   const [error, setError] = useState(''), [info, setInfo] = useState(''), [loading, setLoading] = useState(true), [busy, setBusy] = useState(false);
   const [sidebar, setSidebar] = useState(false), [outputId, setOutputId] = useState(null);
   const [navigator, setNavigator] = useState('conversations'), [navigatorOpen, setNavigatorOpen] = useState(() => window.innerWidth >= 1024);
@@ -455,7 +457,7 @@ function App() {
   useEffect(() => {
     let live = true;
     const controller = new AbortController();
-    setFeatures({skills: [], folders: [], files: []}); setFeaturesLoading(true); setFeaturesError('');
+    setFeatures({skills: [], folders: [], files: [], workflows: []}); setFeaturesLoading(true); setFeaturesError('');
     const timer = setTimeout(() => {
       const base = selected ? `/api/requests/${encodeURIComponent(selected)}/features` : '/api/features';
       api(`${base}${featureQuery ? `?q=${encodeURIComponent(featureQuery)}` : ''}`, {signal: controller.signal})
@@ -567,8 +569,15 @@ function App() {
   const answer = answering ? answers[question.id] : null;
   const waitingForAnswer = answering && questionWaiting(question);
   const composerText = answering ? questionDrafts[question.id] || '' : text;
+  const projectId = data?.request?.id === selected && data.request.project_id !== undefined
+    ? data.request.project_id : requests.find(row => row.id === selected)?.project_id;
+  const instructionReferences = workflowReferences(text, references);
+  const workflow = instructionReferences.find(row => row.kind === 'workflow');
+  const workflowError = workflowProblem(instructionReferences, projectId);
+  const canSend = chatTab === 'edit' && !busy && !importPending && (!picker || answering)
+    && (answering ? !!composerText.trim() || !!answer : !workflowError && (!!composerText.trim() || uploads.length > 0 || !!workflow));
   const syncPicker = (value = composerText, caret = composer.current?.selectionStart ?? value.length) => {
-    setPicker(answering ? null : triggerAt(value, caret)); setPickIndex(0);
+    setPicker(answering || chatTab !== 'edit' ? null : triggerAt(value, caret)); setPickIndex(0);
   };
   const setComposerText = value => {
     if (answering) {setQuestionDrafts(prev => ({...prev, [question.id]: value})); setPicker(null);}
@@ -579,18 +588,25 @@ function App() {
   const referenceLimit = features.max_references || 100;
   const addReference = option => {
     if (references.some(r => r.kind === option.kind && r.id === option.id)) return true;
+    if (option.kind === 'workflow' && workflow && workflow.id !== option.id) {setError('Choose one workflow per message. Remove the selected workflow first.'); return false;}
     if (references.length >= referenceLimit) {setError(`Choose up to ${referenceLimit} references. Select a folder to include its files as one reference.`); return false;}
     setReferences(prev => prev.some(r => r.kind === option.kind && r.id === option.id) ? prev : [...prev, option]);
     return true;
   };
   const pick = option => {
-    if (!picker || !option) return;
+    if (!picker || !option || answering || chatTab !== 'edit') return;
     if (option.kind === 'local_import') {openLocalImport(); return;}
     if (!addReference(option)) return;
-    const next = composerText.slice(0, picker.start) + composerText.slice(picker.end);
+    const next = picker.source === 'button' ? composerText : composerText.slice(0, picker.start) + composerText.slice(picker.end);
     setText(next);
     setPicker(null);
     requestAnimationFrame(() => {composer.current?.focus(); composer.current?.setSelectionRange(picker.start, picker.start);});
+  };
+  const openWorkflows = () => {
+    if (answering || chatTab !== 'edit' || busy || importPending) return;
+    if (picker?.kind === 'workflow') {setPicker(null); return;}
+    const caret = composer.current?.selectionStart ?? composerText.length;
+    setPicker({kind: 'workflow', query: '', start: caret, end: caret, source: 'button'}); setPickIndex(0);
   };
   const dropReference = event => {
     const raw = event.dataTransfer.getData('application/x-vwb-workspace-file');
@@ -631,12 +647,13 @@ function App() {
     setLocalImport(null); setImportPending(false); composer.current?.focus();
   };
   const pickerKeys = e => {
-    if (!picker || answering || e.target !== composer.current || e.nativeEvent.isComposing) return;
-    if (e.key === 'Escape') {e.preventDefault(); e.stopPropagation(); setPicker(null);}
+    if (!picker || answering || chatTab !== 'edit' || ![composer.current, workflowSearch.current].includes(e.target) || e.nativeEvent.isComposing) return;
+    if (e.key === 'Escape') {e.preventDefault(); e.stopPropagation(); setPicker(null); if (picker.source === 'button') workflowButton.current?.focus();}
     else if (['ArrowDown', 'ArrowUp'].includes(e.key)) {
       e.preventDefault(); e.stopPropagation();
       setPickIndex(i => options.length ? (i + (e.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length : 0);
     } else if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+      if (e.key === 'Tab' && (picker.source === 'button' || e.shiftKey)) {setPicker(null); return;}
       if (e.key === 'Tab' && !options.length) {setPicker(null); return;}
       e.preventDefault(); e.stopPropagation(); pick(options[Math.min(pickIndex, options.length - 1)]);
     }
@@ -647,20 +664,22 @@ function App() {
     return () => document.removeEventListener('pointerdown', outside);
   }, []);
   useEffect(() => {
-    if (answering) setPicker(null);
-  }, [answering]);
+    if (answering || chatTab !== 'edit') setPicker(null);
+  }, [answering, chatTab]);
+  useEffect(() => {if (picker?.source === 'button') workflowSearch.current?.focus();}, [picker?.source]);
   useEffect(() => {
     const node = composer.current;
     if (!node) return;
     node.setAttribute('aria-autocomplete', 'list'); node.setAttribute('aria-haspopup', 'listbox');
-    node.setAttribute('aria-expanded', String(!!picker && !answering));
-    if (picker && !answering) {
+    const expanded = !!picker && !answering && chatTab === 'edit' && picker.source !== 'button';
+    node.setAttribute('aria-expanded', String(expanded));
+    if (expanded) {
       node.setAttribute('aria-controls', 'composer-reference-options');
       if (options.length) node.setAttribute('aria-activedescendant', `reference-option-${Math.min(pickIndex, options.length - 1)}`);
       else node.removeAttribute('aria-activedescendant');
     } else {node.removeAttribute('aria-controls'); node.removeAttribute('aria-activedescendant');}
     document.getElementById(`reference-option-${pickIndex}`)?.scrollIntoView({block: 'nearest'});
-  }, [picker, pickIndex, options.length, answering]);
+  }, [picker, pickIndex, options.length, answering, chatTab]);
   useEffect(() => {if (qIndex >= questions.length) setQIndex(Math.max(0, questions.length - 1));}, [questions.length, qIndex]);
   useEffect(() => {if (chatTab === 'edit' && isNearBottom && feed.current) feed.current.scrollTop = feed.current.scrollHeight;}, [chatTab, chat.length, data?.cursor, queue.length, selected, loading]);
   const mutate = async (path, body, method = 'POST') => {
@@ -728,12 +747,21 @@ function App() {
     finally {resumePending.current = false;}
   };
   const send = async (value = composerText, mode = 'queue') => {
+    if (chatTab !== 'edit') return;
     if (picker && !answering) return;
-    if (busy || importPending || (!value.trim() && !answer && (!uploads.length || answering))) return;
+    if (busy || importPending) return;
+    const sentReferences = workflowReferences(value, references);
+    const sentWorkflow = sentReferences.find(row => row.kind === 'workflow');
+    if (!answering) {
+      const problem = workflowProblem(sentReferences, projectId);
+      if (problem) {setError(problem); return;}
+    }
+    if (!value.trim() && !answer && (answering || (!uploads.length && !sentWorkflow))) return;
+    const message = sentWorkflow ? value.trim() || `/${sentWorkflow.id}` : composerMessage(value, composerChoice);
     if (!selected) {
       setBusy(true); setError('');
       try {
-        const result = await api('/api/requests', {method: 'POST', body: JSON.stringify({message: composerMessage(value, composerChoice), attachments: uploads.map(u => u.id), context: toContext(references)})});
+        const result = await api('/api/requests', {method: 'POST', body: JSON.stringify({message, attachments: uploads.map(u => u.id), context: toContext(sentReferences)})});
         const id = result.request?.id || result.request_id || (typeof result.request === 'string' ? result.request : result.id);
         adoptComposerChoice(id);
         selection.current = id; setSelected(id); setText(previous => previous.trim() === value.trim() ? '' : previous); setUploads(previous => previous.filter(item => !uploads.some(sent => sent.id === item.id))); location.hash = id; await refresh(id);
@@ -743,7 +771,7 @@ function App() {
     }
     const isAnswer = answering && (answer || value.trim());
     const delivery = mode === 'queue' && data?.paused && !active && queue.length === 0 ? 'now' : mode;
-    const result = await mutate(isAnswer ? '/answers' : '/messages', isAnswer ? {ticket: question.id, option: answer || null, text: value.trim(), mode: delivery} : {message: composerMessage(value, composerChoice), mode: delivery, attachments: uploads.map(u => u.id), context: toContext(references)});
+    const result = await mutate(isAnswer ? '/answers' : '/messages', isAnswer ? {ticket: question.id, option: answer || null, text: value.trim(), mode: delivery} : {message, mode: delivery, attachments: uploads.map(u => u.id), context: toContext(sentReferences)});
     if (result && !isAnswer) setReferences(previous => previous.filter(r => !references.some(sent => sent.kind === r.kind && sent.id === r.id)));
     if (result) {if (isAnswer) {setQuestionDrafts(prev => ({...prev, [question.id]: (prev[question.id] || '').trim() === value.trim() ? '' : prev[question.id]})); setAnswers(prev => ({...prev, [question.id]: prev[question.id] === answer ? null : prev[question.id]}));} else {setText(previous => previous.trim() === value.trim() ? '' : previous); setUploads(previous => previous.filter(item => !uploads.some(sent => sent.id === item.id)));} setIsNearBottom(true);}
     if (result?.delivery === 'waiting_tool') setInfo('Answer delivered to the waiting agent.');
@@ -831,34 +859,43 @@ function App() {
           onPaste=${e => {const files = [...(e.clipboardData?.files || [])].filter(file => file.type.startsWith('image/')); if (files.length) {e.preventDefault(); upload(files);}}}
           onKeyUp=${e => {if (e.target === composer.current && !['Escape', 'Enter', 'Tab', 'ArrowUp', 'ArrowDown'].includes(e.key)) syncPicker();}}
           onClick=${e => {if (e.target === composer.current) syncPicker();}}>
-          ${picker && !answering && html`<div className="reference-dropup" aria-label=${picker.kind === 'skill' ? 'Available skills' : 'Workspace paths'}>
-            <div className="reference-heading"><span>${picker.kind === 'skill' ? 'Features · Skills' : 'Files and folders'}</span><span className="caption">↑ ↓ to choose · Enter to add</span></div>
-            <div id="composer-reference-options" role="listbox" aria-label=${picker.kind === 'skill' ? 'Choose a skill' : 'Choose a file or folder'} aria-busy=${featuresLoading}>
+          ${picker && !answering && chatTab === 'edit' && html`<div className="reference-dropup" aria-label=${picker.kind === 'workflow' ? 'Available workflows' : picker.kind === 'skill' ? 'Available skills' : 'Workspace paths'}>
+            <div className="reference-heading"><span>${picker.kind === 'workflow' ? 'Workflows' : picker.kind === 'skill' ? 'Features · Skills' : 'Files and folders'}</span><span className="caption">↑ ↓ to choose · Enter to add</span></div>
+            ${picker.source === 'button' && html`<input ref=${workflowSearch} className="workflow-search" type="text" role="combobox" aria-label="Search workflows"
+              aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="true" aria-controls="composer-reference-options"
+              aria-activedescendant=${options.length ? `reference-option-${Math.min(pickIndex, options.length - 1)}` : undefined}
+              value=${picker.query} placeholder="Search workflows…" onChange=${e => {setPicker(previous => previous && {...previous, query: e.target.value}); setPickIndex(0);}}/>`}
+            <div id="composer-reference-options" role="listbox" aria-label=${picker.kind === 'workflow' ? 'Choose a workflow' : picker.kind === 'skill' ? 'Choose a skill' : 'Choose a file or folder'} aria-busy=${featuresLoading}>
               ${options.map((option, i) => html`<button key=${`${option.kind}:${option.id}`} id=${`reference-option-${i}`} role="option" tabIndex="-1" aria-selected=${i === Math.min(pickIndex, options.length - 1)}
                 className=${`reference-option ${i === Math.min(pickIndex, options.length - 1) ? 'highlighted' : ''}`} onMouseDown=${e => e.preventDefault()} onClick=${() => pick(option)}>
-                <${Icon} name=${option.kind === 'skill' ? 'sparkles' : option.kind === 'file' ? 'file' : 'folder'} size=${16}/><span><strong title=${option.name}>${['file', 'folder'].includes(option.kind) ? displayPath(option.name) : option.name}</strong><span>${option.description}</span></span><//>`)}
-              ${!referenceOptions.length && html`<p className="reference-empty" role="status">${featuresLoading ? 'Finding references…' : featuresError || (picker.kind === 'path' && !selected ? 'Import a local path to start a workspace, or choose an existing conversation.' : 'No matching references. Try a more specific path.')}</p>`}
-            </div><div className="reference-footer">${picker.kind === 'skill' ? 'Choose a skill, then describe what you want to do.' : 'A folder includes all its files as one reference. The agent reads them as needed. Use @"work/folder name" for spaces.'}${features.paths_truncated && picker.kind === 'path' ? ' More paths available; refine your search.' : ''}
+                <${Icon} name=${['skill', 'workflow'].includes(option.kind) ? 'sparkles' : option.kind === 'file' ? 'file' : 'folder'} size=${16}/><span><strong title=${option.name}>${['file', 'folder'].includes(option.kind) ? displayPath(option.name) : option.name}</strong>${option.kind === 'workflow' && html`<span>${option.command || `/${option.id}`}</span>`}<span>${option.description}</span></span><//>`)}
+              ${!referenceOptions.length && html`<p className="reference-empty" role="status">${featuresLoading ? 'Finding references…' : featuresError || (picker.kind === 'workflow' ? (workflow ? 'Workflow already selected. Remove its chip to choose again.' : 'No matching workflows. Try another search.') : picker.kind === 'path' && !selected ? 'Import a local path to start a workspace, or choose an existing conversation.' : 'No matching references. Try a more specific path.')}</p>`}
+            </div><div className="reference-footer">${picker.kind === 'workflow' ? 'Build brand context: tag a folder in a project conversation. A subagent builds shared brand memory for the project.' : picker.kind === 'skill' ? 'Choose a skill, then describe what you want to do.' : 'A folder includes all its files as one reference. The agent reads them as needed. Use @"work/folder name" for spaces.'}${features.paths_truncated && picker.kind === 'path' ? ' More paths available; refine your search.' : ''}
             </div>
           </div>`}
           ${!answering && references.length > 0 && html`<div className="reference-chips" role="group" aria-label="Selected references">${references.map(r => html`<span className="reference-chip" key=${`${r.kind}:${r.id}`}>
-            <${Icon} name=${r.kind === 'skill' ? 'sparkles' : r.kind === 'plugin' ? 'library' : r.kind === 'file' ? 'file' : 'folder'} size=${13}/><${Tooltip} content=${r.name}><span title=${r.name}>${r.kind === 'skill' ? `/features ${r.name}` : r.kind === 'plugin' ? r.name : `@${displayPath(r.name)}`}</span><//>
+            <${Icon} name=${['skill', 'workflow'].includes(r.kind) ? 'sparkles' : r.kind === 'plugin' ? 'library' : r.kind === 'file' ? 'file' : 'folder'} size=${13}/><${Tooltip} content=${r.name}><span title=${r.name}>${r.kind === 'workflow' ? `Workflow: ${r.name}` : r.kind === 'skill' ? `/features ${r.name}` : r.kind === 'plugin' ? r.name : `@${displayPath(r.name)}`}</span><//>
             <${IconButton} name="x" label=${`Remove ${r.name}`} onClick=${() => setReferences(prev => prev.filter(x => x.kind !== r.kind || x.id !== r.id))}/></span>`)}</div>`}
           <${Composer} ref=${composer} value=${composerText} onValueChange=${setComposerText} onSend=${value => send(value)} working=${!!active}
-            canSend=${!busy && !importPending && (!picker || answering) && (!!composerText.trim() || !!answer || (!answering && uploads.length > 0))} onStop=${active?.can_stop === false ? undefined : () => mutate('/stop')} onAttach=${answering || busy || importPending ? undefined : () => fileInput.current?.click()}
+            canSend=${canSend} onStop=${active?.can_stop === false ? undefined : () => mutate('/stop')} onAttach=${answering || busy || importPending ? undefined : () => fileInput.current?.click()}
             label=${answering ? 'Your answer to the selected question' : 'Message the agent'}
             placeholder=${answering ? 'Choose an option, or write your answer…' : active ? 'Write a new instruction…' : selected ? 'What would you like to change?' : 'Describe a video or paste a Figma link…'}
             question=${questions.length ? html`<${QuestionQueue} questions=${questions} index=${qIndex} setIndex=${setQIndex} answer=${answers[question.id]} setAnswer=${value => {setAnswers(prev => ({...prev, [question.id]: value})); setQuestionModes(prev => ({...prev, [question.id]: 'answer'}));}} hidden=${questionsHidden} setHidden=${setQuestionsHidden} answering=${answering} onMode=${mode => {setQuestionModes(prev => ({...prev, [question.id]: mode})); setPicker(null); composer.current?.focus();}}/>` : undefined}
-            attachments=${uploads.length ? html`<div className="staged-files">${uploads.map(u => html`<span className="staged-file" key=${u.id}>${u.kind === 'image' && u.url ? html`<img className="staged-image" src=${u.url} alt=""/>` : html`<${Icon} name="file" size=${14}/>`}${u.name}<${IconButton} name="x" label=${`Remove ${u.name}`} onClick=${() => setUploads(prev => prev.filter(x => x.id !== u.id))}/></span>`)}</div>` : answer ? html`<span className="selected-answer"><${Icon} name="check" size=${12}/> Answer selected. Send to confirm.</span>` : undefined}
+            attachments=${uploads.length || (!answering && workflow) ? html`<div className="composer-staged-context">
+              ${!answering && workflow && html`<p className="workflow-guidance" id="composer-workflow-guidance" role="status">${workflowError || 'Ready to build shared brand memory from the tagged folder. Send to start; an extra message is optional.'}</p>`}
+              ${uploads.length > 0 && html`<div className="staged-files">${uploads.map(u => html`<span className="staged-file" key=${u.id}>${u.kind === 'image' && u.url ? html`<img className="staged-image" src=${u.url} alt=""/>` : html`<${Icon} name="file" size=${14}/>`}${u.name}<${IconButton} name="x" label=${`Remove ${u.name}`} onClick=${() => setUploads(prev => prev.filter(x => x.id !== u.id))}/></span>`)}</div>`}</div>` : answer ? html`<span className="selected-answer"><${Icon} name="check" size=${12}/> Answer selected. Send to confirm.</span>` : undefined}
             className="workbench-composer"/>
-          ${!answering && chatTab === 'edit' && html`<${ComposerControls} key=${selected || 'new'} api=${api} preference=${composerChoice} onChange=${setComposerChoice} disabled=${busy || importPending}/>`}
+          ${!answering && chatTab === 'edit' && html`<div className="workflow-entry"><button ref=${workflowButton} className="workflow-trigger" type="button" aria-label="Workflows" aria-haspopup="listbox"
+            aria-expanded=${picker?.kind === 'workflow'} aria-controls=${picker?.kind === 'workflow' ? 'composer-reference-options' : undefined}
+            disabled=${busy || importPending} onClick=${openWorkflows}><${Icon} name="sparkles" size=${14}/>Workflows</button></div>`}
+          ${!answering && chatTab === 'edit' && !workflow && html`<${ComposerControls} key=${selected || 'new'} api=${api} preference=${composerChoice} onChange=${setComposerChoice} disabled=${busy || importPending}/>`}
           <div className="composer-footer"><div className="composer-model"><${ModelControl} api=${api} requestId=${selected} onNotice=${notice => {if (notice.tone === 'error') setError(notice.text); else setInfo(notice.text);}}/><${IntegrationsControl} api=${api} disabled=${answering || busy} selected=${references.filter(r => r.kind === 'plugin')} onToggle=${item => {
               if (!references.some(r => r.kind === 'plugin' && r.id === item.id) && references.length >= referenceLimit) {setError(`Choose up to ${referenceLimit} references. Select a folder to include its files as one reference.`); return;}
               setReferences(previous => previous.some(r => r.kind === 'plugin' && r.id === item.id) ? previous.filter(r => r.kind !== 'plugin' || r.id !== item.id) : [...previous,item]);
             }}/>${(active || waitingForAnswer) && html`<span className="queue-label">${waitingForAnswer ? 'Send answers now' : answering ? 'Send queues answer' : 'Send queues instruction'}</span>`}</div>
-            <div className="composer-footer-actions"><${SteeringAction} active=${active} answering=${answering} waiting=${waitingForAnswer} disabled=${busy || importPending || (picker && !answering) || (!composerText.trim() && !answer && (!uploads.length || answering))} onSend=${() => send(composerText, 'now')}/>
+            <div className="composer-footer-actions"><${SteeringAction} active=${active} answering=${answering} waiting=${waitingForAnswer} disabled=${!canSend} onSend=${() => send(composerText, 'now')}/>
               <${ContextUsage} usage=${data?.usage} active=${active} pending=${queue.length > 0} compact=${compact} busy=${compactBusy}/></div></div>
-        </div><div className="composer-help"><span>${busy ? 'Saving…' : answering ? `${waitingForAnswer ? 'Send resumes the waiting agent immediately.' : active ? (active.can_stop === false ? 'Send queues your answer behind the terminal turn.' : 'Send queues your answer. Answer now stops the turn and continues with your answer.') : 'Send continues with your answer.'}${uploads.length ? ' Attached files stay staged for New instruction.' : ''}` : active ? (active.can_stop === false ? 'This turn is running in a terminal. Your instruction will queue.' : 'Send now stops the current turn and continues with your instruction.') : 'Enter to send · Shift + Enter for a new line'}</span><span>${selected ? 'Changes stay in this conversation' : 'Source video optional'}</span></div></div></div>
+        </div><div className="composer-help"><span>${busy ? 'Saving…' : answering ? `${waitingForAnswer ? 'Send resumes the waiting agent immediately.' : active ? (active.can_stop === false ? 'Send queues your answer behind the terminal turn.' : 'Send queues your answer. Answer now stops the turn and continues with your answer.') : 'Send continues with your answer.'}${uploads.length ? ' Attached files stay staged for New instruction.' : ''}` : active ? (active.can_stop === false ? 'This turn is running in a terminal. Your instruction will queue.' : 'Send now stops the current turn and continues with your instruction.') : 'Enter to send · Shift + Enter for a new line'}</span><span>${workflow && !answering ? 'Brand memory is shared with this project' : selected ? 'Changes stay in this conversation' : 'Source video optional'}</span></div></div></div>
         <input ref=${fileInput} className="visually-hidden" type="file" multiple onChange=${e => {upload([...e.target.files]); e.target.value = '';}} aria-label="Attach files"/>
         <//>
         <${TabPanel} value="qc" forceMount hidden=${chatTab !== 'qc'} className="chat-mode-panel">

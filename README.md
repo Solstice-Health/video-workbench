@@ -19,6 +19,7 @@ vwb chat -i -r <request-id>      # keep talking to the same agent: "make short-0
 ```
 
 ## What is in this build (v0 slice)
+- **Shared project memory**: tag brand folders and run `/brand-context` or choose **Workflows → Build brand context**. A restricted specialist drafts cited rules and references; the lead reviews and publishes memory for every conversation in the project. See [workflow and memory design](docs/PROJECT_MEMORY.md).
 - **Edit index**: shots, a two-reader transcript with word-level consensus, two-reader OCR text tracks with roles
   (claims, footnotes, job codes, usage terms), faces, saliency, layout blocks, audio facts, two whole-video readings
   (Gemini and GPT), hazards and brand marks, in one SQLite evidence store with a compact dossier.

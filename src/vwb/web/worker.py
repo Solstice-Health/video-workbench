@@ -53,7 +53,9 @@ def main() -> int:
                           attach=[Path(p) for p in job.get("attachments", [])],
                           attachment_refs=job.get("attachment_refs"),
                           skip_index=job.get("skip_index", True), context=job.get("context"),
-                          main_config=job.get("main_config"), resume_message=job.get("resume_message"))
+                          main_config=job.get("main_config"), resume_message=job.get("resume_message"),
+                          **({'workflow_origin': job.get('workflow_origin', job['id'])}
+                             if job.get('context', {}).get('workflows') else {}))
         write_json(result_path, {"status": "completed", "result": result})
         return 0
     except KeyboardInterrupt:
